@@ -29,7 +29,7 @@ build/obj/hal_pal.o: third_party/ChibiOS/os/hal/src/hal_pal.c \
  third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h \
  third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h \
  third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h \
- third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h \
+ third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h \
@@ -65,8 +65,8 @@ build/obj/hal_pal.o: third_party/ChibiOS/os/hal/src/hal_pal.c \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdarg.h \
  third_party/ChibiOS/os/oslib/include/chjobs.h \
  third_party/ChibiOS/os/oslib/include/chfactory.h \
- third_party/ChibiOS/os/rt/include/chdynamic.h board/board.h \
- cfg/halconf.h cfg/mcuconf.h \
+ third_party/ChibiOS/os/rt/include/chdynamic.h \
+ boards/CubeOrangePlus/board.h cfg/halconf.h cfg/mcuconf.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/stm32_registry.h \
  third_party/ChibiOS/os/hal/ports/common/ARMCMx/nvic.h \
@@ -97,6 +97,7 @@ build/obj/hal_pal.o: third_party/ChibiOS/os/hal/src/hal_pal.c \
  third_party/ChibiOS/os/hal/ports/STM32/LLD/GPIOv2/stm32_gpio.h \
  third_party/ChibiOS/os/hal/include/hal_adc.h \
  third_party/ChibiOS/os/hal/include/hal_can.h \
+ third_party/ChibiOS/os/hal/ports/STM32/LLD/FDCANv1/hal_can_lld.h \
  third_party/ChibiOS/os/hal/include/hal_crypto.h \
  third_party/ChibiOS/os/hal/include/hal_dac.h \
  third_party/ChibiOS/os/hal/include/hal_efl.h \
@@ -109,9 +110,13 @@ build/obj/hal_pal.o: third_party/ChibiOS/os/hal/src/hal_pal.c \
  third_party/ChibiOS/os/hal/include/hal_pwm.h \
  third_party/ChibiOS/os/hal/include/hal_rtc.h \
  third_party/ChibiOS/os/hal/include/hal_serial.h \
+ third_party/ChibiOS/os/hal/ports/STM32/LLD/USARTv3/hal_serial_lld.h \
+ third_party/ChibiOS/os/hal/ports/STM32/LLD/USARTv3/stm32_usart.h \
  third_party/ChibiOS/os/hal/include/hal_sdc.h \
  third_party/ChibiOS/os/hal/include/hal_sio.h \
  third_party/ChibiOS/os/hal/include/hal_spi.h \
+ third_party/ChibiOS/os/hal/include/hal_spi_v1.h \
+ third_party/ChibiOS/os/hal/ports/STM32/LLD/SPIv3/hal_spi_lld.h \
  third_party/ChibiOS/os/hal/include/hal_trng.h \
  third_party/ChibiOS/os/hal/include/hal_uart.h \
  third_party/ChibiOS/os/hal/include/hal_usb.h \
@@ -153,7 +158,7 @@ third_party/ChibiOS/os/rt/include/chport.h:
 third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h:
 third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h:
 third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h:
-third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h:
+third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h:
@@ -190,7 +195,7 @@ third_party/ChibiOS/os/oslib/include/chdelegates.h:
 third_party/ChibiOS/os/oslib/include/chjobs.h:
 third_party/ChibiOS/os/oslib/include/chfactory.h:
 third_party/ChibiOS/os/rt/include/chdynamic.h:
-board/board.h:
+boards/CubeOrangePlus/board.h:
 cfg/halconf.h:
 cfg/mcuconf.h:
 third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h:
@@ -223,6 +228,7 @@ third_party/ChibiOS/os/hal/ports/STM32/LLD/GPIOv2/hal_pal_lld.h:
 third_party/ChibiOS/os/hal/ports/STM32/LLD/GPIOv2/stm32_gpio.h:
 third_party/ChibiOS/os/hal/include/hal_adc.h:
 third_party/ChibiOS/os/hal/include/hal_can.h:
+third_party/ChibiOS/os/hal/ports/STM32/LLD/FDCANv1/hal_can_lld.h:
 third_party/ChibiOS/os/hal/include/hal_crypto.h:
 third_party/ChibiOS/os/hal/include/hal_dac.h:
 third_party/ChibiOS/os/hal/include/hal_efl.h:
@@ -235,9 +241,13 @@ third_party/ChibiOS/os/hal/include/hal_mac.h:
 third_party/ChibiOS/os/hal/include/hal_pwm.h:
 third_party/ChibiOS/os/hal/include/hal_rtc.h:
 third_party/ChibiOS/os/hal/include/hal_serial.h:
+third_party/ChibiOS/os/hal/ports/STM32/LLD/USARTv3/hal_serial_lld.h:
+third_party/ChibiOS/os/hal/ports/STM32/LLD/USARTv3/stm32_usart.h:
 third_party/ChibiOS/os/hal/include/hal_sdc.h:
 third_party/ChibiOS/os/hal/include/hal_sio.h:
 third_party/ChibiOS/os/hal/include/hal_spi.h:
+third_party/ChibiOS/os/hal/include/hal_spi_v1.h:
+third_party/ChibiOS/os/hal/ports/STM32/LLD/SPIv3/hal_spi_lld.h:
 third_party/ChibiOS/os/hal/include/hal_trng.h:
 third_party/ChibiOS/os/hal/include/hal_uart.h:
 third_party/ChibiOS/os/hal/include/hal_usb.h:

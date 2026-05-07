@@ -1,4 +1,42 @@
 ##############################################################################
+# BPRL Flight Controller — ChibiOS Makefile
+#
+# Usage:
+#   make BOARD=CubeBlueH7          (default)
+#   make BOARD=CubeOrangePlus
+#   make flash  BOARD=CubeBlueH7   PORT=/dev/ttyACM0   (Cube bootloader)
+#   make flash-stlink BOARD=CubeBlueH7                  (ST-Link / OpenOCD)
+#
+# Debug UART (USART3 @ 115200, Telem1 connector):
+#   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
+#   (Disable before flight — adds a 10 Hz print thread)
+#
+
+##############################################################################
+# Board selection
+#
+
+BOARD ?= CubeBlueH7
+
+BOARDDIR := boards/$(BOARD)
+
+ifeq ($(BOARD), CubeBlueH7)
+  BOARD_UDEFS = -DSTM32H753xx -DSTM32_ENFORCE_H7_REV_XY
+else ifeq ($(BOARD), CubeOrangePlus)
+  BOARD_UDEFS = -DSTM32H743xx
+else
+  $(error Unknown BOARD="$(BOARD)". Valid values: CubeBlueH7, CubeOrangePlus)
+endif
+
+##############################################################################
+# Flash / upload targets  (defined after 'all' so bare 'make' builds only)
+#
+
+PORT            ?= /dev/ttyACM0
+UPLOAD_SCRIPT   := tools/flash_upload.py
+OPENOCD_CFG     := -f interface/stlink.cfg -f target/stm32h7x.cfg
+
+##############################################################################
 # Build global options
 #
 
@@ -35,20 +73,18 @@ ifeq ($(USE_SMART_BUILD),)
 endif
 
 ##############################################################################
-# Architecture or project specific options
+# Architecture / project specific options
 #
 
-# Main thread process stack size
 ifeq ($(USE_PROCESS_STACKSIZE),)
   USE_PROCESS_STACKSIZE = 0x800
 endif
 
-# IRQ/exceptions stack size
 ifeq ($(USE_EXCEPTIONS_STACKSIZE),)
   USE_EXCEPTIONS_STACKSIZE = 0x800
 endif
 
-# STM32H753 has a double-precision FPU - always use hard float
+# STM32H7 has a double-precision FPU — always use hard float
 ifeq ($(USE_FPU),)
   USE_FPU = hard
 endif
@@ -61,59 +97,47 @@ endif
 # Project, target, sources and paths
 #
 
-PROJECT = ch
+PROJECT = BPRL
 
-# Cortex-M7 core
 MCU = cortex-m7
 
-# Path to pinned ChibiOS submodule
 CHIBIOS  := third_party/ChibiOS
-
-# Config headers live in cfg/
 CONFDIR  := cfg
-
-# Board files live in board/
-BOARDDIR := board
-
 BUILDDIR := build
 DEPDIR   := .dep
 
-# Licensing files
+# ChibiOS includes
 include $(CHIBIOS)/os/license/license.mk
-# Startup files for STM32H7xx
 include $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk/startup_stm32h7xx.mk
-# HAL
 include $(CHIBIOS)/os/hal/hal.mk
 include $(CHIBIOS)/os/hal/ports/STM32/STM32H7xx/platform.mk
-# Board files - use our own instead of the Nucleo board
 include $(BOARDDIR)/board.mk
-# OSAL
 include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
-# RTOS
 include $(CHIBIOS)/os/rt/rt.mk
 include $(CHIBIOS)/os/common/ports/ARMv7-M/compilers/GCC/mk/port.mk
-# Auto-build sources in ./src recursively (create this dir for your code)
-# include $(CHIBIOS)/tools/mk/autobuild.mk
+include $(CHIBIOS)/os/hal/lib/streams/streams.mk
 
-# Linker script - H743 and H753 have identical flash/RAM layout
+# H743 and H753 have identical flash/RAM layout
 LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
 
 # C sources
 CSRC = $(ALLCSRC) \
-       $(BOARDDIR)/board.c \
-       main.c
+       $(BOARDDIR)/board.c
 
 # C++ sources
-CPPSRC = $(ALLCPPSRC)
+CPPSRC = $(ALLCPPSRC) \
+         main.cpp \
+         src/PID.cpp \
+         src/AttitudeController.cpp \
+         src/MotorMixer.cpp
 
-# ASM sources
 ASMSRC  = $(ALLASMSRC)
 ASMXSRC = $(ALLXASMSRC)
 
-# Include paths - cfg/ provides chconf.h, halconf.h, mcuconf.h
+# Include paths: cfg/ provides chconf.h, halconf.h, mcuconf.h
+# BOARDDIR provides board.h
 INCDIR = $(CONFDIR) $(BOARDDIR) $(ALLINC)
 
-# Warnings
 CWARN   = -Wall -Wextra -Wundef -Wstrict-prototypes
 CPPWARN = -Wall -Wextra -Wundef
 
@@ -121,12 +145,8 @@ CPPWARN = -Wall -Wextra -Wundef
 # User defines
 #
 
-# STM32H753 is a Rev-XY silicon variant of the H7 family.
-# STM32_ENFORCE_H7_REV_XY enables workarounds for this revision.
-# Keep this unless you are sure you have a newer silicon rev.
-UDEFS = -DSTM32H753xx \
-        -DSTM32_ENFORCE_H7_REV_XY
-
+# Board-specific MCU variant + optional debug flag
+UDEFS   = $(BOARD_UDEFS) $(UDEFS_EXTRA)
 UADEFS  =
 UINCDIR =
 ULIBDIR =
@@ -139,3 +159,16 @@ ULIBS   =
 RULESPATH = $(CHIBIOS)/os/common/startup/ARMCMx/compilers/GCC/mk
 include $(RULESPATH)/arm-none-eabi.mk
 include $(RULESPATH)/rules.mk
+
+##############################################################################
+# Upload targets (after ChibiOS rules so 'all' is the default target)
+#
+
+flash: all
+	python3 $(UPLOAD_SCRIPT) --port $(PORT) build/$(PROJECT).bin
+
+flash-stlink: all
+	openocd $(OPENOCD_CFG) \
+	    -c "program build/$(PROJECT).hex verify reset exit"
+
+.PHONY: flash flash-stlink

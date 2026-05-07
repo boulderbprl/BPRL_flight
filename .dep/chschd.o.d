@@ -27,7 +27,7 @@ build/obj/chschd.o: third_party/ChibiOS/os/rt/src/chschd.c \
  third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h \
  third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h \
  third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h \
- third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h \
+ third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h \
@@ -93,7 +93,7 @@ third_party/ChibiOS/os/rt/include/chport.h:
 third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h:
 third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h:
 third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h:
-third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h:
+third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h:
