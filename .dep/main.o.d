@@ -132,7 +132,8 @@ build/obj/main.o: main.cpp third_party/ChibiOS/os/rt/include/ch.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/cpu_defines.h \
- src/MotorMixer.hpp src/FlightState.hpp \
+ src/MotorMixer.hpp src/FlightState.hpp src/imu/ICM20948.hpp \
+ src/imu/ICM20602.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h \
@@ -296,6 +297,8 @@ src/PID.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/cpu_defines.h:
 src/MotorMixer.hpp:
 src/FlightState.hpp:
+src/imu/ICM20948.hpp:
+src/imu/ICM20602.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h:

@@ -62,6 +62,8 @@
 #include "src/AttitudeController.hpp"
 #include "src/MotorMixer.hpp"
 #include "src/FlightState.hpp"
+#include "src/imu/ICM20948.hpp"
+#include "src/imu/ICM20602.hpp"
 #include <cstring>
 #include <cmath>
 
@@ -191,6 +193,55 @@ static void radio_input_update(void)
 static AttitudeController att_ctrl;
 static MotorMixer         mixer;
 
+/* ── SPI configurations ──────────────────────────────────────────────────────
+ * SPI1 kernel clock = PLL1_Q = 50 MHz (STM32_SPI123SEL_PLL1_Q_CK, DIVQ=16)
+ *   Init  speed: MBR_DIV64  → 50/64  ≈ 781 kHz
+ *   Fast  speed: MBR_DIV8   → 50/8   = 6.25 MHz
+ *
+ * SPI4 kernel clock = PCLK2 = 100 MHz (STM32_SPI45SEL_PCLK2, D2PPRE2=/2)
+ *   Init  speed: MBR_DIV128 → 100/128 ≈ 781 kHz
+ *   Fast  speed: MBR_DIV16  → 100/16  = 6.25 MHz
+ *
+ * Both ICM sensors use SPI Mode 3 (CPOL=1, CPHA=1), 8-bit data.
+ * Fields: {circular, slave, data_cb, error_cb, ssport, sspad, cfg1, cfg2,
+ *          dummytx, dummyrx}                                                */
+
+// SPIConfig v1 field order: {circular, end_cb, ssport, sspad, cfg1, cfg2}
+// IMU1: ICM-20948 primary — SPI1, CS = PC2
+static const SPIConfig imu1_spi_init = {
+    false, nullptr, GPIOC, 2U,
+    SPI_CFG1_MBR_DIV64  | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+static const SPIConfig imu1_spi_fast = {
+    false, nullptr, GPIOC, 2U,
+    SPI_CFG1_MBR_DIV8   | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+
+// IMU2: ICM-20948 ext — SPI4, CS = PE4
+static const SPIConfig imu2_spi_init = {
+    false, nullptr, GPIOE, 4U,
+    SPI_CFG1_MBR_DIV128 | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+static const SPIConfig imu2_spi_fast = {
+    false, nullptr, GPIOE, 4U,
+    SPI_CFG1_MBR_DIV16  | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+
+// IMU3: ICM-20602 — SPI4, CS = PC13
+static const SPIConfig imu3_spi_init = {
+    false, nullptr, GPIOC, 13U,
+    SPI_CFG1_MBR_DIV128 | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+static const SPIConfig imu3_spi_fast = {
+    false, nullptr, GPIOC, 13U,
+    SPI_CFG1_MBR_DIV16  | SPI_CFG1_DSIZE_VALUE(7), SPI_CFG2_CPOL | SPI_CFG2_CPHA
+};
+
+/* ── IMU driver instances (static → in AXI SRAM, DMA-safe member buffers) ───*/
+static ICM20948 imu1;  // primary   (SPI1, PC2)
+static ICM20948 imu2;  // ext       (SPI4, PE4)
+static ICM20602 imu3;  // secondary (SPI4, PC13)
+
 /* ── Thread stacks ───────────────────────────────────────────────────────────*/
 static THD_WORKING_AREA(waSPI,       2048);
 static THD_WORKING_AREA(waCAN,       2048);
@@ -220,20 +271,42 @@ static THD_FUNCTION(SPIThread, arg)
 {
     (void)arg;
     chRegSetThreadName("spi");
+
+    // Initialise all three on-board IMUs.  Failures are non-fatal: the
+    // corresponding g_imu[n].valid stays false and StateEstThread ignores it.
+    imu1.init(&SPID1, &imu1_spi_init, &imu1_spi_fast);
+    imu2.init(&SPID4, &imu2_spi_init, &imu2_spi_fast);
+    imu3.init(&SPID4, &imu3_spi_init, &imu3_spi_fast);
+
     systime_t next             = chVTGetSystemTime();
     const sysinterval_t period = TIME_US2I(1000); // 1 kHz
 
     while (true) {
-        // TODO: call IMU driver read functions here.
-        // Example (once ICM20602 driver is written in src/imu/):
-        //   float a[3], g[3];
-        //   if (icm[0].read(a, g)) {
-        //       chMtxLock(&imu_mtx);
-        //       memcpy(g_imu[0].accel, a, sizeof(a));
-        //       memcpy(g_imu[0].gyro,  g, sizeof(g));
-        //       g_imu[0].valid = true;
-        //       chMtxUnlock(&imu_mtx);
-        //   }
+        float a[3], g[3];
+
+        if (imu1.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            memcpy(g_imu[0].accel, a, sizeof(a));
+            memcpy(g_imu[0].gyro,  g, sizeof(g));
+            g_imu[0].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+
+        if (imu2.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            memcpy(g_imu[1].accel, a, sizeof(a));
+            memcpy(g_imu[1].gyro,  g, sizeof(g));
+            g_imu[1].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+
+        if (imu3.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            memcpy(g_imu[2].accel, a, sizeof(a));
+            memcpy(g_imu[2].gyro,  g, sizeof(g));
+            g_imu[2].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }

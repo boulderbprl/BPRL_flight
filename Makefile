@@ -129,7 +129,9 @@ CPPSRC = $(ALLCPPSRC) \
          main.cpp \
          src/PID.cpp \
          src/AttitudeController.cpp \
-         src/MotorMixer.cpp
+         src/MotorMixer.cpp \
+         src/imu/ICM20948.cpp \
+         src/imu/ICM20602.cpp
 
 ASMSRC  = $(ALLASMSRC)
 ASMXSRC = $(ALLXASMSRC)
