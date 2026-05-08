@@ -82,6 +82,8 @@ int main(void)
         /* .radio   = */ TIME_MS2I(20),    // RadioThread      50 Hz  (14 ms for SBUS)
         /* .house   = */ TIME_MS2I(200),   // HouseThread       5 Hz
         /* .debug   = */ TIME_MS2I(100),   // DebugThread      10 Hz  [BPRL_DEBUG only]
+        /* .log     = */ { TIME_US2I(10000),  // LogThread IMU    100 Hz
+                           TIME_US2I(20000) },// LogThread state   50 Hz
     };
 
     threads_start(kRates);

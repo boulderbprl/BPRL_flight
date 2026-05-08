@@ -18,6 +18,8 @@
 #include "src/coms/Radio.hpp"
 #include "src/controllers/AttitudeController.hpp"
 #include "src/controllers/MotorMixer.hpp"
+#include "src/logging/Logger.hpp"
+#include "src/logging/LogMessages.hpp"
 #include "chprintf.h"
 #include <cstring>
 
@@ -47,6 +49,7 @@ static THD_WORKING_AREA(waI2C,      1024);
 static THD_WORKING_AREA(waControl,  2048);
 static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHouse,    1024);
+static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    1024);
 #endif
@@ -255,7 +258,6 @@ static THD_FUNCTION(HouseThread, arg)
     systime_t next = chVTGetSystemTime();
     while (true) {
         palToggleLine(LINE_LED_ACTIVITY);
-        // TODO: flush SD card log buffer (Logger::flush())
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
@@ -298,6 +300,87 @@ static THD_FUNCTION(DebugThread, arg)
 }
 #endif // BPRL_DEBUG
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * LogThread — 100 Hz IMU / 50 Hz state  NORMALPRIO-15
+ * Snapshots g_imu[] and g_state[], buffers to ring, flushes to SD card.
+ * Retries logger.init() every 5 s until an SD card is inserted.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(LogThread, arg)
+{
+    chRegSetThreadName("log");
+    const LogRates *rates = static_cast<const LogRates *>(arg);
+
+    /* state_div: log state every Nth IMU tick (e.g. 2 for 50 Hz when IMU = 100 Hz) */
+    const uint32_t state_div = (rates->state > 0) ?
+                               (uint32_t)(rates->imu / rates->state) : 1U;
+
+    /* Retry until SD card is inserted and mounted. */
+    while (!logger.init()) {
+        chThdSleepMilliseconds(5000);
+    }
+
+    systime_t next = chVTGetSystemTime();
+    uint32_t  tick = 0U;
+
+    while (true) {
+        const uint32_t t_ms = TIME_I2MS(chVTGetSystemTime());
+
+        /* ── IMU snapshot (every tick → 100 Hz) ───────────────────────── */
+        {
+            LogMsgIMU msg = {};
+            msg.time_ms = t_ms;
+
+            chMtxLock(&imu_mtx);
+            msg.ax0 = g_imu[0].accel[0]; msg.ay0 = g_imu[0].accel[1]; msg.az0 = g_imu[0].accel[2];
+            msg.gx0 = g_imu[0].gyro[0];  msg.gy0 = g_imu[0].gyro[1];  msg.gz0 = g_imu[0].gyro[2];
+            msg.valid0 = (uint8_t)g_imu[0].valid;
+            msg.ax1 = g_imu[1].accel[0]; msg.ay1 = g_imu[1].accel[1]; msg.az1 = g_imu[1].accel[2];
+            msg.gx1 = g_imu[1].gyro[0];  msg.gy1 = g_imu[1].gyro[1];  msg.gz1 = g_imu[1].gyro[2];
+            msg.valid1 = (uint8_t)g_imu[1].valid;
+            msg.ax2 = g_imu[2].accel[0]; msg.ay2 = g_imu[2].accel[1]; msg.az2 = g_imu[2].accel[2];
+            msg.gx2 = g_imu[2].gyro[0];  msg.gy2 = g_imu[2].gyro[1];  msg.gz2 = g_imu[2].gyro[2];
+            msg.valid2 = (uint8_t)g_imu[2].valid;
+            chMtxUnlock(&imu_mtx);
+
+            chMtxLock(&can_imu_mtx);
+            msg.roll = g_can_imu.roll; msg.pitch = g_can_imu.pitch; msg.yaw = g_can_imu.yaw;
+            msg.p    = g_can_imu.p;    msg.q     = g_can_imu.q;    msg.r   = g_can_imu.r;
+            msg.can_valid = (uint8_t)g_can_imu.valid;
+            chMtxUnlock(&can_imu_mtx);
+
+            logger.write(LOG_MSG_IMU, msg);
+        }
+
+        /* ── State snapshot (every state_div ticks → 50 Hz) ───────────── */
+        if (state_div == 0U || tick % state_div == 0U) {
+            LogMsgState msg = {};
+            msg.time_ms = t_ms;
+
+            chMtxLock(&state_mtx);
+            msg.roll    = g_state[StateIdx::ROLL];
+            msg.pitch   = g_state[StateIdx::PITCH];
+            msg.yaw     = g_state[StateIdx::YAW];
+            msg.p       = g_state[StateIdx::P];
+            msg.q       = g_state[StateIdx::Q];
+            msg.r       = g_state[StateIdx::R];
+            msg.z_pos   = g_state[StateIdx::Z_POS];
+            msg.z_vel   = g_state[StateIdx::Z_VEL];
+            msg.z_accel = g_state[StateIdx::Z_ACCEL];
+            msg.thr     = g_input[InputIdx::THRUST];
+            msg.armed   = (uint8_t)g_armed;
+            chMtxUnlock(&state_mtx);
+
+            logger.write(LOG_MSG_STATE, msg);
+        }
+
+        /* ── Flush ring buffer to SD card ─────────────────────────────── */
+        logger.flush();
+
+        tick++;
+        next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->imu));
+    }
+}
+
 /* ── Thread launcher (called from main) ──────────────────────────────────── */
 void threads_start(const ThreadRates &rates)
 {
@@ -308,6 +391,7 @@ void threads_start(const ThreadRates &rates)
     chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
     chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
     chThdCreateStatic(waHouse,    sizeof(waHouse),    NORMALPRIO -  5, HouseThread,    (void *)&rates.house);
+    chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
 #endif

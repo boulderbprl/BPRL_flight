@@ -116,6 +116,7 @@ include $(CHIBIOS)/os/hal/osal/rt-nil/osal.mk
 include $(CHIBIOS)/os/rt/rt.mk
 include $(CHIBIOS)/os/common/ports/ARMv7-M/compilers/GCC/mk/port.mk
 include $(CHIBIOS)/os/hal/lib/streams/streams.mk
+include $(CHIBIOS)/os/various/fatfs_bindings/fatfs.mk
 
 # H743 and H753 have identical flash/RAM layout
 LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
@@ -132,13 +133,14 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/PID.cpp \
          src/controllers/AttitudeController.cpp \
          src/controllers/MotorMixer.cpp \
-         src/Coms/ICM20948.cpp \
-         src/Coms/ICM20602.cpp \
-         src/Coms/SPI.cpp \
-         src/Coms/CAN.cpp \
-         src/Coms/I2C.cpp \
-         src/Coms/PWM.cpp \
-         src/Coms/Radio.cpp
+         src/coms/ICM20948.cpp \
+         src/coms/ICM20602.cpp \
+         src/coms/SPI.cpp \
+         src/coms/CAN.cpp \
+         src/coms/I2C.cpp \
+         src/coms/PWM.cpp \
+         src/coms/Radio.cpp \
+         src/logging/Logger.cpp
 
 ASMSRC  = $(ALLASMSRC)
 ASMXSRC = $(ALLXASMSRC)

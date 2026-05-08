@@ -32,6 +32,12 @@ extern CANIMURaw g_can_imu;
 
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
  * All rates live in main.cpp.  Change them there to retune loop timing.    */
+
+struct LogRates {
+    sysinterval_t imu;    // IMU snapshot rate  (100 Hz → TIME_US2I(10000))
+    sysinterval_t state;  // State snapshot rate  (50 Hz → TIME_US2I(20000))
+};
+
 struct ThreadRates {
     sysinterval_t spi;      // SPIThread
     sysinterval_t can;      // CANThread
@@ -41,6 +47,7 @@ struct ThreadRates {
     sysinterval_t radio;    // RadioThread
     sysinterval_t house;    // HouseThread
     sysinterval_t debug;    // DebugThread (ignored if BPRL_DEBUG not set)
+    LogRates       log;     // LogThread
 };
 
 /* ── Thread entry points (defined in threads.cpp) ────────────────────────
