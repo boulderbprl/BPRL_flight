@@ -1,6 +1,6 @@
 # BPRL_flight
 
-Standalone ChibiOS flight controller firmware for the [CubePilot CubeBlue H7](https://docs.cubepilot.org) and CubeOrange+ autopilot hardware (STM32H753 / STM32H743 at 400 MHz). This project is loosely based on the open source Ardupilot project.
+Standalone ChibiOS flight controller firmware for the [CubePilot CubeBlue H7](https://docs.cubepilot.org) and CubeOrange+ autopilot hardware (STM32H753 / STM32H743 at 400 MHz). This project is loosely based on the open-source [Ardupilot](https://ardupilot.org/ardupilot/) project.
 
 ---
 
