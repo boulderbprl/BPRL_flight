@@ -122,16 +122,23 @@ LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
 
 # C sources
 CSRC = $(ALLCSRC) \
-       $(BOARDDIR)/board.c
+       $(BOARDDIR)/board.c \
+       $(CHIBIOS)/os/various/syscalls.c
 
 # C++ sources
 CPPSRC = $(ALLCPPSRC) \
          main.cpp \
-         src/PID.cpp \
-         src/AttitudeController.cpp \
-         src/MotorMixer.cpp \
-         src/imu/ICM20948.cpp \
-         src/imu/ICM20602.cpp
+         src/threads.cpp \
+         src/controllers/PID.cpp \
+         src/controllers/AttitudeController.cpp \
+         src/controllers/MotorMixer.cpp \
+         src/Coms/ICM20948.cpp \
+         src/Coms/ICM20602.cpp \
+         src/Coms/SPI.cpp \
+         src/Coms/CAN.cpp \
+         src/Coms/I2C.cpp \
+         src/Coms/PWM.cpp \
+         src/Coms/Radio.cpp
 
 ASMSRC  = $(ALLASMSRC)
 ASMXSRC = $(ALLXASMSRC)

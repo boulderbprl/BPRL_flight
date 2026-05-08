@@ -1,7 +1,12 @@
-build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
- third_party/ChibiOS/os/hal/include/hal.h \
- third_party/ChibiOS/os/common/portability/GCC/ccportab.h \
- third_party/ChibiOS/os/hal/osal/rt-nil/osal.h \
+build/obj/threads.o: src/threads.cpp src/threads.hpp \
+ third_party/ChibiOS/os/rt/include/ch.h \
+ third_party/ChibiOS/os/license/chlicense.h \
+ third_party/ChibiOS/os/license/chversion.h \
+ third_party/ChibiOS/os/license/chcustomer.h cfg/chconf.h \
+ third_party/ChibiOS/os/rt/include/chchecks.h \
+ third_party/ChibiOS/os/rt/include/chrestrictions.h \
+ third_party/ChibiOS/os/rt/include/chearly.h \
+ third_party/ChibiOS/os/common/ports/ARM-common/chtypes.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stddef.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdint.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/stdint.h \
@@ -11,14 +16,7 @@ build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdbool.h \
- third_party/ChibiOS/os/rt/include/ch.h \
- third_party/ChibiOS/os/license/chlicense.h \
- third_party/ChibiOS/os/license/chversion.h \
- third_party/ChibiOS/os/license/chcustomer.h cfg/chconf.h \
- third_party/ChibiOS/os/rt/include/chchecks.h \
- third_party/ChibiOS/os/rt/include/chrestrictions.h \
- third_party/ChibiOS/os/rt/include/chearly.h \
- third_party/ChibiOS/os/common/ports/ARM-common/chtypes.h \
+ third_party/ChibiOS/os/common/portability/GCC/ccportab.h \
  third_party/ChibiOS/os/rt/include/chrfcu.h \
  third_party/ChibiOS/os/rt/include/chdebug.h \
  third_party/ChibiOS/os/rt/include/chtime.h \
@@ -29,7 +27,7 @@ build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
  third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h \
  third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h \
  third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h \
- third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h \
+ third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h \
@@ -66,7 +64,9 @@ build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
  third_party/ChibiOS/os/oslib/include/chjobs.h \
  third_party/ChibiOS/os/oslib/include/chfactory.h \
  third_party/ChibiOS/os/rt/include/chdynamic.h \
- boards/CubeOrangePlus/board.h cfg/halconf.h cfg/mcuconf.h \
+ third_party/ChibiOS/os/hal/include/hal.h \
+ third_party/ChibiOS/os/hal/osal/rt-nil/osal.h boards/CubeBlueH7/board.h \
+ cfg/halconf.h cfg/mcuconf.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/stm32_registry.h \
  third_party/ChibiOS/os/hal/ports/common/ARMCMx/nvic.h \
@@ -126,11 +126,17 @@ build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
  third_party/ChibiOS/os/hal/include/hal_st.h \
  third_party/ChibiOS/os/hal/ports/STM32/LLD/SYSTICKv1/hal_st_lld.h \
  third_party/ChibiOS/os/hal/include/hal_mmc_spi.h \
- third_party/ChibiOS/os/hal/include/hal_serial_usb.h \
- /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring \
+ third_party/ChibiOS/os/hal/include/hal_serial_usb.h src/FlightState.hpp \
+ /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/cpu_defines.h \
+ src/coms/SPI.hpp src/coms/ICM20948.hpp src/coms/ICM20602.hpp \
+ src/coms/CAN.hpp src/coms/I2C.hpp src/coms/PWM.hpp src/coms/Radio.hpp \
+ src/controllers/AttitudeController.hpp src/controllers/PID.hpp \
+ src/controllers/MotorMixer.hpp \
+ third_party/ChibiOS/os/hal/lib/streams/chprintf.h \
+ /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/newlib.h \
@@ -145,19 +151,7 @@ build/obj/ICM20602.o: src/imu/ICM20602.cpp src/imu/ICM20602.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_locale.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/strings.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/string.h
-src/imu/ICM20602.hpp:
-third_party/ChibiOS/os/hal/include/hal.h:
-third_party/ChibiOS/os/common/portability/GCC/ccportab.h:
-third_party/ChibiOS/os/hal/osal/rt-nil/osal.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stddef.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdint.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/stdint.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/machine/_default_types.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/features.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_newlib_version.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdbool.h:
+src/threads.hpp:
 third_party/ChibiOS/os/rt/include/ch.h:
 third_party/ChibiOS/os/license/chlicense.h:
 third_party/ChibiOS/os/license/chversion.h:
@@ -167,6 +161,16 @@ third_party/ChibiOS/os/rt/include/chchecks.h:
 third_party/ChibiOS/os/rt/include/chrestrictions.h:
 third_party/ChibiOS/os/rt/include/chearly.h:
 third_party/ChibiOS/os/common/ports/ARM-common/chtypes.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stddef.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdint.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/stdint.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/machine/_default_types.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/features.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_newlib_version.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdbool.h:
+third_party/ChibiOS/os/common/portability/GCC/ccportab.h:
 third_party/ChibiOS/os/rt/include/chrfcu.h:
 third_party/ChibiOS/os/rt/include/chdebug.h:
 third_party/ChibiOS/os/rt/include/chtime.h:
@@ -177,7 +181,7 @@ third_party/ChibiOS/os/rt/include/chport.h:
 third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h:
 third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h:
 third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h:
-third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h:
+third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h:
@@ -214,7 +218,9 @@ third_party/ChibiOS/os/oslib/include/chdelegates.h:
 third_party/ChibiOS/os/oslib/include/chjobs.h:
 third_party/ChibiOS/os/oslib/include/chfactory.h:
 third_party/ChibiOS/os/rt/include/chdynamic.h:
-boards/CubeOrangePlus/board.h:
+third_party/ChibiOS/os/hal/include/hal.h:
+third_party/ChibiOS/os/hal/osal/rt-nil/osal.h:
+boards/CubeBlueH7/board.h:
 cfg/halconf.h:
 cfg/mcuconf.h:
 third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h:
@@ -277,10 +283,23 @@ third_party/ChibiOS/os/hal/include/hal_st.h:
 third_party/ChibiOS/os/hal/ports/STM32/LLD/SYSTICKv1/hal_st_lld.h:
 third_party/ChibiOS/os/hal/include/hal_mmc_spi.h:
 third_party/ChibiOS/os/hal/include/hal_serial_usb.h:
-/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring:
+src/FlightState.hpp:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/cpu_defines.h:
+src/coms/SPI.hpp:
+src/coms/ICM20948.hpp:
+src/coms/ICM20602.hpp:
+src/coms/CAN.hpp:
+src/coms/I2C.hpp:
+src/coms/PWM.hpp:
+src/coms/Radio.hpp:
+src/controllers/AttitudeController.hpp:
+src/controllers/PID.hpp:
+src/controllers/MotorMixer.hpp:
+third_party/ChibiOS/os/hal/lib/streams/chprintf.h:
+/opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/newlib.h:

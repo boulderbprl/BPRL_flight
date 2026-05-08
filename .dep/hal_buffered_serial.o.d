@@ -30,7 +30,7 @@ build/obj/hal_buffered_serial.o: \
  third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h \
  third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h \
  third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h \
- third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h \
+ third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h \
  third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h \
@@ -66,8 +66,8 @@ build/obj/hal_buffered_serial.o: \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/lib/gcc/arm-none-eabi/10.2.1/include/stdarg.h \
  third_party/ChibiOS/os/oslib/include/chjobs.h \
  third_party/ChibiOS/os/oslib/include/chfactory.h \
- third_party/ChibiOS/os/rt/include/chdynamic.h \
- boards/CubeOrangePlus/board.h cfg/halconf.h cfg/mcuconf.h \
+ third_party/ChibiOS/os/rt/include/chdynamic.h boards/CubeBlueH7/board.h \
+ cfg/halconf.h cfg/mcuconf.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h \
  third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/stm32_registry.h \
  third_party/ChibiOS/os/hal/ports/common/ARMCMx/nvic.h \
@@ -159,7 +159,7 @@ third_party/ChibiOS/os/rt/include/chport.h:
 third_party/ChibiOS/os/common/ports/ARMv7-M/chcore.h:
 third_party/ChibiOS/os/common/startup/ARMCMx/devices/STM32H7xx/cmparams.h:
 third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h7xx.h:
-third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h743xx.h:
+third_party/ChibiOS/os/common/ext/ST/STM32H7xx/stm32h753xx.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/core_cm7.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_version.h:
 third_party/ChibiOS/os/common/ext/ARM/CMSIS/Core/Include/cmsis_compiler.h:
@@ -196,7 +196,7 @@ third_party/ChibiOS/os/oslib/include/chdelegates.h:
 third_party/ChibiOS/os/oslib/include/chjobs.h:
 third_party/ChibiOS/os/oslib/include/chfactory.h:
 third_party/ChibiOS/os/rt/include/chdynamic.h:
-boards/CubeOrangePlus/board.h:
+boards/CubeBlueH7/board.h:
 cfg/halconf.h:
 cfg/mcuconf.h:
 third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/hal_lld.h:

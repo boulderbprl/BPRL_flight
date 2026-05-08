@@ -1,22 +1,20 @@
-#include "src/imu/ICM20948.hpp"
+#include "src/coms/ICM20948.hpp"
 #include <cstring>
 
 // Register map — Bank 0
 static constexpr uint8_t B0_WHO_AM_I      = 0x00;
 static constexpr uint8_t B0_USER_CTRL     = 0x03;
 static constexpr uint8_t B0_PWR_MGMT_1    = 0x06;
-static constexpr uint8_t B0_ACCEL_XOUT_H  = 0x2D; // 12-byte burst: accel XYZ + gyro XYZ
+static constexpr uint8_t B0_ACCEL_XOUT_H  = 0x2D;
 
 // Register map — Bank 2
 static constexpr uint8_t B2_GYRO_SMPLRT   = 0x00;
 static constexpr uint8_t B2_GYRO_CFG1     = 0x01;
-static constexpr uint8_t B2_ACCEL_SMPL_1  = 0x10; // MSB[3:0] of 12-bit divider
-static constexpr uint8_t B2_ACCEL_SMPL_2  = 0x11; // LSB[7:0]
+static constexpr uint8_t B2_ACCEL_SMPL_1  = 0x10;
+static constexpr uint8_t B2_ACCEL_SMPL_2  = 0x11;
 static constexpr uint8_t B2_ACCEL_CFG     = 0x14;
 
-// Bank select: any bank, register 0x7F
 static constexpr uint8_t REG_BANK_SEL     = 0x7F;
-
 static constexpr uint8_t WHOAMI_VALUE     = 0xEA;
 
 // ±2000 dps → rad/s,  ±16 g → m/s²
@@ -26,7 +24,6 @@ static constexpr float ACCEL_SCALE = (1.0f / 2048.0f) * 9.80665f;
 void ICM20948::set_bank(uint8_t bank)
 {
     if (bank == _bank) { return; }
-    // REG_BANK_SEL lives at the same address in every bank
     _txbuf[0] = REG_BANK_SEL & 0x7F;
     _txbuf[1] = static_cast<uint8_t>(bank << 4);
     cacheBufferFlush(_txbuf, 32);
@@ -48,38 +45,22 @@ bool ICM20948::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     _ready    = false;
 
     set_bank(0);
+    if (reg_read(B0_WHO_AM_I) != WHOAMI_VALUE) { return false; }
 
-    if (reg_read(B0_WHO_AM_I) != WHOAMI_VALUE) {
-        return false;
-    }
-
-    // Reset: DEVICE_RESET=1 (bit7), SLEEP=1 (bit6)
-    reg_write(B0_PWR_MGMT_1, 0xC1);
+    reg_write(B0_PWR_MGMT_1, 0xC1);   // reset + sleep
     chThdSleepMilliseconds(100);
-
-    // Wake up; select auto clock (PLL if available)
-    reg_write(B0_PWR_MGMT_1, 0x01);
+    reg_write(B0_PWR_MGMT_1, 0x01);   // wake, auto clock
     chThdSleepMilliseconds(5);
+    reg_write(B0_USER_CTRL,  0x10);   // SPI-only mode
 
-    // Disable I2C interface (SPI-only mode)
-    reg_write(B0_USER_CTRL, 0x10);
-
-    // Bank 2: gyro config
     set_bank(2);
-    // Gyro ODR divider = 0 → 1.125 kHz (with DLPF on)
-    reg_write(B2_GYRO_SMPLRT, 0x00);
-    // FS=±2000 dps (FS_SEL=11 → bits[2:1]=0b110), FCHOICE=1 (DLPF on), DLPFCFG=0
-    reg_write(B2_GYRO_CFG1,   0x07);
-
-    // Accel ODR divider = 0 → 1.125 kHz
+    reg_write(B2_GYRO_SMPLRT,  0x00); // 1.125 kHz ODR
+    reg_write(B2_GYRO_CFG1,    0x07); // ±2000 dps, DLPF on
     reg_write(B2_ACCEL_SMPL_1, 0x00);
-    reg_write(B2_ACCEL_SMPL_2, 0x00);
-    // FS=±16 g (FS_SEL=11 → bits[4:3]=0b11000=0x18), FCHOICE=1 (DLPF on), DLPFCFG=0
-    reg_write(B2_ACCEL_CFG,    0x19);
+    reg_write(B2_ACCEL_SMPL_2, 0x00); // 1.125 kHz ODR
+    reg_write(B2_ACCEL_CFG,    0x19); // ±16 g, DLPF on
 
-    // Return to bank 0 for data reads
     set_bank(0);
-
     _ready = true;
     return true;
 }
@@ -87,8 +68,6 @@ bool ICM20948::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
 bool ICM20948::read(float accel_ms2[3], float gyro_rads[3])
 {
     if (!_ready) { return false; }
-
-    // Ensure bank 0 is active (should always be true after init, but be safe)
     set_bank(0);
 
     uint8_t raw[12];
@@ -104,7 +83,6 @@ bool ICM20948::read(float accel_ms2[3], float gyro_rads[3])
     gyro_rads[0] = be16(raw + 6) * GYRO_SCALE;
     gyro_rads[1] = be16(raw + 8) * GYRO_SCALE;
     gyro_rads[2] = be16(raw + 10) * GYRO_SCALE;
-
     return true;
 }
 

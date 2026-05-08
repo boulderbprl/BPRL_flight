@@ -1,6 +1,5 @@
 #include "MotorMixer.hpp"
 #include <cmath>
-#include <algorithm>
 
 static inline float clamp(float v, float lo, float hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -20,7 +19,6 @@ void MotorMixer::update(const float cmds[3], float thrust,
     const float p   = cmds[1] * ATT_SCALE;
     const float y   = cmds[2] * YAW_SCALE;
 
-    // X-frame mixing (same as original FreeRTOS controllers.c)
     out[0] = (int32_t)clamp(thr - r + p + y, (float)PWM_MIN, (float)PWM_MAX); // FR
     out[1] = (int32_t)clamp(thr + r - p + y, (float)PWM_MIN, (float)PWM_MAX); // RL
     out[2] = (int32_t)clamp(thr + r + p - y, (float)PWM_MIN, (float)PWM_MAX); // FL
@@ -29,5 +27,5 @@ void MotorMixer::update(const float cmds[3], float thrust,
 
 bool MotorMixer::should_disarm(const float state[])
 {
-    return (fabsf(state[0]) > MAX_ANGLE || fabsf(state[1]) > MAX_ANGLE);
+    return fabsf(state[0]) > MAX_ANGLE || fabsf(state[1]) > MAX_ANGLE;
 }

@@ -1,5 +1,5 @@
-build/obj/AttitudeController.o: src/AttitudeController.cpp \
- src/AttitudeController.hpp src/PID.hpp \
+build/obj/AttitudeController.o: src/controllers/AttitudeController.cpp \
+ src/controllers/AttitudeController.hpp src/controllers/PID.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h \
@@ -65,8 +65,8 @@ build/obj/AttitudeController.o: src/AttitudeController.cpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/bits/nested_exception.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/bits/uniform_int_dist.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/limits
-src/AttitudeController.hpp:
-src/PID.hpp:
+src/controllers/AttitudeController.hpp:
+src/controllers/PID.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h:
