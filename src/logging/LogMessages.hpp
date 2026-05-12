@@ -28,8 +28,10 @@ struct __attribute__((packed)) LogMsgIMU {
     float ax1, ay1, az1, gx1, gy1, gz1; uint8_t valid1;
     /* IMU 2 — ICM-20602 (SPI4 PC13) */
     float ax2, ay2, az2, gx2, gy2, gz2; uint8_t valid2;
-    /* External CAN IMU (IMX5) */
-    float roll, pitch, yaw, p, q, r;    uint8_t can_valid;
+    /* External CAN IMU (IMX5) — quaternion NED→Body and body rates */
+    float qw, qx, qy, qz;               // quaternion [W,X,Y,Z] Hamilton
+    float can_p, can_q, can_r;          // body-frame rates (rad/s)
+    uint8_t can_valid;
 };
 
 struct __attribute__((packed)) LogMsgState {
@@ -56,7 +58,7 @@ constexpr LogDef kLogDefs[] = {
       "TimeMS,AX0,AY0,AZ0,GX0,GY0,GZ0,V0,"
       "AX1,AY1,AZ1,GX1,GY1,GZ1,V1,"
       "AX2,AY2,AZ2,GX2,GY2,GZ2,V2,"
-      "Roll,Pitch,Yaw,P,Q,R,CV",
+      "QW,QX,QY,QZ,CanP,CanQ,CanR,CV",
       sizeof(LogMsgIMU) },
 
     { LOG_MSG_STATE,

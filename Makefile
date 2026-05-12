@@ -130,6 +130,9 @@ CSRC = $(ALLCSRC) \
 CPPSRC = $(ALLCPPSRC) \
          main.cpp \
          src/threads.cpp \
+         src/math/math.cpp \
+         src/state_estimator/EKF.cpp \
+         src/state_estimator/StateManager.cpp \
          src/controllers/PID.cpp \
          src/controllers/AttitudeController.cpp \
          src/controllers/MotorMixer.cpp \

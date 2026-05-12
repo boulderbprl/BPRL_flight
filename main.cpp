@@ -75,7 +75,7 @@ int main(void)
      * ══════════════════════════════════════════════════════════════════════ */
     static const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),  // SPIThread      1000 Hz
-        /* .can     = */ TIME_US2I(1000),  // CANThread      1000 Hz
+        /* .can     = */ TIME_US2I(2000),  // CANThread       500 Hz (2.5× Nyquist on 200Hz IMX5)
         /* .est     = */ TIME_US2I(2000),  // StateEstThread  500 Hz
         /* .i2c     = */ TIME_MS2I(10),    // I2CThread       100 Hz
         /* .control = */ TIME_US2I(2000),  // ControlThread   500 Hz

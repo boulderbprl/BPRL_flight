@@ -48,6 +48,10 @@ BPRL_flight/
 │   │   ├── AttitudeController.hpp/.cpp  Outer (attitude) + inner (rate) PIDs
 │   │   └── MotorMixer.hpp/.cpp          X-frame quadcopter mixer
 │   │
+│   ├── state_estimator/      EKF state estimation
+│   │   ├── EKF.hpp/.cpp      16-state Extended Kalman Filter (one lane per IMU)
+│   │   └── StateManager.hpp/.cpp  Assembles 19-state output
+│   │
 │   └── logging/              SD card logging
 │       ├── LogMessages.hpp   Packed log structs + kLogDefs[] descriptor table
 │       ├── Logger.hpp        Logger class declaration
@@ -88,12 +92,14 @@ All inter-thread communication goes through mutex-protected globals defined in `
 
 | Variable | Mutex | Description |
 |---|---|---|
-| `g_state[9]` | `state_mtx` | Fused flight state (roll…z_accel) |
+| `g_state[19]` | `state_mtx` | Fused 19-element flight state |
+| `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[4]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets) |
 | `g_output[4]` | `state_mtx` | Motor PWM values [µs] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
-| `g_can_imu` | `can_imu_mtx` | Attitude + rates from CAN IMU (IMX5) |
+| `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
+| `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
 
 ---
 
@@ -157,56 +163,105 @@ Gains live in `src/controllers/AttitudeController.cpp`:
 
 - **Yaw position hold** — currently only yaw *rate* is commanded. An outer yaw angle loop would require a heading reference from the magnetometer or IMX5.
 
-- **INDI** — add an INDI controller around angular accelerations.
-    - **Update State Vector:** The state vector needs to be updated with accelerations making an 18 state, state vector. This is a TODO in the EKF.
+- **INDI** — add an INDI controller around angular accelerations. 
 ---
 
 ## 3. State Estimation (EKF)
 
-### Current status
+### Architecture
 
-`StateEstThread` (`src/threads.cpp`) is a **pass-through placeholder**: if the CAN IMU (IMX5) reports a valid frame, its attitude and rates are used directly as `g_state[]`. Otherwise, raw gyro rates from IMU 0 are passed through with no angle integration.
+State estimation runs in `StateEstThread` at 500 Hz. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap).
 
-This means:
-- Attitude angles are only valid when the IMX5 is connected and running.
-- There is no accelerometer tilt correction or drift compensation from on-board IMUs alone.
-- Altitude (`z_pos`, `z_vel`, `z_accel`) in `g_state[]` is always zero.
+```
+g_imu[0] ──► EKF lane 0 ──┐
+g_imu[1] ──► EKF lane 1 ──┼──► StateManager ──► g_state[19]
+g_imu[2] ──► EKF lane 2 ──┘         ▲
+                                     │
+              g_can_imu (IMX5) ──────┤
+              g_mocap (mocap)  ───────┘
+```
 
+### EKF internal state (16 states per lane)
 
-### TODO:
+Each lane estimates:
 
-**Planned implementation**: Replace the pass-through in `StateEstThread` with a real EKF.
+| Indices | States | Description |
+|---------|--------|-------------|
+| 0–2 | X, Y, Z | NED position (m) |
+| 3–5 | u, v, w | Body-frame velocity (m/s) |
+| 6–9 | q0, q1, q2, q3 | Quaternion NED→Body, Hamilton [W,X,Y,Z] |
+| 10–12 | ba_x, ba_y, ba_z | Accelerometer bias (m/s²) |
+| 13–15 | bg_x, bg_y, bg_z | Gyroscope bias (rad/s) |
 
-**State Vector**
+p/q/r, u_dot/v_dot/w_dot, and p_dot/q_dot/r_dot are **not** Kalman states, they are computed by `StateManager` and appended to the output vector.
 
-The system state is represented by a 19-dimensional vector:
- 
-$$\mathbf{x} = \begin{bmatrix} X,\ Y,\ Z,\ u,\ v,\ w,\ \dot{u},\ \dot{v},\ \dot{w},\ q_0,\ q_1,\ q_2,\ q_3,\ p,\ q,\ r,\ \dot{p},\ \dot{q},\ \dot{r} \end{bmatrix}^T$$
- 
-| Index | State   | Symbol        | Description                             | Units   |
-|-------|---------|---------------|-----------------------------------------|---------|
-| 1     | `X`     | $X$           | Position — inertial frame x-axis        | m       |
-| 2     | `Y`     | $Y$           | Position — inertial frame y-axis        | m       |
-| 3     | `Z`     | $Z$           | Position — inertial frame z-axis        | m       |
-| 4     | `u`     | $u$           | Translational velocity — body frame x   | m/s     |
-| 5     | `v`     | $v$           | Translational velocity — body frame y   | m/s     |
-| 6     | `w`     | $w$           | Translational velocity — body frame z   | m/s     |
-| 7     | `u_dot` | $\dot{u}$     | Translational acceleration — body x     | m/s²    |
-| 8     | `v_dot` | $\dot{v}$     | Translational acceleration — body y     | m/s²    |
-| 9     | `w_dot` | $\dot{w}$     | Translational acceleration — body z     | m/s²    |
-| 10    | `q0`    | $q_0$         | Quaternion — scalar part                | —       |
-| 11    | `q1`    | $q_1$         | Quaternion — vector part x              | —       |
-| 12    | `q2`    | $q_2$         | Quaternion — vector part y              | —       |
-| 13    | `q3`    | $q_3$         | Quaternion — vector part z              | —       |
-| 14    | `p`     | $p$           | Angular velocity — roll rate            | rad/s   |
-| 15    | `q`     | $q$           | Angular velocity — pitch rate           | rad/s   |
-| 16    | `r`     | $r$           | Angular velocity — yaw rate             | rad/s   |
-| 17    | `p_dot` | $\dot{p}$     | Angular acceleration — roll             | rad/s²  |
-| 18    | `q_dot` | $\dot{q}$     | Angular acceleration — pitch            | rad/s²  |
-| 19    | `r_dot` | $\dot{r}$     | Angular acceleration — yaw              | rad/s²  |
- 
-> **Note — quaternion convention:** Scalar-first ordering $\mathbf{q} = q_0 + q_1 i + q_2 j + q_3 k$, where $q_0$ is the scalar (real) part. This matches the Hamilton convention used in aerospace. ROS/ROS2 uses scalar-last $(q_1, q_2, q_3, q_0)$ — take care when interfacing with those libraries.
- 
+### Predict step (500 Hz)
+
+Each lane predicts forward using its own IMU after subtracting the estimated bias:
+
+- **Position:** integrated from body velocity rotated to NED via the current quaternion
+- **Velocity:** integrated from bias-corrected accel after removing gravity and the Coriolis term (ω × v)
+- **Quaternion:** first-order integration of `dq/dt = 0.5 * q ⊗ {0, gyro_corr}`
+- **Bias states:** random-walk model, only process noise Q drives them
+
+The covariance is propagated as `P = F·P·Fᵀ + Q`. The Jacobian F includes off-diagonal blocks `∂v/∂ba = −I·dt` and `∂q/∂bg = −0.5·dt·Ξ(q)` that couple the bias states to the rest of the filter, making bias directly observable through measurement residuals.
+
+### Measurement updates
+
+Updates are applied in order each tick (earlier updates inform later ones):
+
+| Step | Source | Rate | States updated |
+|------|--------|------|----------------|
+| 1.5 | Onboard accel (gravity vector) | 500 Hz, gated on \|a\| ≈ g | Quaternion (roll/pitch), accel bias |
+| 2 | IMX5 quaternion over CAN | 200 Hz, async | Full quaternion |
+| 5 | Mocap NED position | Async | X, Y, Z |
+| 5 | Mocap NED velocity → body frame | Async | u, v, w |
+
+The gravity-vector update (`update_gravity`) is gated, it is skipped whenever `|accel| − g > 1.0 m/s²` to suppress corrupted attitude corrections during aggressive maneuvers. Yaw is not observable from gravity alone and requires the IMX5.
+
+### StateManager output (19 states)
+
+`StateManager::get_state()` assembles the shared `g_state[19]` vector:
+
+| Indices | States | Source |
+|---------|--------|--------|
+| 0–2 | X, Y, Z | Primary EKF lane |
+| 3–5 | u, v, w | Primary EKF lane |
+| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 50 Hz lowpass |
+| 9–12 | q0, q1, q2, q3 | Primary EKF lane |
+| 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix |
+| 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 50 Hz lowpass |
+
+Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm` to improve noise reduction.
+
+### Tuning parameters
+
+All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr` block). StateManager tuning lives in `src/state_estimator/StateManager.hpp`.
+
+| Parameter | Location | Default | Effect |
+|-----------|----------|---------|--------|
+| `Q_BIAS_A` | EKF.hpp | 1e-6 | Accel bias random-walk rate. Increase if bias changes rapidly. |
+| `Q_BIAS_G` | EKF.hpp | 1e-7 | Gyro bias random-walk rate. Typically slower than accel. |
+| `P0_BIAS_A` | EKF.hpp | 0.1 | Initial accel bias uncertainty. Larger = faster startup convergence. |
+| `P0_BIAS_G` | EKF.hpp | 0.01 | Initial gyro bias uncertainty. |
+| `GRAV_GATE_MS2` | EKF.hpp | 1.0 | Gate width (m/s²) for gravity update. Smaller value reduces gyro drift but drops updates during maneuvers.|
+| `R_QUAT` | StateManager.hpp | 1e-4 | IMX5 quaternion noise. Lower = trust IMX5 more. |
+| `R_GRAVITY` | StateManager.hpp | 0.5 | Accel gravity-vector noise (m/s²)². Lower = trust accel attitude more. |
+| `R_MOCAP_POS` | StateManager.hpp | 1e-3 | Mocap position noise (m²). |
+| `R_MOCAP_VEL` | StateManager.hpp | 1e-2 | Mocap velocity noise (m/s)². |
+| `STATEMGR_IMX5_RATE_WEIGHT` | StateManager.hpp | 0.3 | IMX5 share of blended p/q/r (0 = pure gyro, 1 = pure IMX5). |
+| `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 50 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
+| `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 50 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
+
+### Sensor loss behaviour
+
+**IMX5 disconnect:** `update_quaternion` calls stop. Gravity vector continues correcting roll/pitch. Yaw drifts at the gyro Z-axis bias rate (probably a few degrees per minute). Rates fall back to 100% onboard gyros. Bias states continue being estimated.
+
+**Mocap disconnect:** `update_position` and `update_ned_vel` calls stop. Position and velocity states are no longer corrected and drift quickly ( position drifts quadratically with time ). Attitude and rates are unaffected.
+
+### Quaternion convention
+
+Scalar-first Hamilton [W, X, Y, Z], representing rotation from NED frame to Body frame. ROS/ROS2 uses scalar-last — take care when interfacing with those libraries.
 
 ---
 
@@ -517,13 +572,13 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 
 **Frame protocol (standard 11-bit IDs):**
 
-| CAN ID | Bytes 0–1 | Bytes 2–3 | Bytes 4–5 | Scale |
-|---|---|---|---|---|
-| `0x01` | roll (int16) | pitch (int16) | yaw (int16) | ÷ 10000 → rad |
-| `0x02` | p rate (int16) | x accel (int16) | — | rates ÷ 1000 → rad/s |
-| `0x03` | q rate (int16) | y accel (int16) | — | |
-| `0x04` | r rate (int16) | z accel (int16) | — | |
+| CAN ID | Content | Encoding | Rate |
+|---|---|---|---|
+| `0x01` | Quaternion NED→Body [W, X, Y, Z] | 4 × int16 ÷ 10000 | 200 Hz |
+| `0x02` | p rate + x accel | 2 × int16; rates ÷ 1000 → rad/s, accel ÷ 1000 → m/s² | 100 Hz |
+| `0x03` | q rate + y accel | same encoding | 100 Hz |
+| `0x04` | r rate + z accel | same encoding | 100 Hz |
 
-When the IMX5 is connected and sending valid frames, `StateEstThread` uses its attitude and rates directly as the primary state estimate. The on-board IMU data continues to be collected and logged regardless.
+When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`). The on-board IMUs continue to run and are logged regardless of IMX5 state.
 
-**TODO:** Configure the IMX5 to output quaternions. Fuse the IMX5 output with the other IMUs in the EKF. posiblly switch the angular rates from CAN (limited to 100Hz) to UART (raw readings at 1kHz) 
+**TODO:** Switch angular rates from FDCAN1 (100 Hz) to UART for raw readings at 1 kHz.

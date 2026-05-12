@@ -18,6 +18,7 @@
 #include "src/coms/Radio.hpp"
 #include "src/controllers/AttitudeController.hpp"
 #include "src/controllers/MotorMixer.hpp"
+#include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
 #include "chprintf.h"
@@ -26,10 +27,11 @@
 /* ── Shared state definitions ────────────────────────────────────────────── */
 
 MUTEX_DECL(state_mtx);
-float   g_state[9]  = {};
-float   g_input[4]  = {};
-int32_t g_output[4] = {};
-bool    g_armed     = false;
+float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
+float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
+float   g_input[4]           = {};
+int32_t g_output[4]          = {};
+bool    g_armed               = false;
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -37,14 +39,20 @@ IMURaw g_imu[3] = {};
 MUTEX_DECL(can_imu_mtx);
 CANIMURaw g_can_imu = {};
 
+MUTEX_DECL(mocap_mtx);
+MocapRaw  g_mocap   = {};
+
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
 static AttitudeController att_ctrl;
 static MotorMixer         mixer;
 
+/* ── State estimator (StateEstThread only) ───────────────────────────────── */
+static StateManager state_mgr;
+
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-static THD_WORKING_AREA(waStateEst, 2048);
+static THD_WORKING_AREA(waStateEst, 6144);  // enlarged for StateManager method frames
 static THD_WORKING_AREA(waI2C,      1024);
 static THD_WORKING_AREA(waControl,  2048);
 static THD_WORKING_AREA(waRadio,    1024);
@@ -117,22 +125,25 @@ static THD_FUNCTION(CANThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * StateEstThread — 500 Hz  NORMALPRIO+25
- * Fuses g_imu[] and g_can_imu into g_state[].
- *
- * Phase 1 (now):    pass through g_can_imu if valid, else gyro-only.
- * Phase 2 (future): complementary filter on accel + gyro.
- * Phase 3 (future): EKF / weighted average across all sources.
+ * Runs the 3-lane EKF, fuses g_imu[] and g_can_imu, writes g_state[].
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(StateEstThread, arg)
 {
     chRegSetThreadName("est");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+    const float dt = static_cast<float>(period)
+                   / static_cast<float>(CH_CFG_ST_FREQUENCY);
+
+    state_mgr.init();
 
     systime_t next = chVTGetSystemTime();
     while (true) {
+        // Snapshot CAN IMU and clear consumed-this-tick flags atomically.
         CANIMURaw can_snap;
         chMtxLock(&can_imu_mtx);
         can_snap = g_can_imu;
+        g_can_imu.has_new_quat  = false;
+        g_can_imu.has_new_rates = false;
         chMtxUnlock(&can_imu_mtx);
 
         IMURaw imu_snap[3];
@@ -140,29 +151,20 @@ static THD_FUNCTION(StateEstThread, arg)
         memcpy(imu_snap, g_imu, sizeof(g_imu));
         chMtxUnlock(&imu_mtx);
 
-        float roll = 0, pitch = 0, yaw = 0, p = 0, q = 0, r = 0;
+        MocapRaw mocap_snap;
+        chMtxLock(&mocap_mtx);
+        mocap_snap = g_mocap;
+        g_mocap.has_new = false;
+        chMtxUnlock(&mocap_mtx);
 
-        if (can_snap.valid) {
-            roll  = can_snap.roll;
-            pitch = can_snap.pitch;
-            yaw   = can_snap.yaw;
-            p     = can_snap.p;
-            q     = can_snap.q;
-            r     = can_snap.r;
-        } else if (imu_snap[0].valid) {
-            // TODO: integrate gyro, correct with accelerometer tilt.
-            p = imu_snap[0].gyro[0];
-            q = imu_snap[0].gyro[1];
-            r = imu_snap[0].gyro[2];
-        }
+        // Run all EKF lanes and derive outputs.
+        state_mgr.update(dt, imu_snap, can_snap, mocap_snap);
 
         chMtxLock(&state_mtx);
-        g_state[StateIdx::ROLL]  = roll;
-        g_state[StateIdx::PITCH] = pitch;
-        g_state[StateIdx::YAW]   = yaw;
-        g_state[StateIdx::P]     = p;
-        g_state[StateIdx::Q]     = q;
-        g_state[StateIdx::R]     = r;
+        state_mgr.get_state(g_state);          // copies full 19-element state
+        g_euler[0] = state_mgr.roll();         // Euler angles derived from quaternion
+        g_euler[1] = state_mgr.pitch();
+        g_euler[2] = state_mgr.yaw();
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -196,20 +198,29 @@ static THD_FUNCTION(ControlThread, arg)
 
     systime_t next = chVTGetSystemTime();
     while (true) {
-        float state[9], input[4];
+        float state[StateIdx::N], euler[3], input[4];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(state, g_state, sizeof(state));
+        memcpy(euler, g_euler, sizeof(euler));
         memcpy(input, g_input, sizeof(input));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
+        // Build 6-element [roll, pitch, yaw, p, q, r] for the cascade controller.
+        // AttitudeController and MotorMixer keep their existing index assumptions
+        // (0=roll, 1=pitch, 2=yaw, 3=p, 4=q, 5=r) — no interface changes needed.
+        const float ctrl_state[6] = {
+            euler[0], euler[1], euler[2],
+            state[StateIdx::P], state[StateIdx::Q], state[StateIdx::R]
+        };
+
         float   cmds[3];
-        att_ctrl.update(state, input, cmds);
-        float   thr = att_ctrl.compute_throttle(state, input);
+        att_ctrl.update(ctrl_state, input, cmds);
+        float   thr = att_ctrl.compute_throttle(ctrl_state, input);
 
         int32_t out[4];
-        mixer.update(cmds, thr, armed, state, out);
+        mixer.update(cmds, thr, armed, ctrl_state, out);
         motor_output_write(out);
 
         chMtxLock(&state_mtx);
@@ -280,9 +291,9 @@ static THD_FUNCTION(DebugThread, arg)
         bool    armed;
 
         chMtxLock(&state_mtx);
-        roll  = g_state[StateIdx::ROLL];
-        pitch = g_state[StateIdx::PITCH];
-        yaw   = g_state[StateIdx::YAW];
+        roll  = g_euler[0];
+        pitch = g_euler[1];
+        yaw   = g_euler[2];
         thr   = g_input[InputIdx::THRUST];
         m0 = g_output[0]; m1 = g_output[1];
         m2 = g_output[2]; m3 = g_output[3];
@@ -343,8 +354,9 @@ static THD_FUNCTION(LogThread, arg)
             chMtxUnlock(&imu_mtx);
 
             chMtxLock(&can_imu_mtx);
-            msg.roll = g_can_imu.roll; msg.pitch = g_can_imu.pitch; msg.yaw = g_can_imu.yaw;
-            msg.p    = g_can_imu.p;    msg.q     = g_can_imu.q;    msg.r   = g_can_imu.r;
+            msg.qw      = g_can_imu.q0; msg.qx = g_can_imu.q1;
+            msg.qy      = g_can_imu.q2; msg.qz = g_can_imu.q3;
+            msg.can_p   = g_can_imu.p;  msg.can_q = g_can_imu.q; msg.can_r = g_can_imu.r;
             msg.can_valid = (uint8_t)g_can_imu.valid;
             chMtxUnlock(&can_imu_mtx);
 
@@ -357,15 +369,15 @@ static THD_FUNCTION(LogThread, arg)
             msg.time_ms = t_ms;
 
             chMtxLock(&state_mtx);
-            msg.roll    = g_state[StateIdx::ROLL];
-            msg.pitch   = g_state[StateIdx::PITCH];
-            msg.yaw     = g_state[StateIdx::YAW];
+            msg.roll    = g_euler[0];
+            msg.pitch   = g_euler[1];
+            msg.yaw     = g_euler[2];
             msg.p       = g_state[StateIdx::P];
             msg.q       = g_state[StateIdx::Q];
             msg.r       = g_state[StateIdx::R];
             msg.z_pos   = g_state[StateIdx::Z_POS];
-            msg.z_vel   = g_state[StateIdx::Z_VEL];
-            msg.z_accel = g_state[StateIdx::Z_ACCEL];
+            msg.z_vel   = g_state[StateIdx::W];
+            msg.z_accel = g_state[StateIdx::W_DOT];
             msg.thr     = g_input[InputIdx::THRUST];
             msg.armed   = (uint8_t)g_armed;
             chMtxUnlock(&state_mtx);
