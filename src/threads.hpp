@@ -61,12 +61,11 @@ struct LogRates {
 
 struct ThreadRates {
     sysinterval_t spi;      // SPIThread
-    sysinterval_t can;      // CANThread
     sysinterval_t est;      // StateEstThread
     sysinterval_t i2c;      // I2CThread
     sysinterval_t control;  // ControlThread
     sysinterval_t radio;    // RadioThread
-    sysinterval_t house;    // HouseThread
+    sysinterval_t heartbeat; // HeartbeatThread
     sysinterval_t debug;    // DebugThread (ignored if BPRL_DEBUG not set)
     LogRates       log;     // LogThread
 };

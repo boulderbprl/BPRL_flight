@@ -78,7 +78,7 @@ BPRL_flight/
 | Thread | Priority | Rate | Role |
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs |
-| CANThread | NORMALPRIO+28 | 1 kHz | Drain FDCAN1 RxFIFO, dispatch frames |
+| CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
 | StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
 | I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices ( TODO:strain) |
 | ControlThread | NORMALPRIO+20 | 500 Hz | Cascade PID → MotorMixer → PWM out |
@@ -543,7 +543,7 @@ Two SPI buses drive all three on-board IMUs. Each IMU has its own chip-select pi
 
 FDCAN1 at **500 kbps** using HSE (24 MHz) as the clock source. Standard 11-bit IDs only.
 
-A table of up to 8 ID→callback pairs is maintained. `CANThread` polls the RxFIFO at 1 kHz and calls `can_dispatch()`, which routes each frame to its registered handler in O(n) time.
+A table of up to 8 ID→callback pairs is maintained. `CANThread` blocks on `canReceiveTimeout` and calls `can_dispatch()` immediately on frame arrival, routing each frame to its registered handler in O(n) time.
 
 **Currently supported device:** Inertial Sense IMX5 — four frame IDs pre-registered by `can_drv_init()`. See `CAN.hpp` for the byte-level protocol.
 

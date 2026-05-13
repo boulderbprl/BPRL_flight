@@ -75,12 +75,11 @@ int main(void)
      * ══════════════════════════════════════════════════════════════════════ */
     static const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),  // SPIThread      1000 Hz
-        /* .can     = */ TIME_US2I(2000),  // CANThread       500 Hz (2.5× Nyquist on 200Hz IMX5)
         /* .est     = */ TIME_US2I(2000),  // StateEstThread  500 Hz
         /* .i2c     = */ TIME_MS2I(10),    // I2CThread       100 Hz
         /* .control = */ TIME_US2I(2000),  // ControlThread   500 Hz
         /* .radio   = */ TIME_MS2I(20),    // RadioThread      50 Hz  (14 ms for SBUS)
-        /* .house   = */ TIME_MS2I(200),   // HouseThread       5 Hz
+        /* .heartbeat = */ TIME_MS2I(200), // HeartbeatThread   5 Hz
         /* .debug   = */ TIME_MS2I(100),   // DebugThread      10 Hz  [BPRL_DEBUG only]
         /* .log     = */ { TIME_US2I(10000),  // LogThread IMU    100 Hz
                            TIME_US2I(20000) },// LogThread state   50 Hz

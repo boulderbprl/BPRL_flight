@@ -31,7 +31,7 @@ float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
 float   g_input[4]           = {};
 int32_t g_output[4]          = {};
-bool    g_armed               = false;
+bool    g_armed              = false;
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -56,7 +56,7 @@ static THD_WORKING_AREA(waStateEst, 6144);  // enlarged for StateManager method 
 static THD_WORKING_AREA(waI2C,      1024);
 static THD_WORKING_AREA(waControl,  2048);
 static THD_WORKING_AREA(waRadio,    1024);
-static THD_WORKING_AREA(waHouse,    1024);
+static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    1024);
@@ -104,24 +104,39 @@ static THD_FUNCTION(SPIThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * CANThread — 1 kHz  NORMALPRIO+28
- * Drains the CAN RxFIFO and dispatches frames to registered callbacks.
+ * CANThread — event-driven  NORMALPRIO+28
+ * Blocks on the CAN RxFIFO and dispatches frames as they arrive.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(CANThread, arg)
 {
+    (void)arg;
     chRegSetThreadName("can");
+
+    while (true) {
+        CANRxFrame rxf;
+        if (canReceiveTimeout(&CAND1, CAN_ANY_MAILBOX, &rxf,
+                              TIME_MS2I(5)) == MSG_OK) {
+            can_dispatch(rxf);
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * I2CThread — 100 Hz  NORMALPRIO+22
+ * Calls each registered I2C device's poll function once per tick.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(I2CThread, arg)
+{
+    chRegSetThreadName("i2c");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
     systime_t next = chVTGetSystemTime();
     while (true) {
-        CANRxFrame rxf;
-        while (canReceiveTimeout(&CAND1, CAN_ANY_MAILBOX, &rxf,
-                                 TIME_IMMEDIATE) == MSG_OK) {
-            can_dispatch(rxf);
-        }
+        i2c_poll_all();
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
+
 
 /* ══════════════════════════════════════════════════════════════════════════
  * StateEstThread — 500 Hz  NORMALPRIO+25
@@ -171,21 +186,6 @@ static THD_FUNCTION(StateEstThread, arg)
     }
 }
 
-/* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 100 Hz  NORMALPRIO+22
- * Calls each registered I2C device's poll function once per tick.
- * ══════════════════════════════════════════════════════════════════════════ */
-static THD_FUNCTION(I2CThread, arg)
-{
-    chRegSetThreadName("i2c");
-    const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
-
-    systime_t next = chVTGetSystemTime();
-    while (true) {
-        i2c_poll_all();
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
-    }
-}
 
 /* ══════════════════════════════════════════════════════════════════════════
  * ControlThread — 500 Hz  NORMALPRIO+20
@@ -258,12 +258,12 @@ static THD_FUNCTION(RadioThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * HouseThread — 5 Hz  NORMALPRIO-5
+ * HeartbeatThread — 5 Hz  NORMALPRIO-5
  * LED heartbeat, SD log flush (future), watchdog pat (future).
  * ══════════════════════════════════════════════════════════════════════════ */
-static THD_FUNCTION(HouseThread, arg)
+static THD_FUNCTION(HeartbeatThread, arg)
 {
-    chRegSetThreadName("house");
+    chRegSetThreadName("heartbeat");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
     systime_t next = chVTGetSystemTime();
@@ -397,12 +397,12 @@ static THD_FUNCTION(LogThread, arg)
 void threads_start(const ThreadRates &rates)
 {
     chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,      (void *)&rates.spi);
-    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      (void *)&rates.can);
+    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
     chThdCreateStatic(waStateEst, sizeof(waStateEst), NORMALPRIO + 25, StateEstThread, (void *)&rates.est);
     chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
     chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
     chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
-    chThdCreateStatic(waHouse,    sizeof(waHouse),    NORMALPRIO -  5, HouseThread,    (void *)&rates.house);
+    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);

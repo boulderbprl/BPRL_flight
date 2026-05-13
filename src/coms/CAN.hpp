@@ -2,13 +2,13 @@
 #include "hal.h"
 
 /*
- * CAN bus driver — FDCAN1 at 500 kbps.
+ * CAN bus driver — FDCAN1 at 1000 kbps.
  *
  * Device registration:
  *   Call bprl_can_register() in main() before threads_start().
  *   can_drv_init() pre-registers the IMX5 IMU callbacks.
  *
- * IMX5 frame protocol (500 kbps, standard 11-bit IDs):
+ * IMX5 frame protocol (1000 kbps, standard 11-bit IDs):
  *   ID 0x01  CID_INS_QUATN2B — quaternion NED→Body [W,X,Y,Z] (int16 ÷ 10000), 200 Hz
  *            bytes 0-1 = W (q0), 2-3 = X (q1), 4-5 = Y (q2), 6-7 = Z (q3)
  *   ID 0x02  bytes 0-1 = p rate  (int16 ÷ 1000 → rad/s), 2-3 = x accel (÷ 100 → m/s²)

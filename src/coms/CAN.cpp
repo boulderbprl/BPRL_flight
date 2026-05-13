@@ -2,12 +2,12 @@
 #include "src/threads.hpp"
 
 /*
- * FDCAN1 bit timing — 500 kbps, HSE = 24 MHz.
- * BRP=1, TSEG1=37, TSEG2=10 → 48 Tq/bit, 79% sample point.
- * NBTP: NSJW=3, NBRP=0, NTSEG1=36, NTSEG2=9.
+ * FDCAN1 bit timing — 1000 kbps, HSE = 24 MHz.
+ * BRP=1, TSEG1=18, TSEG2=5 → 24 Tq/bit, 79% sample point.
+ * NBTP: NSJW=3, NBRP=0, NTSEG1=17, NTSEG2=4.
  */
 static const CANConfig can_cfg = {
-    0x06002409,   // NBTP
+    0x06001104,   // NBTP
     0x00000000,   // DBTP: unused (classical CAN)
     0x00000000,   // CCCR: normal mode, FDOE=0
     0x00000000,   // TEST
