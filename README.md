@@ -9,10 +9,11 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 1. [Project Overview](#1-project-overview)
 2. [Controller](#2-controller)
 3. [State Estimation (EKF)](#3-state-estimation-ekf)
-4. [SD Card Logging](#4-sd-card-logging)
-5. [Build and Upload](#5-build-and-upload)
-6. [Comms Drivers](#6-comms-drivers)
-7. [IMU Drivers](#7-imu-drivers)
+4. [Math Utilities](#4-math-utilities)
+5. [SD Card Logging](#5-sd-card-logging)
+6. [Build and Upload](#6-build-and-upload)
+7. [Comms Drivers](#7-comms-drivers)
+8. [IMU Drivers](#8-imu-drivers)
 
 ---
 
@@ -265,7 +266,47 @@ Scalar-first Hamilton [W, X, Y, Z], representing rotation from NED frame to Body
 
 ---
 
-## 4. SD Card Logging
+## 4. Math Utilities
+
+All math helpers live in `src/math/math.hpp` / `src/math/math.cpp`. The quaternion convention throughout is Hamilton scalar-first **[W, X, Y, Z]**, representing the rotation from NED frame to Body frame (`q_NED→Body`). The kinematic propagation equation is `dq/dt = 0.5 * q ⊗ ω_pure` where `ω_pure = {0, p, q, r}`.
+
+### Scalar helpers
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `constrain_f` | `float constrain_f(float v, float lo, float hi)` | Clamps `v` to `[lo, hi]`. |
+
+### Signal processing
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `lowpass_alpha` | `float lowpass_alpha(float fc_hz, float dt_s)` | Computes first-order IIR coefficient: `α = dt / (dt + 1/(2π·fc))`. Call once when `fc` or `dt` changes. |
+| `lowpass` | `float lowpass(float input, float prev_out, float alpha)` | Applies one IIR tick: `y_k = α·x_k + (1−α)·y_{k−1}`. Caller owns `prev_out`. |
+| `derivative` | `float derivative(float current, float prev, float dt_s)` | Backward-difference numerical derivative: `(current − prev) / dt`. Caller owns `prev`. |
+| `integrate` | `float integrate(float value, float dt_s)` | Rectangular (Euler) integration step: `value · dt`. Caller owns the accumulator. |
+
+### 3-vector helpers
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `cross3` | `void cross3(const float a[3], const float b[3], float out[3])` | Cross product `out = a × b`.|
+
+### Quaternion
+
+The `Quat` struct holds `{float w, x, y, z}`.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `quat_mul` | `Quat quat_mul(const Quat& a, const Quat& b)` | Hamilton product `a ⊗ b`. Non-commutative. |
+| `quat_conj` | `Quat quat_conj(const Quat& q)` | Conjugate `q* = {w, −x, −y, −z}`. For a unit quaternion this is also the inverse. |
+| `quat_norm` | `Quat quat_norm(const Quat& q)` | Re-normalises to unit length. Returns identity `{1,0,0,0}` if the input norm is below `1e-10`. |
+| `quat_dot` | `float quat_dot(const Quat& a, const Quat& b)` | 4-element dot product. Used for antipodal sign checks (`dot < 0 → flip sign before SLERP`). |
+| `quat_to_euler` | `void quat_to_euler(const Quat& q, float& roll, float& pitch, float& yaw)` | Extracts ZYX Euler angles (rad) from `q_NED→Body`. Pitch is clamped to `[−1, 1]` before `asin` to guard against numerical overflow. |
+| `quat_to_rot_body2ned` | `void quat_to_rot_body2ned(const Quat& q, float R[3][3])` | Builds the 3×3 DCM that maps body-frame vectors to NED: `v_NED = R · v_body`. For `q_NED→Body` this equals `R(q)ᵀ = R(q*)`. `R` is stored row-major. |
+
+---
+
+## 5. SD Card Logging
 
 Follows the logging standard in Ardupilot
 
@@ -429,7 +470,7 @@ This makes files self-describing: a decoder can read the schema from the file it
 
 ---
 
-## 5. Build and Upload
+## 6. Build and Upload
 
 ### Prerequisites
 
@@ -482,7 +523,7 @@ Remove `-DBPRL_DEBUG` before flight — the print thread adds ~1 KB of stack and
 
 ---
 
-## 6. Comms Drivers
+## 7. Comms Drivers
 
 All drivers live in `src/coms/`. Register devices in `main.cpp` before calling `threads_start()`.
 
@@ -534,7 +575,7 @@ bprl_can_register(0x10, my_callback, nullptr);
 
 ---
 
-## 7. IMU Drivers
+## 8. IMU Drivers
 
 The firmware reads four IMU sources. Index assignments are fixed:
 
