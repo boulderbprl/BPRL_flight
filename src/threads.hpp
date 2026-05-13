@@ -2,6 +2,7 @@
 #include "ch.h"
 #include "hal.h"
 #include "src/FlightState.hpp"
+#include "src/coms/DShot.hpp"
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -50,6 +51,9 @@ extern CANIMURaw g_can_imu;
 
 extern mutex_t  mocap_mtx;
 extern MocapRaw g_mocap;
+
+extern mutex_t      esc_mtx;
+extern ESCTelemetry g_esc_telem[4]; // [FR, RL, FL, RR] — written by DShot ISR
 
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
  * All rates live in main.cpp.  Change them there to retune loop timing.    */

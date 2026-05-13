@@ -142,6 +142,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/CAN.cpp \
          src/coms/I2C.cpp \
          src/coms/PWM.cpp \
+         src/coms/DShot.cpp \
          src/coms/Radio.cpp \
          src/logging/Logger.cpp
 

@@ -15,6 +15,7 @@
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
 #include "src/coms/PWM.hpp"
+#include "src/coms/DShot.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/controllers/AttitudeController.hpp"
 #include "src/controllers/MotorMixer.hpp"
@@ -41,6 +42,9 @@ CANIMURaw g_can_imu = {};
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
+
+MUTEX_DECL(esc_mtx);
+ESCTelemetry g_esc_telem[4] = {};
 
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
 static AttitudeController att_ctrl;
