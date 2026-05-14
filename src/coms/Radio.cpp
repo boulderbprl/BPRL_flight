@@ -1,30 +1,33 @@
 #include "src/coms/Radio.hpp"
 
-static float _thr   = 0.0f;
-static float _roll  = 0.0f;
-static float _pitch = 0.0f;
-static float _yaw   = 0.0f;
-static bool  _armed = false;
+#if RADIO_PROTOCOL == RADIO_PROTO_SBUS
+  #include "src/coms/SBUS.hpp"
+  #define PARSER g_sbus
+#elif RADIO_PROTOCOL == RADIO_PROTO_CRSF
+  #include "src/coms/CRSF.hpp"
+  #define PARSER g_crsf
+#else
+  #error "Unknown RADIO_PROTOCOL value. Use RADIO_PROTO_SBUS or RADIO_PROTO_CRSF."
+#endif
 
-void radio_input_init(void)
-{
-    // TODO: configure ICU (HAL_USE_ICU) for PWM capture on LINE_RC_INPUT,
-    //       or configure USART6 for SBUS (inverted UART, 100000 baud, 8E2).
-}
+/*
+ * Standard Mode 2 channel mapping:
+ *   ch[0] = Roll (aileron)   → [-1, 1]
+ *   ch[1] = Pitch (elevator) → [-1, 1]
+ *   ch[2] = Throttle         → [0, 1]
+ *   ch[3] = Yaw (rudder)     → [-1, 1]
+ *   ch[4] = Arm switch       → >992 = armed
+ *
+ * Both SBUS and CRSF use the same 11-bit value range: 172–1811, centre 992.
+ */
+static float norm_axis(uint16_t v) { return (float)(v - 992)  / 819.0f;  }
+static float norm_thr (uint16_t v) { return (float)(v - 172)  / 1639.0f; }
 
-void radio_input_update(void)
-{
-    // TODO: read ICU-captured pulse widths and normalise:
-    //   uint32_t thr_us = icu_lld_get_width(&ICUD8);
-    //   _thr   = (thr_us  - 1000.0f) / 1000.0f;  // [0, 1]
-    //   _roll  = (ch2_us  - 1500.0f) /  500.0f;  // [-1, 1]
-    //   _pitch = (ch3_us  - 1500.0f) /  500.0f;
-    //   _yaw   = (ch4_us  - 1500.0f) /  500.0f;
-    //   _armed = (arm_us  > 1700);
-}
+void  radio_input_init()   { PARSER.init();   }
+void  radio_input_update() { PARSER.update(); }
 
-float radio_thr(void)   { return _thr;   }
-float radio_roll(void)  { return _roll;  }
-float radio_pitch(void) { return _pitch; }
-float radio_yaw(void)   { return _yaw;   }
-bool  radio_armed(void) { return _armed; }
+float radio_thr()    { return norm_thr (PARSER.channel(2)); }
+float radio_roll()   { return norm_axis(PARSER.channel(0)); }
+float radio_pitch()  { return norm_axis(PARSER.channel(1)); }
+float radio_yaw()    { return norm_axis(PARSER.channel(3)); }
+bool  radio_armed()  { return PARSER.channel(4) > 992u;    }

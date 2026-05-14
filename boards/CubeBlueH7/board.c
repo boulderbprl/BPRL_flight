@@ -42,9 +42,16 @@ void boardInit(void)
     palSetPad(GPIOD, 7U);
     palSetPadMode(GPIOD, 7U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── USART3 — debug / telemetry (PD8=TX, PD9=RX) → AF7 ────────────── */
+    /* ── USART3 — TELEM1 (PD8=TX, PD9=RX) → AF7 ───────────────────────── */
     palSetPadMode(GPIOD, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 9U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
+
+    /* ── USART6 — SBUSo RC input (PC7=RX) → AF8 ────────────────────────── */
+    palSetPadMode(GPIOC, 7U, PAL_MODE_ALTERNATE(8) | PAL_STM32_PUPDR_PULLUP);
+
+    /* ── USB OTG_FS — micro USB (PA11=DM, PA12=DP) → AF10 ─────────────── */
+    palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOA, 12U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
 
     /* ── FDCAN1 (PH13=TX, PH14=RX) → AF9 ──────────────────────────────── */
     palSetPadMode(GPIOH, 13U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);

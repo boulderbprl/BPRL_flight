@@ -13,7 +13,7 @@
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C device table (compass, baro — future).
  *   src/coms/PWM.*         Motor PWM output stub (TIM1, future DShot).
- *   src/coms/Radio.*       RC radio input stub (ICU/SBUS, future).
+ *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
  *   src/controllers/       PID, AttitudeController, MotorMixer.
  *
  * ── Adding a CAN device ─────────────────────────────────────────────────────
@@ -28,8 +28,9 @@
  * ── Switching motor protocol to DShot ───────────────────────────────────────
  *   Replace the body of motor_output_write() in src/coms/PWM.cpp only.
  *
- * ── Switching radio to SBUS ─────────────────────────────────────────────────
- *   Fill in src/coms/Radio.cpp, then change kRates.radio to TIME_MS2I(14).
+ * ── Switching radio protocol ────────────────────────────────────────────────
+ *   Change RADIO_PROTOCOL in src/coms/Radio.hpp (or pass -DRADIO_PROTOCOL=...
+ *   via UDEFS_EXTRA). SBUS=SBUSo port (USART6), CRSF=TELEM1 (USART3).
  */
 
 #include "ch.h"
@@ -39,6 +40,7 @@
 #include "src/coms/I2C.hpp"
 #include "src/coms/PWM.hpp"
 #include "src/coms/Radio.hpp"
+#include "src/usb_serial.hpp"
 #include "chprintf.h"
 
 int main(void)
@@ -47,9 +49,9 @@ int main(void)
     chSysInit();
 
 #ifdef BPRL_DEBUG
-    static const SerialConfig uart3_cfg = {115200, 0, USART_CR2_STOP1_BITS, 0};
-    sdStart(&SD3, &uart3_cfg);
-    chprintf((BaseSequentialStream *)&SD3, "\r\nBPRL boot [" BOARD_NAME "]\r\n");
+    usb_serial_init();
+    chThdSleepMilliseconds(1500);   /* wait for host USB enumeration */
+    chprintf((BaseSequentialStream *)&SDU1, "\r\nBPRL boot [" BOARD_NAME "]\r\n");
 #endif
 
     /* ── Hardware init ──────────────────────────────────────────────────────
@@ -78,7 +80,7 @@ int main(void)
         /* .est     = */ TIME_US2I(2000),  // StateEstThread  500 Hz
         /* .i2c     = */ TIME_MS2I(10),    // I2CThread       100 Hz
         /* .control = */ TIME_US2I(2000),  // ControlThread   500 Hz
-        /* .radio   = */ TIME_MS2I(20),    // RadioThread      50 Hz  (14 ms for SBUS)
+        /* .radio   = */ TIME_MS2I(10),    // RadioThread     100 Hz  (SBUS 14ms / CRSF 4ms frame rate)
         /* .heartbeat = */ TIME_MS2I(200), // HeartbeatThread   5 Hz
         /* .debug   = */ TIME_MS2I(100),   // DebugThread      10 Hz  [BPRL_DEBUG only]
         /* .log     = */ { TIME_US2I(10000),  // LogThread IMU    100 Hz

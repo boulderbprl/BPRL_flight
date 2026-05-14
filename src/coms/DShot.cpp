@@ -72,25 +72,22 @@ static void     switch_to_input_capture(void);
 static void     decode_all_channels(void);
 static bool     decode_gcr(const uint32_t edges[21], uint32_t *erpm_out);
 
+/* ChibiOS DMA stream handle — allocated in dshot_init(). */
+static const stm32_dma_stream_t *s_dma6 = nullptr;
+
 /* ═══════════════════════════════════════════════════════════════════════════
- * DMA TC interrupt — fires after all 17 DMA burst slots complete.
- * Switches pins to IC mode to receive the bidirectional ESC response.
+ * DMA TC callback — invoked by ChibiOS DMAv2 ISR after all burst slots done.
+ * Registered via dmaStreamAlloc(); no OSAL_IRQ prologue/epilogue needed.
  * ═══════════════════════════════════════════════════════════════════════════ */
-OSAL_IRQ_HANDLER(STM32_DMA2_CH6_HANDLER)  // TIM1_UP on DMA2 Stream 6 (H7 DMAMUX)
+static void dshot_dma_tc(void *param, uint32_t flags)
 {
-    OSAL_IRQ_PROLOGUE();
+    (void)param; (void)flags;
 
-    /* Clear TC flag on DMA2 Stream 6. */
-    DMA2->HIFCR = DMA_HIFCR_CTCIF6;
-
-    /* Stop TIM1 and DMA. */
-    TIM1->CR1  &= ~TIM_CR1_CEN;
-    DMA2_Stream6->CR &= ~DMA_SxCR_EN;
+    /* Stop TIM1. DMA stream was already disabled by ChibiOS ISR. */
+    TIM1->CR1 &= ~TIM_CR1_CEN;
 
     /* Switch all 4 motor pins to floating input for ESC response capture. */
     switch_to_input_capture();
-
-    OSAL_IRQ_EPILOGUE();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -171,9 +168,9 @@ static void switch_to_output(void)
     GPIOA->PUPDR   = (GPIOA->PUPDR
                       & ~(0x3U << 16) & ~(0x3U << 18) & ~(0x3U << 20) & ~(0x3U << 22));
     /* AF1 for pins 8-11 is in AFRH (bits 0-15). */
-    GPIOA->AFR[1]  = (GPIOA->AFR[1]
-                      & ~(0xFU << 0) & ~(0xFU << 4) & ~(0xFU << 8) & ~(0xFU << 12))
-                     | (0x1U << 0) | (0x1U << 4) | (0x1U << 8) | (0x1U << 12);
+    GPIOA->AFRH  = (GPIOA->AFRH
+                    & ~(0xFU << 0) & ~(0xFU << 4) & ~(0xFU << 8) & ~(0xFU << 12))
+                   | (0x1U << 0) | (0x1U << 4) | (0x1U << 8) | (0x1U << 12);
 
     /* Restore TIM1 CH1-4 to PWM mode 2 output. */
     TIM1->CCMR1 = (6U << 4)  | TIM_CCMR1_OC1PE  // CH1 PWM mode 2
@@ -351,28 +348,24 @@ void dshot_init(void)
                 | (((uint32_t)(&TIM1->CCR1) - (uint32_t)TIM1) >> 2) << TIM_DCR_DBA_Pos;
     TIM1->DIER  = TIM_DIER_UDE; // update DMA request enable
 
-    /* ── DMA2 Stream 6 for TIM1_UP ─────────────────────────────────────── */
-    /*
-     * On STM32H7, DMAMUX routes TIM1_UP to DMA2.
-     * Stream 6 request: set DMAMUX1 channel 6 to TIM1_UP (request ID 11 on H7).
-     */
-    DMA2_Stream6->CR  = 0U;
-    while (DMA2_Stream6->CR & DMA_SxCR_EN) {} // wait for disable
+    /* ── DMA2 Stream 6 for TIM1_UP — allocated through ChibiOS DMA layer ── */
+    s_dma6 = dmaStreamAlloc(STM32_DMA_STREAM_ID(2, 6), CORTEX_MINIMUM_PRIORITY,
+                             dshot_dma_tc, nullptr);
+    osalDbgAssert(s_dma6 != nullptr, "DMA2 stream 6 unavailable");
 
-    DMAMUX1_Channel14->CCR = 11U; // TIM1_UP request ID on STM32H7
+    /* Route TIM1_UP (request ID 11 on STM32H7) via DMAMUX. */
+    dmaSetRequestSource(s_dma6, 11U);
 
-    DMA2_Stream6->PAR  = (uint32_t)&TIM1->DMAR;
-    DMA2_Stream6->M0AR = (uint32_t)s_dma_buf;
-    DMA2_Stream6->NDTR = 68U;                  // 17 slots × 4 channels
-    DMA2_Stream6->FCR  = DMA_SxFCR_DMDIS;      // direct mode (no FIFO)
-    DMA2_Stream6->CR   = DMA_SxCR_MINC         // memory increment
-                       | (0x2U << DMA_SxCR_MSIZE_Pos)   // 32-bit memory
-                       | (0x2U << DMA_SxCR_PSIZE_Pos)   // 32-bit peripheral
-                       | (0x1U << DMA_SxCR_DIR_Pos)     // memory → peripheral
-                       | DMA_SxCR_TCIE;                  // TC interrupt
-
-    /* Enable DMA2 Stream 6 interrupt in NVIC. */
-    nvicEnableVector(DMA2_Stream6_IRQn, CORTEX_MINIMUM_PRIORITY);
+    dmaStreamSetPeripheral(s_dma6, &TIM1->DMAR);
+    dmaStreamSetMemory0(s_dma6, s_dma_buf);
+    dmaStreamSetTransactionSize(s_dma6, 68U);              // 17 slots × 4 channels
+    s_dma6->stream->FCR = DMA_SxFCR_DMDIS;                // direct mode (no FIFO)
+    dmaStreamSetMode(s_dma6,
+        DMA_SxCR_MINC                          // memory increment
+        | (0x2U << DMA_SxCR_MSIZE_Pos)         // 32-bit memory
+        | (0x2U << DMA_SxCR_PSIZE_Pos)         // 32-bit peripheral
+        | (0x1U << DMA_SxCR_DIR_Pos)           // memory → peripheral
+        | DMA_SxCR_TCIE);                      // TC interrupt → calls dshot_dma_tc
 
     /* Enable TIM1 CC interrupt for bidirectional capture. */
     nvicEnableVector(TIM1_CC_IRQn, CORTEX_MINIMUM_PRIORITY);
@@ -387,13 +380,10 @@ void dshot_write(const uint16_t throttle[4])
     TIM1->CNT    = 0U;
     TIM1->SR     = 0U;
 
-    DMA2_Stream6->CR  &= ~DMA_SxCR_EN;
-    while (DMA2_Stream6->CR & DMA_SxCR_EN) {}
-    DMA2->HIFCR        = DMA_HIFCR_CTCIF6 | DMA_HIFCR_CHTIF6 |
-                         DMA_HIFCR_CTEIF6 | DMA_HIFCR_CDMEIF6;
-    DMA2_Stream6->M0AR = (uint32_t)s_dma_buf;
-    DMA2_Stream6->NDTR = 68U;
-    DMA2_Stream6->CR  |= DMA_SxCR_EN;
+    dmaStreamDisable(s_dma6);
+    dmaStreamSetMemory0(s_dma6, s_dma_buf);
+    dmaStreamSetTransactionSize(s_dma6, 68U);
+    dmaStreamEnable(s_dma6);
 
     /* Start TIM1 — DMA will feed CCR1-4 on each update event. */
     TIM1->CR1 |= TIM_CR1_CEN;

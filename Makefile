@@ -144,6 +144,9 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/PWM.cpp \
          src/coms/DShot.cpp \
          src/coms/Radio.cpp \
+         src/coms/SBUS.cpp \
+         src/coms/CRSF.cpp \
+         src/usb_serial.cpp \
          src/logging/Logger.cpp
 
 ASMSRC  = $(ALLASMSRC)
@@ -165,7 +168,7 @@ UDEFS   = $(BOARD_UDEFS) $(UDEFS_EXTRA)
 UADEFS  =
 UINCDIR =
 ULIBDIR =
-ULIBS   =
+ULIBS   = -lm
 
 ##############################################################################
 # Common rules
