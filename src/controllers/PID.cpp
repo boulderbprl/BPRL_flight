@@ -1,10 +1,6 @@
 #include "PID.hpp"
+#include "src/math/math.hpp"
 #include "ch.h"
-#include <cmath>
-
-static inline float constrain_float(float v, float lo, float hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
 
 PID::PID(float kp, float ki, float kd, float imax, float fcut_hz)
     : _kp(kp), _ki(ki), _kd(kd)
@@ -41,10 +37,9 @@ float PID::update(float error)
 
     float output = _kp * error + _integrator;
     if (dt > 0.0f) {
-        const float raw_d = (error - _last_error) / dt;
-        const float rc    = 1.0f / (2.0f * M_PI * _fcut_hz);
-        const float alpha = dt / (dt + rc);
-        _last_derivative += alpha * (raw_d - _last_derivative);
+        const float raw_d = derivative(error, _last_error, dt);
+        const float alpha = lowpass_alpha(_fcut_hz, dt);
+        _last_derivative  = lowpass(raw_d, _last_derivative, alpha);
         output += _kd * _last_derivative;
     }
 

@@ -3,7 +3,7 @@
 
 /* ── Scalar helpers ──────────────────────────────────────────────────────── */
 
-float constrain_f(float v, float lo, float hi)
+float constrain_float(float v, float lo, float hi)
 {
     return v < lo ? lo : (v > hi ? hi : v);
 }
@@ -82,7 +82,7 @@ void quat_to_euler(const Quat& q, float& roll, float& pitch, float& yaw)
     roll  = atan2f(2.0f*(w*x + y*z), 1.0f - 2.0f*(x*x + y*y));
 
     float sp = 2.0f*(w*y - z*x);
-    sp = constrain_f(sp, -1.0f, 1.0f);
+    sp = constrain_float(sp, -1.0f, 1.0f);
     pitch = asinf(sp);
 
     yaw   = atan2f(2.0f*(w*z + x*y), 1.0f - 2.0f*(y*y + z*z));

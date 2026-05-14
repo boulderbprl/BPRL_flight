@@ -136,8 +136,8 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/PID.cpp \
          src/controllers/AttitudeController.cpp \
          src/controllers/MotorMixer.cpp \
-         src/coms/ICM20948.cpp \
-         src/coms/ICM20602.cpp \
+         src/coms/IMUs/ICM20948.cpp \
+         src/coms/IMUs/ICM20602.cpp \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/I2C.cpp \

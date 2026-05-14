@@ -1,10 +1,7 @@
 #include "AttitudeController.hpp"
+#include "src/math/math.hpp"
 #include <cmath>
 #include <algorithm>
-
-static inline float constrain_float(float v, float lo, float hi) {
-    return v < lo ? lo : (v > hi ? hi : v);
-}
 
 AttitudeController::AttitudeController()
     : _roll_att  (4.50f, 0.00f, 0.000f, 0.5f, 30.0f)

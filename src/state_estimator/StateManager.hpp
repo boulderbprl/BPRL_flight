@@ -60,17 +60,6 @@ public:
     float pitch()   const;
     float yaw()     const;
 
-    // Individual state accessors (convenience).
-    float p()       const;
-    float q_rate()  const;
-    float r()       const;
-    float z_pos()   const;
-    float z_vel()   const;
-    float z_accel() const;
-    float p_dot()   const;
-    float q_dot()   const;
-    float r_dot()   const;
-
 private:
     EKF  _lanes[NUM_LANES];
     int  _primary;

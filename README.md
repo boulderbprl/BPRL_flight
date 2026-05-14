@@ -274,7 +274,7 @@ All math helpers live in `src/math/math.hpp` / `src/math/math.cpp`. The quaterni
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `constrain_f` | `float constrain_f(float v, float lo, float hi)` | Clamps `v` to `[lo, hi]`. |
+| `constrain_float` | `float constrain_float(float v, float lo, float hi)` | Clamps `v` to `[lo, hi]`. |
 
 ### Signal processing
 
@@ -303,6 +303,26 @@ The `Quat` struct holds `{float w, x, y, z}`.
 | `quat_dot` | `float quat_dot(const Quat& a, const Quat& b)` | 4-element dot product. Used for antipodal sign checks (`dot < 0 → flip sign before SLERP`). |
 | `quat_to_euler` | `void quat_to_euler(const Quat& q, float& roll, float& pitch, float& yaw)` | Extracts ZYX Euler angles (rad) from `q_NED→Body`. Pitch is clamped to `[−1, 1]` before `asin` to guard against numerical overflow. |
 | `quat_to_rot_body2ned` | `void quat_to_rot_body2ned(const Quat& q, float R[3][3])` | Builds the 3×3 DCM that maps body-frame vectors to NED: `v_NED = R · v_body`. For `q_NED→Body` this equals `R(q)ᵀ = R(q*)`. `R` is stored row-major. |
+
+### N×N matrix operations
+
+Three header-only templates parameterized on the square dimension `Dim`. Because they are templates the full definitions live in the header — no `.cpp` entry.
+
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `mat_mul` | `void mat_mul<Dim>(const float A[Dim][Dim], const float B[Dim][Dim], float C[Dim][Dim])` | Matrix multiply `C = A · B`. `C` must not alias `A` or `B`. Uses an early-out on zero entries to skip work on sparse matrices like the EKF Jacobian. |
+| `mat_add` | `void mat_add<Dim>(const float A[Dim][Dim], const float B[Dim][Dim], float C[Dim][Dim])` | Element-wise addition `C = A + B`. `C` may alias `A` or `B`. |
+| `mat_trans` | `void mat_trans<Dim>(const float A[Dim][Dim], float AT[Dim][Dim])` | Transpose `AT = Aᵀ`. `AT` must not alias `A`. |
+
+**Usage** — supply the dimension as the template argument:
+```cpp
+float A[4][4], B[4][4], C[4][4];
+mat_mul<4>(A, B, C);     // 4×4 multiply
+mat_trans<4>(A, C);      // 4×4 transpose
+mat_add<4>(C, A, C);     // C += A  (aliasing is safe for mat_add)
+```
+
+Each unique `Dim` value used in the firmware produces a separate compiled instantiation, so avoid calling these with many different sizes.
 
 ---
 

@@ -120,8 +120,4 @@ private:
     // innov[m]: pre-computed innovations (z - h(x)).
     void _update(int m, const float H[][N], const float R_diag[], const float innov[]);
 
-    // ── Fixed-size N×N matrix operations ───────────────────────────────────
-    static void _mmul  (const float A[N][N], const float B[N][N], float C[N][N]);
-    static void _madd  (const float A[N][N], const float B[N][N], float C[N][N]);
-    static void _mtrans(const float A[N][N], float AT[N][N]);
 };

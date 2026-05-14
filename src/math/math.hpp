@@ -12,7 +12,7 @@
 
 /* ── Scalar helpers ──────────────────────────────────────────────────────── */
 
-float constrain_f(float v, float lo, float hi);
+float constrain_float(float v, float lo, float hi);
 
 /* ── Signal processing ───────────────────────────────────────────────────── */
 
@@ -59,3 +59,35 @@ void quat_to_euler(const Quat& q, float& roll, float& pitch, float& yaw);
 // For q = q_NED→Body: R_body2ned = R(q)^T  (conjugate rotation).
 // R is stored row-major: R[row][col].
 void quat_to_rot_body2ned(const Quat& q, float R[3][3]);
+
+/* ── Fixed-size N×N matrix operations ───────────────────────────────────────
+ * Template parameter Dim is the matrix dimension (compile-time constant).
+ * C must not alias A or B in mat_mul.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+#include <cstring>
+
+template<int Dim> inline void mat_mul(const float A[Dim][Dim], const float B[Dim][Dim], float C[Dim][Dim])
+{
+    memset(C, 0, Dim * Dim * sizeof(float));
+    for (int i = 0; i < Dim; ++i)
+        for (int k = 0; k < Dim; ++k) {
+            if (A[i][k] == 0.0f) continue;
+            for (int j = 0; j < Dim; ++j)
+                C[i][j] += A[i][k] * B[k][j];
+        }
+}
+
+template<int Dim> inline void mat_add(const float A[Dim][Dim], const float B[Dim][Dim], float C[Dim][Dim])
+{
+    for (int i = 0; i < Dim; ++i)
+        for (int j = 0; j < Dim; ++j)
+            C[i][j] = A[i][j] + B[i][j];
+}
+
+template<int Dim> inline void mat_trans(const float A[Dim][Dim], float AT[Dim][Dim])
+{
+    for (int i = 0; i < Dim; ++i)
+        for (int j = 0; j < Dim; ++j)
+            AT[j][i] = A[i][j];
+}

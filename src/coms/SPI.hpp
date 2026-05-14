@@ -1,7 +1,7 @@
 #pragma once
 #include "hal.h"
-#include "src/coms/ICM20948.hpp"
-#include "src/coms/ICM20602.hpp"
+#include "src/coms/IMUs/ICM20948.hpp"
+#include "src/coms/IMUs/ICM20602.hpp"
 
 /*
  * SPI bus driver — FMUv5x on-board IMUs.

@@ -1,4 +1,4 @@
-#include "src/coms/ICM20948.hpp"
+#include "src/coms/IMUs/ICM20948.hpp"
 #include <cstring>
 
 // Register map — Bank 0

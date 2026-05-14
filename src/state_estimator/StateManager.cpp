@@ -93,7 +93,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         }
     }
 
-    // ── 6. Soft-blend p/q/r: bias-corrected gyros + optional IMX5 blend ──
+    // ── 6. Soft-blend p/q/r: bias-corrected gyros + IMX5 blend ──
     _blended_p = _blended_q = _blended_r = 0.0f;
     for (int i = 0; i < NUM_LANES; ++i) {
         if (w[i] < 1e-15f || !imu[i].valid) continue;
@@ -248,22 +248,3 @@ float StateManager::yaw() const
     return ya;
 }
 
-float StateManager::p()      const { return _blended_p;  }
-float StateManager::q_rate() const { return _blended_q;  }
-float StateManager::r()      const { return _blended_r;  }
-float StateManager::z_pos()  const { return _lanes[_primary].state()[iZ]; }
-
-float StateManager::z_vel() const
-{
-    // Body-frame vertical velocity w projected to inertial Z via R_b2n row 2.
-    const float* st = _lanes[_primary].state();
-    Quat q = { st[iQ0], st[iQ1], st[iQ2], st[iQ3] };
-    float R[3][3];
-    quat_to_rot_body2ned(q, R);
-    return R[2][0]*st[iU] + R[2][1]*st[iV] + R[2][2]*st[iW];
-}
-
-float StateManager::z_accel() const { return _wd_filt;    }
-float StateManager::p_dot()   const { return _pdot_filt;  }
-float StateManager::q_dot()   const { return _qdot_filt;  }
-float StateManager::r_dot()   const { return _rdot_filt;  }

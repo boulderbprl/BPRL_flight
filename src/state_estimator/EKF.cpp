@@ -105,10 +105,10 @@ void EKF::predict(float dt, const float accel[3], const float gyro[3])
 
     // ── Covariance propagation: P = F*P*F^T + Q ──────────────────────────
     _build_F(dt, gyro_corr);
-    _mmul(_F, _P, _wA);        // wA = F * P
-    _mtrans(_F, _wB);           // wB = F^T
-    _mmul(_wA, _wB, _P);       // P  = F * P * F^T
-    _madd(_P, _Q, _P);          // P += Q
+    mat_mul<N>(_F, _P, _wA);        // wA = F * P
+    mat_trans<N>(_F, _wB);           // wB = F^T
+    mat_mul<N>(_wA, _wB, _P);       // P  = F * P * F^T
+    mat_add<N>(_P, _Q, _P);          // P += Q
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -227,7 +227,7 @@ void EKF::update_gravity(const float accel[3], float R_var)
 {
     if (!_initialized) return;
 
-    // Gate: only correct attitude when vehicle is near-hover (|a| ≈ g)
+    // Gate: only correct attitude when vehicle is near-hover (|a| ~ g)
     float norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
     if (fabsf(norm - GRAVITY) > GRAV_GATE_MS2) return;
 
@@ -412,29 +412,3 @@ Quat EKF::_get_quat() const
     return { _x[iQ0], _x[iQ1], _x[iQ2], _x[iQ3] };
 }
 
-/* ── Matrix operations (N×N) ─────────────────────────────────────────────── */
-
-void EKF::_mmul(const float A[N][N], const float B[N][N], float C[N][N])
-{
-    memset(C, 0, N * N * sizeof(float));
-    for (int i = 0; i < N; ++i)
-        for (int k = 0; k < N; ++k) {
-            if (A[i][k] == 0.0f) continue;
-            for (int j = 0; j < N; ++j)
-                C[i][j] += A[i][k] * B[k][j];
-        }
-}
-
-void EKF::_madd(const float A[N][N], const float B[N][N], float C[N][N])
-{
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
-            C[i][j] = A[i][j] + B[i][j];
-}
-
-void EKF::_mtrans(const float A[N][N], float AT[N][N])
-{
-    for (int i = 0; i < N; ++i)
-        for (int j = 0; j < N; ++j)
-            AT[j][i] = A[i][j];
-}

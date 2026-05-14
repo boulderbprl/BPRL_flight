@@ -1,4 +1,4 @@
-#include "src/coms/ICM20602.hpp"
+#include "src/coms/IMUs/ICM20602.hpp"
 #include <cstring>
 
 static constexpr uint8_t REG_SMPLRT_DIV   = 0x19;
