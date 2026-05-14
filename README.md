@@ -177,9 +177,9 @@ State estimation runs in `StateEstThread` at 500 Hz. The core is a three-lane Ex
 g_imu[0] ──► EKF lane 0 ──┐
 g_imu[1] ──► EKF lane 1 ──┼──► StateManager ──► g_state[19]
 g_imu[2] ──► EKF lane 2 ──┘         ▲
-                                     │
-              g_can_imu (IMX5) ──────┤
-              g_mocap (mocap)  ──────┘
+                                    │
+              g_can_imu (IMX5) ─────┤
+              g_mocap (mocap)  ─────┘
 ```
 
 ### EKF internal state (16 states per lane)
