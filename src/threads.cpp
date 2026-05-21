@@ -22,8 +22,12 @@
 #include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
+#include "src/usb_serial.hpp"
 #include "chprintf.h"
+#include "memstreams.h"
+#include "ff.h"
 #include <cstring>
+#include <cstdio>
 
 /* ── Shared state definitions ────────────────────────────────────────────── */
 
@@ -46,6 +50,19 @@ MocapRaw  g_mocap   = {};
 MUTEX_DECL(esc_mtx);
 ESCTelemetry g_esc_telem[4] = {};
 
+/* ── Motor test (always built) ───────────────────────────────────────────── */
+MUTEX_DECL(motor_test_mtx);
+bool     g_motor_test_active = false;
+uint16_t g_motor_test_cmd[4] = {};
+
+/* Serialises all USB CDC writes between USBCmdThread and DebugThread.
+ * chprintf is NOT atomic — it puts characters one at a time, so concurrent
+ * callers interleave at the byte level and produce garbage lines.
+ * USBCmdThread uses chMtxLock (must send a complete response before releasing).
+ * DebugThread uses chMtxTryLock so it skips a $TEL tick rather than blocking
+ * during a potentially long log download. */
+static MUTEX_DECL(s_usb_write_mtx);
+
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
 static AttitudeController att_ctrl;
 static MotorMixer         mixer;
@@ -62,8 +79,18 @@ static THD_WORKING_AREA(waControl,  2048);
 static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
+static THD_WORKING_AREA(waUSBCmd,   4096);  // 4 KB: FatFS log access + line parser
 #ifdef BPRL_DEBUG
-static THD_WORKING_AREA(waDebug,    1024);
+static THD_WORKING_AREA(waDebug,    2048);
+#endif
+
+/* DMA-safe (non-cacheable) buffer for log download via USB */
+static uint8_t __attribute__((section(".nocache"))) s_usb_dl_buf[2048];
+
+#ifdef BPRL_DEBUG
+/* CAN INS message rate counters — incremented by StateEstThread, read by DebugThread */
+static volatile uint32_t s_can_quat_cnt = 0;
+static volatile uint32_t s_can_rate_cnt = 0;
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -178,6 +205,10 @@ static THD_FUNCTION(StateEstThread, arg)
 
         // Run all EKF lanes and derive outputs.
         state_mgr.update(dt, imu_snap, can_snap, mocap_snap);
+#ifdef BPRL_DEBUG
+        if (can_snap.has_new_quat)  s_can_quat_cnt++;
+        if (can_snap.has_new_rates) s_can_rate_cnt++;
+#endif
 
         chMtxLock(&state_mtx);
         state_mgr.get_state(g_state);          // copies full 19-element state
@@ -202,6 +233,25 @@ static THD_FUNCTION(ControlThread, arg)
 
     systime_t next = chVTGetSystemTime();
     while (true) {
+        /* ── Motor test bypass: skip PID/mixer, drive ESCs directly ──────── */
+        {
+            bool     test_active;
+            uint16_t test_cmd[4];
+            chMtxLock(&motor_test_mtx);
+            test_active = g_motor_test_active;
+            if (test_active) memcpy(test_cmd, g_motor_test_cmd, sizeof(test_cmd));
+            chMtxUnlock(&motor_test_mtx);
+
+            if (test_active) {
+                dshot_write(test_cmd);
+                chMtxLock(&state_mtx);
+                memset(g_output, 0, sizeof(g_output));
+                chMtxUnlock(&state_mtx);
+                next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
+                continue;
+            }
+        }
+
         float state[StateIdx::N], euler[3], input[4];
         bool  armed;
         chMtxLock(&state_mtx);
@@ -278,9 +328,200 @@ static THD_FUNCTION(HeartbeatThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * USBCmdThread — event-driven  NORMALPRIO-20  (always built)
+ * Blocks waiting for commands on USB CDC (SDU1).  Handles motor test
+ * and SD log access.  Sleeps until a byte arrives — near-zero overhead
+ * when the drone is not plugged in to a PC.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static void usb_log_list(void)
+{
+    DIR      dir;
+    FILINFO  fno;
+    if (f_opendir(&dir, "/LOGS") != FR_OK) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,no_sd\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+        return;
+    }
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+        if (fno.fattrib & AM_DIR) continue;
+        /* Each chprintf is individually locked — FatFS I/O between entries is
+         * NOT under the mutex so DebugThread is not stalled by SD card reads. */
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "LOG,FILE,%s,%lu\r\n", fno.fname, (uint32_t)fno.fsize);
+        chMtxUnlock(&s_usb_write_mtx);
+    }
+    f_closedir(&dir);
+    chMtxLock(&s_usb_write_mtx);
+    chprintf((BaseSequentialStream *)&SDU1, "LOG,LIST,END\r\n");
+    chMtxUnlock(&s_usb_write_mtx);
+}
+
+static void usb_log_get(const char *fname)
+{
+    char path[32];
+    snprintf(path, sizeof(path), "/LOGS/%s", fname);
+
+    FILINFO fno;
+    if (f_stat(path, &fno) != FR_OK) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,notfound\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+        return;
+    }
+
+    /* Open before sending the size header so we can report open errors cleanly
+     * without having already committed the SIZE handshake to the client. */
+    FIL fil;
+    if (f_open(&fil, path, FA_READ) != FR_OK) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,open_failed\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+        return;
+    }
+
+    /* Hold the mutex for the ENTIRE SIZE header + binary payload.
+     * DebugThread uses chMtxTryLock, so it skips $TEL ticks rather than
+     * injecting bytes into the middle of the binary stream. */
+    chMtxLock(&s_usb_write_mtx);
+    chprintf((BaseSequentialStream *)&SDU1, "LOG,SIZE,%lu\r\n", (uint32_t)fno.fsize);
+    UINT br;
+    while (f_read(&fil, s_usb_dl_buf, sizeof(s_usb_dl_buf), &br) == FR_OK && br > 0) {
+        chnWriteTimeout((BaseChannel *)&SDU1, s_usb_dl_buf, br, TIME_MS2I(2000));
+    }
+    chMtxUnlock(&s_usb_write_mtx);
+    f_close(&fil);
+}
+
+static void usb_log_erase(void)
+{
+    DIR     dir;
+    FILINFO fno;
+    char    path[32];
+    int     erased = 0;
+
+    /* Identify the currently-open log file so we do not delete it. */
+    const char *cur     = logger.current_path();
+    const char *cur_fn  = nullptr;
+    if (cur) {
+        cur_fn = strrchr(cur, '/');
+        if (cur_fn) cur_fn++;  // skip the '/'
+    }
+
+    if (f_opendir(&dir, "/LOGS") != FR_OK) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,no_sd\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+        return;
+    }
+    while (f_readdir(&dir, &fno) == FR_OK && fno.fname[0] != '\0') {
+        if (fno.fattrib & AM_DIR) continue;
+        if (cur_fn && strcmp(fno.fname, cur_fn) == 0) continue;  // skip active file
+        snprintf(path, sizeof(path), "/LOGS/%s", fno.fname);
+        if (f_unlink(path) == FR_OK) erased++;
+    }
+    f_closedir(&dir);
+    chMtxLock(&s_usb_write_mtx);
+    chprintf((BaseSequentialStream *)&SDU1, "LOG,ERASED,%d\r\n", erased);
+    chMtxUnlock(&s_usb_write_mtx);
+}
+
+static void usb_cmd_dispatch(const char *line)
+{
+    if (strncmp(line, "MT,", 3) == 0) {
+        const char *rest = line + 3;
+        if (strcmp(rest, "stop") == 0) {
+            chMtxLock(&motor_test_mtx);
+            g_motor_test_active = false;
+            memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
+            chMtxUnlock(&motor_test_mtx);
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "MT,OK,stopped\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+            return;
+        }
+        int motor = -1, pct = -1;
+        if (sscanf(rest, "%d,%d", &motor, &pct) != 2 ||
+            motor < 0 || motor > 3 || pct < 0 || pct > 100) {
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "MT,ERR,bad_args\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+            return;
+        }
+        chMtxLock(&state_mtx);
+        bool armed = g_armed;
+        chMtxUnlock(&state_mtx);
+        if (armed) {
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "MT,ERR,armed\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+            return;
+        }
+        uint16_t dv = (pct == 0) ? 0U
+                                  : (uint16_t)(48U + (uint32_t)pct * 1999U / 100U);
+        if (dv > 2047U) dv = 2047U;
+        chMtxLock(&motor_test_mtx);
+        g_motor_test_active = true;
+        memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
+        g_motor_test_cmd[motor] = dv;
+        chMtxUnlock(&motor_test_mtx);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "MT,OK,%d,%d\r\n", motor, pct);
+        chMtxUnlock(&s_usb_write_mtx);
+
+    } else if (strncmp(line, "LOG,", 4) == 0) {
+        const char *rest = line + 4;
+        if (strcmp(rest, "list") == 0) {
+            usb_log_list();
+        } else if (strncmp(rest, "get,", 4) == 0) {
+            usb_log_get(rest + 4);
+        } else if (strcmp(rest, "erase") == 0) {
+            usb_log_erase();
+        } else {
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,unknown_cmd\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        }
+    }
+}
+
+static THD_FUNCTION(USBCmdThread, arg)
+{
+    chRegSetThreadName("usbcmd");
+    (void)arg;
+
+    static char   s_line[64];
+    static uint8_t s_len = 0;
+
+    while (true) {
+        msg_t byte = chnGetTimeout((BaseChannel *)&SDU1, TIME_MS2I(50));
+        if (byte == MSG_TIMEOUT || byte == MSG_RESET) continue;
+
+        char c = (char)byte;
+        if (c == '\n' || c == '\r') {
+            if (s_len > 0) {
+                s_line[s_len] = '\0';
+                usb_cmd_dispatch(s_line);
+                s_len = 0;
+            }
+        } else if (s_len < (uint8_t)(sizeof(s_line) - 1U)) {
+            s_line[s_len++] = c;
+        } else {
+            s_len = 0;  // line too long — reset
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * DebugThread — 10 Hz  NORMALPRIO-10  [BPRL_DEBUG only]
- * Prints a status line over USART3 (Telem1 / debug connector).
- * Build with -DBPRL_DEBUG to enable; omit for zero overhead in flight.
+ * Streams a $TEL telemetry line over USB CDC at 10 Hz.
+ * Format:
+ *   $TEL,<time_ms>,<roll°>,<pitch°>,<yaw°>,<p>,<q>,<r>,<thr>,
+ *        <rc_roll>,<rc_pitch>,<rc_yaw>,<armed>,
+ *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
+ *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -288,27 +529,98 @@ static THD_FUNCTION(DebugThread, arg)
     chRegSetThreadName("dbg");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+    uint32_t prev_quat_cnt = 0, prev_rate_cnt = 0;
+    uint32_t can_quat_hz   = 0, can_rate_hz   = 0;
+    int      rate_tick     = 0;
+
     systime_t next = chVTGetSystemTime();
     while (true) {
-        float roll, pitch, yaw, thr;
-        int32_t m0, m1, m2, m3;
-        bool    armed;
+        /* ── Update CAN INS rate estimate once per second (10 ticks) ───── */
+        if (++rate_tick >= 10) {
+            uint32_t qc = s_can_quat_cnt;
+            uint32_t rc = s_can_rate_cnt;
+            can_quat_hz   = qc - prev_quat_cnt;
+            can_rate_hz   = rc - prev_rate_cnt;
+            prev_quat_cnt = qc;
+            prev_rate_cnt = rc;
+            rate_tick     = 0;
+        }
 
+        /* ── Snapshot flight state ──────────────────────────────────────── */
+        float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw;
+        float p, q, r;
+        bool  armed;
         chMtxLock(&state_mtx);
-        roll  = g_euler[0];
-        pitch = g_euler[1];
-        yaw   = g_euler[2];
-        thr   = g_input[InputIdx::THRUST];
-        m0 = g_output[0]; m1 = g_output[1];
-        m2 = g_output[2]; m3 = g_output[3];
-        armed = g_armed;
+        roll     = g_euler[0];
+        pitch    = g_euler[1];
+        yaw      = g_euler[2];
+        p        = g_state[StateIdx::P];
+        q        = g_state[StateIdx::Q];
+        r        = g_state[StateIdx::R];
+        thr      = g_input[InputIdx::THRUST];
+        rc_roll  = g_input[InputIdx::ROLL_TGT];
+        rc_pitch = g_input[InputIdx::PITCH_TGT];
+        rc_yaw   = g_input[InputIdx::YAW_RATE];
+        armed    = g_armed;
         chMtxUnlock(&state_mtx);
 
-        chprintf((BaseSequentialStream *)&SD3,
-            "armed=%d r=%.2f p=%.2f y=%.2f thr=%.2f m=[%ld,%ld,%ld,%ld]\r\n",
-            (int)armed,
-            (double)roll, (double)pitch, (double)yaw, (double)thr,
-            m0, m1, m2, m3);
+        /* ── Snapshot IMU validity ──────────────────────────────────────── */
+        bool imu_v[3];
+        chMtxLock(&imu_mtx);
+        imu_v[0] = g_imu[0].valid;
+        imu_v[1] = g_imu[1].valid;
+        imu_v[2] = g_imu[2].valid;
+        chMtxUnlock(&imu_mtx);
+
+        bool can_v;
+        chMtxLock(&can_imu_mtx);
+        can_v = g_can_imu.valid;
+        chMtxUnlock(&can_imu_mtx);
+
+        /* ── Snapshot ESC telemetry ─────────────────────────────────────── */
+        ESCTelemetry telem[4];
+        dshot_get_telemetry(telem);
+        uint32_t rpm[4];
+        for (int i = 0; i < 4; i++) {
+            rpm[i] = telem[i].valid ? telem[i].erpm / 14U : 0U;
+        }
+
+        /* ── Emit $TEL line over USB ────────────────────────────────────── */
+        /* Format into a local buffer first (non-blocking), then send with a
+         * real timeout.  This avoids the TIME_INFINITE block that chprintf
+         * directly on SDU1 uses when the USB output queue is full, and removes
+         * the USB_ACTIVE guard (chnWriteTimeout handles a disconnected port
+         * gracefully by returning an error rather than hanging). */
+        {
+            static char tel_buf[256];
+            MemoryStream ms;
+            msObjectInit(&ms, (uint8_t *)tel_buf, sizeof(tel_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&ms,
+                "$TEL,%lu,"
+                "%.2f,%.2f,%.2f,"
+                "%.4f,%.4f,%.4f,"
+                "%.3f,%.3f,%.3f,%.3f,%d,"
+                "%lu,%lu,%lu,%lu,"
+                "%d,%d,%d,%d,%lu,%lu\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                (double)(roll  * 57.2958f),
+                (double)(pitch * 57.2958f),
+                (double)(yaw   * 57.2958f),
+                (double)p, (double)q, (double)r,
+                (double)thr,
+                (double)rc_roll, (double)rc_pitch, (double)rc_yaw,
+                (int)armed,
+                rpm[0], rpm[1], rpm[2], rpm[3],
+                (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
+                (int)can_v,
+                can_quat_hz, can_rate_hz);
+            size_t tlen = ms.eos;
+            if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)tel_buf, tlen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
@@ -408,6 +720,7 @@ void threads_start(const ThreadRates &rates)
     chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
+    chThdCreateStatic(waUSBCmd,   sizeof(waUSBCmd),   NORMALPRIO - 20, USBCmdThread,   nullptr);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
 #endif

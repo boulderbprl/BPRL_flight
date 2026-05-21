@@ -4,6 +4,17 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 
 ---
 
+## TODO: 
+Add IMU calibration sequence and offsets to flash memory.
+Add telemtery radio support for mocap/ground station support.
+Add position hold controller.
+Add Thrust model and RPM feedback from Dshot ESC. 
+Add UI for debug tool.
+Add voltage feedback from the analog input on Power1 port. using CubePilot Power Brick Mini
+
+
+---
+
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
@@ -642,4 +653,3 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 
 When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`). The on-board IMUs continue to run and are logged regardless of IMX5 state.
 
-**TODO:** Switch angular rates from FDCAN1 (100 Hz) to UART for raw readings at 1 kHz.

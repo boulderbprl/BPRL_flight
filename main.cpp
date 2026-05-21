@@ -48,9 +48,9 @@ int main(void)
     halInit();
     chSysInit();
 
-#ifdef BPRL_DEBUG
     usb_serial_init();
     chThdSleepMilliseconds(1500);   /* wait for host USB enumeration */
+#ifdef BPRL_DEBUG
     chprintf((BaseSequentialStream *)&SDU1, "\r\nBPRL boot [" BOARD_NAME "]\r\n");
 #endif
 

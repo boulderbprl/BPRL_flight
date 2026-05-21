@@ -164,7 +164,7 @@ CPPWARN = -Wall -Wextra -Wundef
 #
 
 # Board-specific MCU variant + optional debug flag
-UDEFS   = $(BOARD_UDEFS) $(UDEFS_EXTRA)
+UDEFS   = $(BOARD_UDEFS) -DCHPRINTF_USE_FLOAT=1 $(UDEFS_EXTRA)
 UADEFS  =
 UINCDIR =
 ULIBDIR =

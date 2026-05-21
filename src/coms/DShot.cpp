@@ -6,11 +6,15 @@
 /*
  * DShot600 bidirectional implementation for STM32H7 (CubeBlue H7 / CubeOrange+).
  *
- * Motor pin mapping (verify against board schematic before flashing):
- *   Motor 1 (FR) → PA8  = TIM1_CH1
- *   Motor 2 (RL) → PA9  = TIM1_CH2
- *   Motor 3 (FL) → PA10 = TIM1_CH3
- *   Motor 4 (RR) → PA11 = TIM1_CH4
+ * Motor pin mapping:
+ *   Motor 1 (FR) → PA8  = TIM1_CH1  (AF1)
+ *   Motor 2 (RL) → PA9  = TIM1_CH2  (AF1)
+ *   Motor 3 (FL) → PA10 = TIM1_CH3  (AF1)
+ *   Motor 4 (RR) → PE14 = TIM1_CH4  (AF1)
+ *
+ * PA11 (the other TIM1_CH4 mapping) is NOT used: it is the USB OTG_FS D- line
+ * and must remain in USB AF10.  PE14 is the alternate mapping for TIM1_CH4.
+ * Verify your carrier board connects motor 4 ESC signal to PE14.
  *
  * TIM1 is on APB2 (assumed 200 MHz). Adjust ARR/CCR values below if APB2
  * differs — see "APB2 clock" note in the plan.
@@ -157,26 +161,31 @@ static void build_dma_buf(const uint16_t throttle[4])
 /* ── switch_to_output ────────────────────────────────────────────────────── */
 static void switch_to_output(void)
 {
-    /*
-     * Restore PA8-PA11 to AF1 (TIM1_CHx) push-pull output.
-     * MODER = 10 (alternate function), OSPEEDR = 11 (very high), AFR = 1.
-     */
+    /* PA8-PA10 → TIM1_CH1-3 (motors 1-3): AF1, push-pull, very-high speed.
+     * MODER bits: pin8=16-17, pin9=18-19, pin10=20-21. */
     GPIOA->MODER   = (GPIOA->MODER
-                      & ~(0x3U << 16) & ~(0x3U << 18) & ~(0x3U << 20) & ~(0x3U << 22))
-                     | (0x2U << 16) | (0x2U << 18) | (0x2U << 20) | (0x2U << 22);
-    GPIOA->OSPEEDR |= (0x3U << 16) | (0x3U << 18) | (0x3U << 20) | (0x3U << 22);
-    GPIOA->PUPDR   = (GPIOA->PUPDR
-                      & ~(0x3U << 16) & ~(0x3U << 18) & ~(0x3U << 20) & ~(0x3U << 22));
-    /* AF1 for pins 8-11 is in AFRH (bits 0-15). */
-    GPIOA->AFRH  = (GPIOA->AFRH
-                    & ~(0xFU << 0) & ~(0xFU << 4) & ~(0xFU << 8) & ~(0xFU << 12))
-                   | (0x1U << 0) | (0x1U << 4) | (0x1U << 8) | (0x1U << 12);
+                      & ~(0x3U << 16) & ~(0x3U << 18) & ~(0x3U << 20))
+                     | (0x2U << 16) | (0x2U << 18) | (0x2U << 20);
+    GPIOA->OSPEEDR |= (0x3U << 16) | (0x3U << 18) | (0x3U << 20);
+    GPIOA->PUPDR    = (GPIOA->PUPDR
+                       & ~(0x3U << 16) & ~(0x3U << 18) & ~(0x3U << 20));
+    /* AF1 for PA8-PA10 in AFRH (pin8=bits0-3, pin9=bits4-7, pin10=bits8-11). */
+    GPIOA->AFRH = (GPIOA->AFRH & ~(0xFU << 0) & ~(0xFU << 4) & ~(0xFU << 8))
+                | (0x1U << 0) | (0x1U << 4) | (0x1U << 8);
 
-    /* Restore TIM1 CH1-4 to PWM mode 2 output. */
-    TIM1->CCMR1 = (6U << 4)  | TIM_CCMR1_OC1PE  // CH1 PWM mode 2
-                | (6U << 12) | TIM_CCMR1_OC2PE;  // CH2 PWM mode 2
-    TIM1->CCMR2 = (6U << 4)  | TIM_CCMR2_OC3PE  // CH3 PWM mode 2
-                | (6U << 12) | TIM_CCMR2_OC4PE;  // CH4 PWM mode 2
+    /* PE14 → TIM1_CH4 (motor 4): AF1, push-pull, very-high speed.
+     * PA11 is USB OTG_FS D- and must not be touched.
+     * MODER bits: pin14=28-29; AFRH: pin14=bits24-27. */
+    GPIOE->MODER   = (GPIOE->MODER & ~(0x3U << 28)) | (0x2U << 28);
+    GPIOE->OSPEEDR |= (0x3U << 28);
+    GPIOE->PUPDR    = (GPIOE->PUPDR & ~(0x3U << 28));
+    GPIOE->AFRH     = (GPIOE->AFRH & ~(0xFU << 24)) | (0x1U << 24);
+
+    /* TIM1 CH1-4 → PWM mode 2, preload enabled. */
+    TIM1->CCMR1 = (6U << 4)  | TIM_CCMR1_OC1PE
+                | (6U << 12) | TIM_CCMR1_OC2PE;
+    TIM1->CCMR2 = (6U << 4)  | TIM_CCMR2_OC3PE
+                | (6U << 12) | TIM_CCMR2_OC4PE;
     TIM1->CCER  = TIM_CCER_CC1E | TIM_CCER_CC2E |
                   TIM_CCER_CC3E | TIM_CCER_CC4E;
     TIM1->ARR   = DS_ARR;
@@ -188,12 +197,14 @@ static void switch_to_input_capture(void)
     /* Reset edge counters. */
     memset(s_edge_idx, 0, sizeof(s_edge_idx));
 
-    /*
-     * Reconfigure PA8-PA11 as floating digital inputs (no AF needed —
-     * TIM1 IC can sample the same pins when MODER = 00).
-     */
-    GPIOA->MODER  &= ~((0x3U << 16) | (0x3U << 18) | (0x3U << 20) | (0x3U << 22));
-    GPIOA->PUPDR  &= ~((0x3U << 16) | (0x3U << 18) | (0x3U << 20) | (0x3U << 22));
+    /* PA8-PA10 (motors 1-3) → floating digital inputs (MODER=00).
+     * TIM1 IC can sample the same pins without AF when MODER=00. */
+    GPIOA->MODER  &= ~((0x3U << 16) | (0x3U << 18) | (0x3U << 20));
+    GPIOA->PUPDR  &= ~((0x3U << 16) | (0x3U << 18) | (0x3U << 20));
+
+    /* PE14 (motor 4) → floating digital input. */
+    GPIOE->MODER  &= ~(0x3U << 28);
+    GPIOE->PUPDR  &= ~(0x3U << 28);
 
     /*
      * TIM1 input capture: CH1-4 capture on both edges, no prescaler, no filter.
@@ -321,7 +332,7 @@ void dshot_init(void)
     /* ── Enable clocks ─────────────────────────────────────────────────── */
     RCC->APB2ENR  |= RCC_APB2ENR_TIM1EN;
     RCC->AHB1ENR  |= RCC_AHB1ENR_DMA2EN;
-    RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOAEN;
+    RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOAEN | RCC_AHB4ENR_GPIOEEN; /* PA8-10 + PE14 */
 
     /* ── GPIO: PA8-PA11 → TIM1_CH1-4, AF1, push-pull, very-high speed ─── */
     switch_to_output(); // sets MODER/OSPEEDR/AFR for output

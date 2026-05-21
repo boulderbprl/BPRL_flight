@@ -23,6 +23,7 @@ class Logger {
 public:
     bool init();
     bool is_ready() const;
+    const char* current_path() const { return _open ? _current_path : nullptr; }
 
     template<typename T>
     bool write(uint8_t msg_id, const T &msg)
@@ -46,6 +47,7 @@ private:
     size_t   _tail        = 0;
     bool     _open        = false;
     uint32_t _sync_count  = 0;
+    char     _current_path[32] = {};
 
     bool   ring_write(const void *data, size_t n);
     size_t ring_read(void *out, size_t max_n);

@@ -52,6 +52,6 @@
 #define FF_NORTC_YEAR       2024
 #define FF_FS_NOFSINFO      0
 #define FF_FS_LOCK          0
-#define FF_FS_REENTRANT     0       /* LogThread is the sole FatFS caller */
+#define FF_FS_REENTRANT     1       /* USBCmdThread + LogThread both use FatFS */
 #define FF_FS_TIMEOUT       1000
-#define FF_SYNC_t           semaphore_t *
+#define FF_SYNC_t           int     /* index only; actual sync objects in Logger.cpp */

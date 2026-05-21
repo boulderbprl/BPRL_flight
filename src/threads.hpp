@@ -55,6 +55,15 @@ extern MocapRaw g_mocap;
 extern mutex_t      esc_mtx;
 extern ESCTelemetry g_esc_telem[4]; // [FR, RL, FL, RR] — written by DShot ISR
 
+/* ── Motor test (always built) ───────────────────────────────────────────────
+ * Set by USBCmdThread in response to "MT,<motor>,<pct>" USB commands.
+ * ControlThread checks g_motor_test_active each tick; if set it bypasses the
+ * PID+mixer and calls dshot_write(g_motor_test_cmd) directly.
+ * Safety: USBCmdThread refuses to arm test mode while g_armed is true.      */
+extern mutex_t   motor_test_mtx;
+extern bool      g_motor_test_active;
+extern uint16_t  g_motor_test_cmd[4]; // DShot values [FR, RL, FL, RR]
+
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
  * All rates live in main.cpp.  Change them there to retune loop timing.    */
 
