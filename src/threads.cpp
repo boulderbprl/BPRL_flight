@@ -312,7 +312,7 @@ static THD_FUNCTION(RadioThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * HeartbeatThread — 5 Hz  NORMALPRIO-5
+ * HeartbeatThread — 1 Hz  NORMALPRIO-5
  * LED heartbeat, SD log flush (future), watchdog pat (future).
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(HeartbeatThread, arg)
@@ -430,7 +430,15 @@ static void usb_log_erase(void)
 
 static void usb_cmd_dispatch(const char *line)
 {
-    if (strncmp(line, "MT,", 3) == 0) {
+    if (strcmp(line, "BOOT") == 0) {
+        /* Reboot into the CubePilot bootloader for firmware upload. */
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "BOOT,OK\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+        chThdSleepMilliseconds(50);   /* flush before reset */
+        NVIC_SystemReset();
+        /* unreachable */
+    } else if (strncmp(line, "MT,", 3) == 0) {
         const char *rest = line + 3;
         if (strcmp(rest, "stop") == 0) {
             chMtxLock(&motor_test_mtx);

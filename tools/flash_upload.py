@@ -287,16 +287,25 @@ class FirmwareUploader:
     def send_reboot_request(self, flight_baud=57600):
         """
         Try to reboot a running board into the bootloader.
-        Sends MAVLink COMMAND_LONG(PREFLIGHT_REBOOT) at flight_baud,
-        then falls back to NSH 'reboot -b' command.
+        Sends BPRL 'BOOT' command first; falls back to MAVLink/NSH for
+        boards running ArduPilot or PX4.
         """
         try:
+            # BPRL firmware: send our BOOT command (USB CDC — baud ignored)
+            self.port.baudrate = 115200
+            self.port.write(b'BOOT\n')
+            self.port.flush()
+            time.sleep(0.1)
+        except Exception:
+            pass
+        try:
+            # Fallback: MAVLink PREFLIGHT_REBOOT + NSH 'reboot -b'
             self.port.baudrate = flight_baud
             self.port.flush()
             self._send(self._MAVLINK_REBOOT_ID1)
             self._send(self._MAVLINK_REBOOT_ID0)
-            self._send(b'\x0d\x0d\x0d')      # NSH init
-            self._send(b'reboot -b\n')        # NSH reboot-to-bootloader
+            self._send(b'\x0d\x0d\x0d')
+            self._send(b'reboot -b\n')
             self._send(b'\x0d\x0d\x0d')
             self._send(b'reboot\n')
             self.port.flush()

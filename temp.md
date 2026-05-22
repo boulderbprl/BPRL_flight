@@ -1,126 +1,162 @@
 # BPRL Debug Session — Issues & Findings
 
-## Root Cause #1: PA11 USB/DShot Conflict (FIXED)
+## Hardware Configuration
 
-**What happened:** `dshot_init()` → `switch_to_output()` directly writes to GPIOA MODER/AFRH
-registers for pins 8–11 (TIM1_CH1–4). PA11 is also the USB OTG_FS D- line (set to AF10 in
-`board.c`). The DShot init overwrote it with TIM1 AF1 the moment `motor_output_init()` ran,
-killing USB hardware. The port node `/dev/ttyACM0` stayed alive on the host but no data flowed.
-
-**Symptoms:**
-- `python3 tools/bprl.py telemetry` → "no USB data — check connection", `lines_rx=0`
-- Motor test commands sent but no response
-- `logs list` timeout
-- ESCs power-up chime plays (hardware works), but NO ESC-connected-to-FC chime (no DShot reaching ESCs)
-
-**Fix applied (`src/coms/DShot.cpp`):**
-- Motor 4 moved from PA11 → PE14 (the other TIM1_CH4 mapping on STM32H7)
-- GPIOE clock enable added (`RCC_AHB4ENR_GPIOEEN`)
-- PA11 is no longer touched by DShot code
-
-**Status:** Built, not yet flashed/verified.
+- **Flight controller:** CubeOrange+ (STM32H743ZI) on CubePilot standard carrier board
+- **IMU/INS:** IMX5 on CAN1 (PH13=TX, PH14=RX → AF9)
+- **RC radio:** CRSF receiver on TELEM1 (USART2, PD5=TX, PD6=RX)
+- **Motors:** AUX OUT 2, 3, 4, 5 (ESC signal lines)
+- **USB debug:** Main USB port on the Cube (PA11=DM, PA12=DP → AF10, OTG_FS)
 
 ---
 
-## Root Cause #2: Wrong DShot Timer for Standard CubePilot Carrier (UNRESOLVED)
+## Root Cause #1: PA11 USB/DShot Conflict — FIXED
 
-**Finding:** The current DShot code uses TIM1 (PA8–PA10, PE14). The standard CubePilot carrier
-board routes its AUX OUT pins to **TIM8** and **TIM4** — not TIM1.
+**What happened:** The original DShot code mapped Motor 4 to PA11 (TIM1_CH4). PA11 is the
+USB OTG_FS D- line. `switch_to_output()` overwrote PA11's AF with TIM1 AF1, killing USB.
 
-### Standard carrier AUX OUT pin mapping (STM32H7):
-
-| AUX OUT | STM32H7 Pin | Timer Channel | Status in firmware |
-|---------|-------------|---------------|--------------------|
-| AUX 1   | PC6         | TIM8_CH1 (AF3) | Free — but known DShot issue per user |
-| AUX 2   | PC7         | TIM8_CH2 (AF3) | **CONFLICT: USART6 RX (SBUS input)** |
-| AUX 3   | PC8         | TIM8_CH3 (AF3) | **CONFLICT: SDMMC1 D0** |
-| AUX 4   | PC9         | TIM8_CH4 (AF3) | **CONFLICT: SDMMC1 D1** |
-| AUX 5   | PD14        | TIM4_CH3 (AF2) | **CLEAN — no conflict** |
-| AUX 6   | PD15        | TIM4_CH4 (AF2) | **CLEAN — no conflict** |
-
-The current DShot code (TIM1 on PA8–PA10/PE14) outputs to pins that are **not connected to
-any AUX OUT on the standard carrier**. This explains why no ESC connection chime plays.
-
-### Conflicts in detail:
-
-**AUX 2 / PC7:** `board.c` configures PC7 as USART6 RX (SBUS RC input, AF8).
-**AUX 3-4 / PC8-PC9:** `board.c` configures PC8–PC11 as SDMMC1 D0–D3 (AF12). The SD card
-slot on the standard carrier is physically wired to SDMMC1 (PC8–PC12). These pins cannot be
-moved in software — the hardware trace is fixed.
+**Fix applied:** Motor 4 was moved off PA11 entirely. The entire DShot pin mapping was later
+superseded by Root Cause #2 fix.
 
 ---
 
-## Potential Solutions
+## Root Cause #2: DShot Targeting Wrong Pins — FIXED
 
-### Option A: Switch radio + accept no SD logging (cleanest short-term)
-- Switch from SBUS → CRSF (USART3/TELEM1, already wired PD8/PD9). This frees PC7 for AUX 2.
-- Disable SDMMC1 in firmware temporarily. This frees PC8–PC9 for AUX 3–4.
-- Result: Motors on AUX 2–5 using TIM8_CH2–4 + TIM4_CH3, no SD logging.
-- Radio change: `RADIO_PROTOCOL=CRSF` in `src/coms/Radio.hpp` (already supported).
+**What happened:** The DShot code drove TIM1 on PA8/PA9/PA10/PE14. These pins are **not
+connected to any AUX OUT header** on the CubePilot standard carrier. The CubePilot carrier
+uses a dual-MCU architecture:
 
-### Option B: Use AUX 5–6 for 2 motors + find 2 more clean channels
-- AUX 5 (PD14/TIM4_CH3) and AUX 6 (PD15/TIM4_CH4) are both clean.
-- Only 2 clean AUX channels available → can't drive 4 motors this way alone.
-- Would need to wire remaining 2 motors to custom pads/pins not on the AUX rail.
+- **FMU (STM32H743)** — runs our firmware, drives AUX OUT via PE9/PE11/PE13/PE14 (TIM1)
+  and PD13/PD14 (TIM4).
+- **IOMCU (STM32F100)** — separate co-processor that handles MAIN OUT 1-8 and RC input.
+  The FMU communicates with the IOMCU over USART6 (PC6/PC7). This is an internal bridge,
+  not available for SBUS or any other external device.
 
-### Option C: Remap DShot to TIM8+TIM4 (full fix, requires carrier pin understanding)
-Full port to TIM8 (PC6–PC9) + TIM4 (PD14–PD15) for all 6 AUX outputs.
-Requires resolving SBUS and SDMMC conflicts first. DShot code would need significant
-refactor since TIM8 and TIM4 are separate timers (no 4-channel single DMA burst).
+**Correct AUX OUT pin mapping (from ArduPilot hwdef):**
 
-### Option D: Alternative carrier board
-A custom or different carrier that routes motor outputs to pins not shared with SD/SBUS.
+| AUX OUT | STM32H743 Pin | Timer Channel | AF |
+|---------|--------------|---------------|----|
+| AUX 1   | PE14         | TIM1_CH4      | AF1 |
+| AUX 2   | PE13         | TIM1_CH3      | AF1 |
+| AUX 3   | PE11         | TIM1_CH2      | AF1 |
+| AUX 4   | PE9          | TIM1_CH1      | AF1 |
+| AUX 5   | PD13         | TIM4_CH2      | AF2 |
+| AUX 6   | PD14         | TIM4_CH3      | AF2 |
+
+**Fix applied (`src/coms/DShot.cpp` — complete rewrite):**
+
+| Motor | AUX OUT | Pin  | Timer Channel |
+|-------|---------|------|---------------|
+| 0 (FR)| AUX 2   | PE13 | TIM1_CH3      |
+| 1 (RL)| AUX 3   | PE11 | TIM1_CH2      |
+| 2 (FL)| AUX 4   | PE9  | TIM1_CH1      |
+| 3 (RR)| AUX 5   | PD13 | TIM4_CH2      |
+
+Motors 0–2 use TIM1 with a 3-channel DMA burst (DBL=2, CCR1/CCR2/CCR3).
+Motor 3 uses TIM4 with a 1-channel DMA burst (DBL=0, CCR2 only).
+Both timers are started back-to-back to minimise inter-frame skew.
 
 ---
 
-## Other Fixes Made This Session
+## Root Cause #3: Wrong DMAMUX Source ID — FIXED
 
-### `src/threads.cpp` — DebugThread MemoryStream (fixes USB data flow)
+**What happened:** The original code called `dmaSetRequestSource(stream, 11U)` claiming
+request 11 = TIM1_UP. Per `third_party/ChibiOS/os/hal/ports/STM32/STM32H7xx/stm32_dmamux.h`,
+request 11 is actually **TIM1_CH1** (a capture-compare event), not the update event.
+With `TIM_DIER_UDE` set on TIM1, the timer fires TIM1_UP (request 15) but the DMAMUX
+was wired to TIM1_CH1 (request 11) — a mismatch that caused DMA to never trigger.
+
+**Fix applied:**
+- `DMAMUX_TIM1_UP = 15` (STM32_DMAMUX1_TIM1_UP)
+- `DMAMUX_TIM4_UP = 32` (STM32_DMAMUX1_TIM4_UP)
+
+---
+
+## Root Cause #4: SBUS Wired to FMU↔IOMCU Bridge — FIXED
+
+**What happened:** The firmware configured PC7/USART6 as SBUS RX. On the CubePilot carrier,
+PC6/PC7 is the **internal USART6 bridge between the FMU and the IOMCU co-processor**. The
+RCIN connector on the carrier routes RC input to the IOMCU (not the FMU). Attempting to
+receive raw SBUS on PC7 from an external receiver would conflict with the IOMCU bridge.
+
+**Fix applied:**
+- USART6 (PC6/PC7) configuration **removed** from both `boards/CubeOrangePlus/board.c`
+  and `boards/CubeBlueH7/board.c`.
+- RC radio switched to **CRSF on TELEM1 (USART2, PD5=TX, PD6=RX, AF7)**.
+- `src/coms/CRSF.cpp` updated from `SD3` → `SD2`.
+- `src/coms/Radio.hpp` default changed to `RADIO_PROTO_CRSF`.
+- TELEM1 comment in both `board.c` files corrected (was mislabelled as USART3).
+
+---
+
+## Other Fixes Made
+
+### `src/threads.cpp` — DebugThread MemoryStream
 `chprintf` directly on SDU1 uses `TIME_INFINITE` on the output queue. If the queue fills,
 DebugThread blocks forever. Switched to: format `$TEL` line into a local buffer via
-`MemoryStream` (non-blocking), then send with `chnWriteTimeout(..., 50 ms)`. No more blocking.
+`MemoryStream` (non-blocking), then send with `chnWriteTimeout(..., 50 ms)`.
 
 ### `Makefile` — `CHPRINTF_USE_FLOAT=1`
-`chprintf` defaults to no floating-point support. Without this flag, `%.2f` etc. in `$TEL`
-emit nothing, producing empty fields that crash the Python float parser.
+Without this flag, `%.2f` format specifiers in `$TEL` emit nothing, producing empty fields
+that crash the Python float parser in `tools/bprl.py`.
 
 ### `tools/bprl.py` — Diagnostic improvements
-- `lines_rx` counter in telemetry panel: shows total lines received, immediate USB health check.
-- Three-state status: "no USB data", "USB ok but no $TEL", "stale contact".
+- `lines_rx` counter in telemetry panel: shows total lines received.
+- Three-state USB status: "no USB data", "USB ok but no $TEL", "stale contact".
 - `TelState.last_rx` initialised to `time.monotonic()` (was 0.0 → always showed stale).
 
 ### `src/threads.cpp` — `s_usb_write_mtx`
 `chprintf` is not atomic. `DebugThread` and `USBCmdThread` were interleaving bytes on SDU1,
 producing corrupt lines. Mutex serialises all USB CDC writes.
 
+### `main.cpp` — Heartbeat LED rate
+HeartbeatThread period changed from `TIME_MS2I(200)` → `TIME_MS2I(250)` (2 Hz visible blink,
+toggle every 250 ms). Lets you visually confirm the firmware is running after a flash.
+
+---
+
+## Current Port Assignment (Complete Picture)
+
+| Peripheral        | Port / Protocol | STM32 Pins      | ChibiOS Driver |
+|-------------------|-----------------|-----------------|----------------|
+| USB debug/cmd     | OTG_FS          | PA11=DM, PA12=DP| SDU1           |
+| IMX5 INS          | CAN1 / FDCAN1   | PH13=TX, PH14=RX| CAND1          |
+| CRSF radio        | TELEM1 / USART2 | PD5=TX, PD6=RX  | SD2            |
+| Future sensor     | TELEM2 / USART3 | PD8=TX, PD9=RX  | SD3            |
+| Motor 0 (AUX 2)   | TIM1_CH3        | PE13            | DShot.cpp      |
+| Motor 1 (AUX 3)   | TIM1_CH2        | PE11            | DShot.cpp      |
+| Motor 2 (AUX 4)   | TIM1_CH1        | PE9             | DShot.cpp      |
+| Motor 3 (AUX 5)   | TIM4_CH2        | PD13            | DShot.cpp      |
+| SD card logging   | SDMMC1          | PC8-PC12, PD2   | FatFS          |
+| IMU SPI bus 1     | SPI1            | PA5/PA6/PA7     | SPIDriver      |
+| IMU SPI bus 2     | SPI4            | PE2/PE5/PE6     | SPIDriver      |
+| Sensor power rail | GPIO output     | PE3             | boardInit      |
+
+**No pin conflicts exist** between any of these peripherals.
+
 ---
 
 ## Immediate Next Steps
 
-1. **Flash current build** and verify USB is restored (PA11 fix):
+1. **Flash current build** and verify heartbeat LED blinks at 2 Hz (firmware alive check):
    ```
    make flash BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG
-   python3 tools/bprl.py telemetry   # lines_rx should increment
    ```
 
-2. **Decide on radio protocol** (SBUS vs CRSF) — this determines whether AUX 2 (PC7) is
-   available for motors.
+2. **Verify USB telemetry** with Python tool:
+   ```
+   python3 tools/bprl.py telemetry
+   # lines_rx should increment; roll/pitch/yaw fields should show floats
+   ```
 
-3. **Decide on SD logging** during motor testing — if SD card is removed, PC8–PC9 become
-   free for AUX 3–4.
+3. **Connect CRSF receiver** to TELEM1 connector (TX→receiver RX, RX→receiver TX).
+   Verify `armed` and channel values appear in the telemetry stream.
 
-4. **Rewrite DShot for TIM8+TIM4** targeting AUX 2–5 actual pins once pin conflicts resolved.
+4. **Test motor outputs** — with props off, use motor test command:
+   ```
+   python3 tools/bprl.py motor_test 0 10   # Motor 0 at 10%
+   ```
+   ESC should play the "connected to FC" chime on first DShot packet, then spin briefly.
 
-
-
-## Other things to check.
-
-Im using the cube pilot standard carrier board for both the Cube Blue and Cube Orange+. 
-the IMX5 is connected to CAN1
-the SBUS radio is connected to RCIN.
-the motors are connected to AUX OUT 2,3,4,5
-Im connecting the programming/DEBUG usb over the main USB port on teh cube not on the carrier board.
-
-check to make sure the code is set up to use these ports on the cube standard carrier board. 
-
-
+5. **Add future TELEM2 sensor** — use `sdStart(&SD3, ...)` in its driver init.
+   USART3 (PD8=TX, PD9=RX) is already configured in `board.c`.

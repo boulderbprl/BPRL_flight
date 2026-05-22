@@ -38,12 +38,16 @@ void boardInit(void)
     palSetPad(GPIOD, 7U);
     palSetPadMode(GPIOD, 7U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── USART3 — TELEM1 (PD8=TX, PD9=RX) → AF7 ───────────────────────── */
+    /* ── USART2 — TELEM1 (PD5=TX, PD6=RX) → AF7  [CRSF radio] ─────────── */
+    palSetPadMode(GPIOD, 5U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOD, 6U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
+
+    /* ── USART3 — TELEM2 (PD8=TX, PD9=RX) → AF7  [future sensor] ───────── */
     palSetPadMode(GPIOD, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 9U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
 
-    /* ── USART6 — SBUSo RC input (PC7=RX) → AF8 ────────────────────────── */
-    palSetPadMode(GPIOC, 7U, PAL_MODE_ALTERNATE(8) | PAL_STM32_PUPDR_PULLUP);
+    /* PC7 (SBUSo/USART6) intentionally left unconfigured — SBUS disabled.
+     * RC input is CRSF on TELEM1 (USART2, PD5/PD6). */
 
     /* ── USB OTG_FS — micro USB (PA11=DM, PA12=DP) → AF10 ─────────────── */
     palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);

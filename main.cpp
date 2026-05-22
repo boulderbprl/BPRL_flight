@@ -81,7 +81,7 @@ int main(void)
         /* .i2c     = */ TIME_MS2I(10),    // I2CThread       100 Hz
         /* .control = */ TIME_US2I(2000),  // ControlThread   500 Hz
         /* .radio   = */ TIME_MS2I(10),    // RadioThread     100 Hz  (SBUS 14ms / CRSF 4ms frame rate)
-        /* .heartbeat = */ TIME_MS2I(200), // HeartbeatThread   5 Hz
+        /* .heartbeat = */ TIME_MS2I(500), // HeartbeatThread   1 Hz blink (toggle every 500 ms)
         /* .debug   = */ TIME_MS2I(100),   // DebugThread      10 Hz  [BPRL_DEBUG only]
         /* .log     = */ { TIME_US2I(10000),  // LogThread IMU    100 Hz
                            TIME_US2I(20000) },// LogThread state   50 Hz

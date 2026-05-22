@@ -19,7 +19,7 @@
 #define RADIO_PROTO_CRSF  1
 
 #ifndef RADIO_PROTOCOL
-#define RADIO_PROTOCOL    RADIO_PROTO_SBUS   /* ← flip to RADIO_PROTO_CRSF for CRSF */
+#define RADIO_PROTOCOL    RADIO_PROTO_CRSF   /* SBUS disabled — use CRSF on TELEM1 */
 #endif
 
 void  radio_input_init(void);

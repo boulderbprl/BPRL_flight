@@ -39,13 +39,13 @@ void CrsfParser::unpack(const uint8_t *data, uint16_t *ch)
 
 void CrsfParser::init()
 {
-    sdStart(&SD3, &crsf_cfg);
+    sdStart(&SD2, &crsf_cfg); // TELEM1 = USART2 (PD5/PD6);
 }
 
 void CrsfParser::update()
 {
     uint8_t byte;
-    while (chnReadTimeout(&SD3, &byte, 1, TIME_IMMEDIATE) == 1) {
+    while (chnReadTimeout(&SD2, &byte, 1, TIME_IMMEDIATE) == 1) {
         switch (_state) {
         case State::WAIT_SYNC:
             if (byte == 0xC8u) {

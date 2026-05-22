@@ -368,11 +368,11 @@
  * SERIAL driver system settings.
  */
 #define STM32_SERIAL_USE_USART1             FALSE
-#define STM32_SERIAL_USE_USART2             FALSE
-#define STM32_SERIAL_USE_USART3             TRUE
+#define STM32_SERIAL_USE_USART2             TRUE   /* TELEM1 — CRSF radio (SD2) */
+#define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — future sensor (SD3) */
 #define STM32_SERIAL_USE_UART4              FALSE
 #define STM32_SERIAL_USE_UART5              FALSE
-#define STM32_SERIAL_USE_USART6             TRUE
+#define STM32_SERIAL_USE_USART6             FALSE  /* FMU↔IOMCU bridge; not used by firmware */
 #define STM32_SERIAL_USE_UART7              FALSE
 #define STM32_SERIAL_USE_UART8              FALSE
 #define STM32_SERIAL_USE_LPUART1            FALSE
