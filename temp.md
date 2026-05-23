@@ -89,6 +89,67 @@ receive raw SBUS on PC7 from an external receiver would conflict with the IOMCU 
 
 ---
 
+## Root Cause #5: Wrong Flash Load Address — FIXED
+
+**What happened:** The firmware was linked with `flash0 org = 0x08000000`, but the
+ArduPilot/CubePilot BL5 bootloader occupies the first 128 KB (0x08000000–0x0801FFFF) and
+writes application firmware starting at **0x08020000**. With the wrong origin, the reset
+vector embedded in the .bin file pointed back into bootloader territory
+(PC = 0x0800040D instead of 0x0802040D). After flashing, the bootloader would jump to its
+own reset handler and loop in bootloader mode — the app never ran. The board always showed
+as `2dae:1058 CubeOrange+-BL` on USB rather than enumerating as the app.
+
+**Fix applied:** Created `boards/CubeOrangePlus/STM32H743xI_app.ld` with:
+```
+flash0 (rx) : org = 0x08020000, len = 1920k   /* App flash (after 128 KB BL) */
+```
+Updated `Makefile` to select this linker script when `BOARD=CubeOrangePlus`:
+```makefile
+ifeq ($(BOARD),CubeOrangePlus)
+    LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
+else
+    LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
+endif
+```
+After this fix the reset vector read 0x0802040D — application code runs correctly.
+
+---
+
+## Root Cause #6: USB CDC Hang After Bootloader Jump — FIXED
+
+**What happened:** Even after the linker fix, USB never enumerated as the application
+(`0483:5740`). The board ran the 5 staged boot blinks (confirming `chSysInit()` succeeded),
+then went dark. Two checkpoint blinks appeared before the crash, narrowing the hang to
+`usbStart()` inside `usb_serial_init()`.
+
+**Root cause:** The BL5 bootloader leaves OTG_FS **running with D+ asserted** (DCTL_SDIS=0)
+when it jumps to application code. The USB host is actively sending SOF frames. When
+`usbStart()` calls `usb_lld_start()` → `otg_core_reset()`, the driver loops on:
+```c
+while ((otgp->GRSTCTL & GRSTCTL_AHBIDL) == 0)  // waits for AHB idle
+    ;
+```
+The continuous SOF interrupts from the host prevent the OTG core from ever reaching AHB
+idle, so the loop never exits. The CPU locks up and the LED goes dark.
+
+**Fix applied** (same pattern ArduPilot uses in `UARTDriver.cpp`):
+
+```cpp
+// src/usb_serial.cpp — usb_serial_init()
+rccEnableOTG_FS(true);         // ensure AHB1 clock is on
+usbDisconnectBus(&USBD1);      // DCTL |= DCTL_SDIS → D+ de-asserted, host stops SOF
+chThdSleepMilliseconds(5);     // give host time to register the disconnect
+sduObjectInit(&SDU1);
+sduStart(&SDU1, &serusbcfg);
+usbStart(&USBD1, &usbcfg);    // now safe: no USB traffic racing the core reset
+usbConnectBus(&USBD1);         // DCTL &= ~DCTL_SDIS → host re-enumerates device
+```
+
+After this fix the board enumerates as `0483:5740 BPRL Debug USB` and streams data over
+`/dev/ttyACM0`.
+
+---
+
 ## Other Fixes Made
 
 ### `src/threads.cpp` — DebugThread MemoryStream
@@ -136,27 +197,47 @@ toggle every 250 ms). Lets you visually confirm the firmware is running after a 
 
 ---
 
+## Current State (as of 2026-05-22)
+
+Bringup firmware is running. Only HeartbeatThread is active. Board enumerates correctly as
+`0483:5740 BPRL Debug USB` and streams `ALIVE tick=N` at 0.5 Hz over `/dev/ttyACM0`.
+All other threads (SPI, StateEst, Control, Radio, Log) are commented out in `threads_start()`.
+
+Confirm heartbeat at any time:
+```bash
+cat /dev/ttyACM0
+```
+
+---
+
 ## Immediate Next Steps
 
-1. **Flash current build** and verify heartbeat LED blinks at 2 Hz (firmware alive check):
+1. **Re-enable threads one at a time** in `src/threads.cpp` → `threads_start()`:
+   - Start with `SPIThread` (IMU reads via SPI1/SPI4)
+   - Then `StateEstThread` (EKF)
+   - Then `ControlThread` (PID loop)
+   - Then `RadioThread` (CRSF on TELEM1)
+   - Then `LogThread` (SD card)
+
+2. **Re-enable hardware inits** in `main.cpp` once threads are stable:
+   ```cpp
+   motor_output_init();
+   radio_input_init();
+   can_drv_init();
+   i2c_drv_init();
    ```
+
+3. **Enable full telemetry** build to verify `$TEL` stream:
+   ```bash
    make flash BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG
-   ```
-
-2. **Verify USB telemetry** with Python tool:
-   ```
    python3 tools/bprl.py telemetry
-   # lines_rx should increment; roll/pitch/yaw fields should show floats
    ```
 
-3. **Connect CRSF receiver** to TELEM1 connector (TX→receiver RX, RX→receiver TX).
-   Verify `armed` and channel values appear in the telemetry stream.
+4. **Connect CRSF receiver** to TELEM1 (TX→receiver RX, RX→receiver TX) and verify
+   channel values appear in the telemetry stream.
 
-4. **Test motor outputs** — with props off, use motor test command:
-   ```
+5. **Test motor outputs** — with props off, use motor test command:
+   ```bash
    python3 tools/bprl.py motor_test 0 10   # Motor 0 at 10%
    ```
    ESC should play the "connected to FC" chime on first DShot packet, then spin briefly.
-
-5. **Add future TELEM2 sensor** — use `sdStart(&SD3, ...)` in its driver init.
-   USART3 (PD8=TX, PD9=RX) is already configured in `board.c`.

@@ -118,8 +118,13 @@ include $(CHIBIOS)/os/common/ports/ARMv7-M/compilers/GCC/mk/port.mk
 include $(CHIBIOS)/os/hal/lib/streams/streams.mk
 include $(CHIBIOS)/os/various/fatfs_bindings/fatfs.mk
 
-# H743 and H753 have identical flash/RAM layout
-LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
+# CubeOrangePlus: application starts at 0x08020000 (after 128 KB BL).
+# CubeBlueH7: uses the generic layout (adjust if its BL offset differs).
+ifeq ($(BOARD),CubeOrangePlus)
+    LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
+else
+    LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
+endif
 
 # C sources
 CSRC = $(ALLCSRC) \
@@ -136,8 +141,8 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/PID.cpp \
          src/controllers/AttitudeController.cpp \
          src/controllers/MotorMixer.cpp \
-         src/coms/IMUs/ICM20948.cpp \
-         src/coms/IMUs/ICM20602.cpp \
+         src/coms/IMUs/ICM42688.cpp \
+         src/coms/IMUs/ICM45686.cpp \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/I2C.cpp \

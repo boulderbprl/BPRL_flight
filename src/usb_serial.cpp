@@ -6,6 +6,8 @@
  * VID 0x0483 (ST), PID 0x5740 (Virtual COM Port).
  */
 
+#include "ch.h"
+#include "hal.h"
 #include "src/usb_serial.hpp"
 
 SerialUSBDriver SDU1;
@@ -174,6 +176,11 @@ static void usb_event(USBDriver *usbp, usbevent_t event)
   case USB_EVENT_WAKEUP:
     chSysLockFromISR();
     sduWakeupHookI(&SDU1);
+    /* If device was already configured before suspend, restore SDU_READY.
+     * Linux autosuspend causes SUSPEND→WAKEUP without a new SET_CONFIGURATION,
+     * so USB_EVENT_CONFIGURED never re-fires and SDU stays stuck in SDU_STOP. */
+    if (usbp->state == USB_ACTIVE)
+        sduConfigureHookI(&SDU1);
     chSysUnlockFromISR();
     return;
   default:
@@ -207,7 +214,20 @@ static const SerialUSBConfig serusbcfg = {
 
 void usb_serial_init(void)
 {
+  /* The bootloader leaves OTG_FS running with D+ asserted (DCTL_SDIS=0).
+   * If we call usbStart while the USB host is actively sending SOF frames,
+   * the OTG interrupt fires continuously inside otg_core_reset, keeping
+   * GRSTCTL_AHBIDL clear, and the soft-reset loop hangs forever.
+   *
+   * Fix (mirrors ArduPilot): disconnect D+ first (host stops sending),
+   * then start, then reconnect so the host enumerates fresh. */
+  rccEnableOTG_FS(true);          /* ensure AHB1 clock on — bootloader may have
+                                     disabled it, though it rarely does        */
+  usbDisconnectBus(&USBD1);       /* set DCTL_SDIS → host sees disconnect      */
+  chThdSleepMilliseconds(5);      /* give host time to register the disconnect  */
+
   sduObjectInit(&SDU1);
   sduStart(&SDU1, &serusbcfg);
-  usbStart(&USBD1, &usbcfg);
+  usbStart(&USBD1, &usbcfg);     /* safe: no host traffic; AHBIDL loop exits   */
+  usbConnectBus(&USBD1);          /* clear DCTL_SDIS → host enumerates device   */
 }

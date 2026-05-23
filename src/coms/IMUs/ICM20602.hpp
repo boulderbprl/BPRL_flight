@@ -22,7 +22,12 @@ private:
     const SPIConfig *_cfg_init = nullptr;
     const SPIConfig *_cfg_fast = nullptr;
     bool             _ready    = false;
+    uint8_t          _whoami   = 0;
 
+public:
+    uint8_t whoami() const { return _whoami; }
+
+private:
     uint8_t _txbuf[32] __attribute__((aligned(32)));
     uint8_t _rxbuf[32] __attribute__((aligned(32)));
 };

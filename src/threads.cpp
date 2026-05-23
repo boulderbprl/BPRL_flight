@@ -116,16 +116,22 @@ static THD_FUNCTION(SPIThread, arg)
             chMtxUnlock(&imu_mtx);
         }
         if (imu2.read(a, g)) {
+            // ROTATION_PITCH_180_YAW_90: [x,y,z] → [-y,-x,-z]
+            const float ra[3] = {-a[1], -a[0], -a[2]};
+            const float rg[3] = {-g[1], -g[0], -g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[1].accel, a, sizeof(a));
-            memcpy(g_imu[1].gyro,  g, sizeof(g));
+            memcpy(g_imu[1].accel, ra, sizeof(ra));
+            memcpy(g_imu[1].gyro,  rg, sizeof(rg));
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu3.read(a, g)) {
+            // ROTATION_YAW_90: [x,y,z] → [-y,x,z]
+            const float ra[3] = {-a[1], a[0], a[2]};
+            const float rg[3] = {-g[1], g[0], g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[2].accel, a, sizeof(a));
-            memcpy(g_imu[2].gyro,  g, sizeof(g));
+            memcpy(g_imu[2].accel, ra, sizeof(ra));
+            memcpy(g_imu[2].gyro,  rg, sizeof(rg));
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
@@ -313,17 +319,66 @@ static THD_FUNCTION(RadioThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * HeartbeatThread — 1 Hz  NORMALPRIO-5
- * LED heartbeat, SD log flush (future), watchdog pat (future).
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(HeartbeatThread, arg)
 {
+    (void)arg;
     chRegSetThreadName("heartbeat");
-    const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+    /* Output format (5 Hz, one line per tick):
+     *   $IMU,<ms>,<ax0>,<ay0>,<az0>,<gx0>,<gy0>,<gz0>,<v0>,
+     *            <ax1>,<ay1>,<az1>,<gx1>,<gy1>,<gz1>,<v1>,
+     *            <ax2>,<ay2>,<az2>,<gx2>,<gy2>,<gz2>,<v2>
+     * Accel in m/s², gyro in rad/s, valid=1 when IMU responded to WHOAMI.
+     */
+    uint32_t tick = 0;
     systime_t next = chVTGetSystemTime();
     while (true) {
-        palToggleLine(LINE_LED_ACTIVITY);
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
+        /* LED: 200 ms flash every 2 s (every 10th 200 ms tick). */
+        if (tick % 10 == 0) palSetLine(LINE_LED_ACTIVITY);
+        if (tick % 10 == 1) palClearLine(LINE_LED_ACTIVITY);
+
+        IMURaw snap[3];
+        chMtxLock(&imu_mtx);
+        memcpy(snap, g_imu, sizeof(snap));
+        chMtxUnlock(&imu_mtx);
+
+        char buf[256];
+        int n = chsnprintf(buf, sizeof(buf),
+            "$IMU,%lu,"
+            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X),"
+            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X),"
+            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X)\r\n",
+            (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+            (double)snap[0].accel[0],(double)snap[0].accel[1],(double)snap[0].accel[2],
+            (double)snap[0].gyro[0], (double)snap[0].gyro[1], (double)snap[0].gyro[2],
+            (int)snap[0].valid, (unsigned)imu1.whoami(),
+            (double)snap[1].accel[0],(double)snap[1].accel[1],(double)snap[1].accel[2],
+            (double)snap[1].gyro[0], (double)snap[1].gyro[1], (double)snap[1].gyro[2],
+            (int)snap[1].valid, (unsigned)imu2.whoami(),
+            (double)snap[2].accel[0],(double)snap[2].accel[1],(double)snap[2].accel[2],
+            (double)snap[2].gyro[0], (double)snap[2].gyro[1], (double)snap[2].gyro[2],
+            (int)snap[2].valid, (unsigned)imu3.whoami());
+        chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf, (size_t)n, TIME_MS2I(50));
+
+        float roll, pitch, yaw;
+        chMtxLock(&state_mtx);
+        roll  = g_euler[0];
+        pitch = g_euler[1];
+        yaw   = g_euler[2];
+        chMtxUnlock(&state_mtx);
+
+        char buf2[64];
+        int n2 = chsnprintf(buf2, sizeof(buf2),
+            "$EKF,%lu,%.2f,%.2f,%.2f\r\n",
+            (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+            (double)(roll  * 57.2958f),
+            (double)(pitch * 57.2958f),
+            (double)(yaw   * 57.2958f));
+        chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf2, (size_t)n2, TIME_MS2I(50));
+
+        next = chThdSleepUntilWindowed(next, chTimeAddX(next, TIME_MS2I(200)));
+        tick++;
     }
 }
 
@@ -720,16 +775,15 @@ static THD_FUNCTION(LogThread, arg)
 /* ── Thread launcher (called from main) ──────────────────────────────────── */
 void threads_start(const ThreadRates &rates)
 {
-    chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,      (void *)&rates.spi);
-    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
+    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO - 5,  HeartbeatThread, (void *)&rates.heartbeat);
+    chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
+
+    // chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
     chThdCreateStatic(waStateEst, sizeof(waStateEst), NORMALPRIO + 25, StateEstThread, (void *)&rates.est);
-    chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
-    chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
-    chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
-    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
-    chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
+    // chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
+    // chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
+    // chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
+    // chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
     chThdCreateStatic(waUSBCmd,   sizeof(waUSBCmd),   NORMALPRIO - 20, USBCmdThread,   nullptr);
-#ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
-#endif
 }

@@ -18,25 +18,38 @@ void boardInit(void)
     palSetPadMode(GPIOB, 0U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
     palClearLine(LINE_LED_ACTIVITY);
 
-    /* ── SPI1 — primary IMU bus (ICM-20948, PC2 CS) ─────────────────────
+    /* ── SPI1 — ICM-45686 (CS = PG1, ICM45686_CS) ───────────────────────
      * PA5=SCK, PA6=MISO, PA7=MOSI → AF5                                   */
     palSetPadMode(GPIOA, 5U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOA, 6U, PAL_MODE_ALTERNATE(5) | PAL_STM32_PUPDR_PULLUP);
     palSetPadMode(GPIOA, 7U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOG, 1U);
+    palSetPadMode(GPIOG, 1U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+
+    /* ── SPI1 — idle CS pins (deassert all SPI1 devices at startup) ────────
+     * PC2=MPU_CS, PC1=MAG_CS, PD7=BARO_CS                                  */
     palSetPad(GPIOC, 2U);
     palSetPadMode(GPIOC, 2U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOC, 1U);
+    palSetPadMode(GPIOC, 1U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOD, 7U);
+    palSetPadMode(GPIOD, 7U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── SPI4 — secondary IMU bus (ICM-20948 ext PE4, ICM-20602 PC13) ───
-     * PE2=SCK, PE5=MISO, PE6=MOSI → AF5                                   */
+    /* ── SPI4 — ICM-42688 ×2 + idle CS pins  ───────────────────────────────
+     * PE2=SCK, PE5=MISO, PE6=MOSI → AF5
+     * CS: PC15=ACCEL_EXT_CS, PC13=GYRO_EXT_CS, PC14=BARO_EXT_CS, PE4=MPU_EXT_CS
+     * PC14 was OSC32_IN but LSE is disabled so it's a free GPIO.           */
     palSetPadMode(GPIOE, 2U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOE, 5U, PAL_MODE_ALTERNATE(5) | PAL_STM32_PUPDR_PULLUP);
     palSetPadMode(GPIOE, 6U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
-    palSetPad(GPIOE, 4U);
-    palSetPadMode(GPIOE, 4U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOC, 15U);
+    palSetPadMode(GPIOC, 15U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOC, 14U);
+    palSetPadMode(GPIOC, 14U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
     palSetPad(GPIOC, 13U);
     palSetPadMode(GPIOC, 13U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
-    palSetPad(GPIOD, 7U);
-    palSetPadMode(GPIOD, 7U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOE, 4U);
+    palSetPadMode(GPIOE, 4U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
 
     /* ── USART2 — TELEM1 (PD5=TX, PD6=RX) → AF7  [CRSF radio] ─────────── */
     palSetPadMode(GPIOD, 5U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);

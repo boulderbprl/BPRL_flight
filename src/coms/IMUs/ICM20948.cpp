@@ -45,7 +45,8 @@ bool ICM20948::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     _ready    = false;
 
     set_bank(0);
-    if (reg_read(B0_WHO_AM_I) != WHOAMI_VALUE) { return false; }
+    _whoami = reg_read(B0_WHO_AM_I);
+    if (_whoami != WHOAMI_VALUE) { return false; }
 
     reg_write(B0_PWR_MGMT_1, 0xC1);   // reset + sleep
     chThdSleepMilliseconds(100);

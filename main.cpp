@@ -46,51 +46,62 @@
 int main(void)
 {
     halInit();
+
+    /* Start IWDG with ~32 s timeout for crash recovery.
+     * 0x5555 unlocks PR/RLR; 0xCCCC starts the timer; 0xAAAA reloads.
+     * LSI ≈ 32 kHz, /256 → 8 ms/tick; RLR=0xFFF=4095 → 32.76 s. */
+    IWDG1->KR  = 0x5555U;
+    IWDG1->PR  = 0x06U;    /* /256 */
+    IWDG1->RLR = 0xFFFU;   /* ~32 s */
+    IWDG1->KR  = 0xCCCCU;  /* start */
+    IWDG1->KR  = 0xAAAAU;  /* reload */
+
+    /* Staged LED diagnostic: blink count tells us how far boot got.
+     *   3 fast blinks  = halInit() done, pre-RTOS code running
+     *   +5 slow blinks = chSysInit() + usb_serial_init() succeeded
+     *   Then HeartbeatThread takes over at ~0.5 Hz.
+     */
+#define BLINK_TICK  4000000U   /* ~50 ms at 400 MHz */
+#define BLINK_SLOW 32000000U   /* ~400 ms at 400 MHz */
+#define BLINK_GAP    400000U   /* ~5 ms gap */
+    for (int i = 0; i < 3; i++) {               /* 3 fast: halInit OK */
+        palSetLine(LINE_LED_ACTIVITY);
+        { volatile uint32_t n = BLINK_TICK; while (n--) {} }
+        palClearLine(LINE_LED_ACTIVITY);
+        { volatile uint32_t n = BLINK_GAP;  while (n--) {} }
+    }
+
     chSysInit();
+
+    for (int i = 0; i < 5; i++) {               /* 5 slow: chSysInit OK */
+        palSetLine(LINE_LED_ACTIVITY);
+        chThdSleepMilliseconds(400);
+        palClearLine(LINE_LED_ACTIVITY);
+        chThdSleepMilliseconds(100);
+    }
 
     usb_serial_init();
     chThdSleepMilliseconds(1500);   /* wait for host USB enumeration */
-#ifdef BPRL_DEBUG
-    chprintf((BaseSequentialStream *)&SDU1, "\r\nBPRL boot [" BOARD_NAME "]\r\n");
-#endif
-
-    /* ── Hardware init ──────────────────────────────────────────────────────
-     * SPI IMU init runs inside SPIThread (needs chThdSleep during ICM reset).
-     * All other drivers are safe to call here after chSysInit().           */
-    motor_output_init();
-    radio_input_init();
-    can_drv_init();    // starts FDCAN1 + registers IMX5 callbacks (IDs 0x01-0x04)
-    i2c_drv_init();    // placeholder — add compass/baro calls inside i2c_drv_init()
-
-    /* ── Additional CAN devices ─────────────────────────────────────────────
-     * bprl_can_register(MY_ID, my_callback, nullptr);                      */
-
-    /* ── Additional I2C devices ─────────────────────────────────────────────
-     * bprl_i2c_register(0x1E, compass_poll, nullptr);  // HMC5883
-     * bprl_i2c_register(0x76, baro_poll,    nullptr);  // MS5611           */
 
     /* ══════════════════════════════════════════════════════════════════════
      * Thread rate sequencer
-     * Adjust these values to change each thread's update rate.
-     * Rates are passed to threads_start() and copied by each thread at
-     * startup — no need to store them after threads_start() returns.
      * ══════════════════════════════════════════════════════════════════════ */
     static const ThreadRates kRates = {
-        /* .spi     = */ TIME_US2I(1000),  // SPIThread      1000 Hz
-        /* .est     = */ TIME_US2I(2000),  // StateEstThread  500 Hz
-        /* .i2c     = */ TIME_MS2I(10),    // I2CThread       100 Hz
-        /* .control = */ TIME_US2I(2000),  // ControlThread   500 Hz
-        /* .radio   = */ TIME_MS2I(10),    // RadioThread     100 Hz  (SBUS 14ms / CRSF 4ms frame rate)
-        /* .heartbeat = */ TIME_MS2I(500), // HeartbeatThread   1 Hz blink (toggle every 500 ms)
-        /* .debug   = */ TIME_MS2I(100),   // DebugThread      10 Hz  [BPRL_DEBUG only]
-        /* .log     = */ { TIME_US2I(10000),  // LogThread IMU    100 Hz
-                           TIME_US2I(20000) },// LogThread state   50 Hz
+        /* .spi     = */ TIME_US2I(1000),
+        /* .est     = */ TIME_US2I(2000),
+        /* .i2c     = */ TIME_MS2I(10),
+        /* .control = */ TIME_US2I(2000),
+        /* .radio   = */ TIME_MS2I(10),
+        /* .heartbeat = */ TIME_MS2I(500),
+        /* .debug   = */ TIME_MS2I(100),
+        /* .log     = */ { TIME_US2I(10000), TIME_US2I(20000) },
     };
 
     threads_start(kRates);
 
-    /* Main thread becomes low-priority idle background. */
+    /* Main thread: low-priority idle, feeds IWDG. */
     while (true) {
+        IWDG1->KR = 0xAAAAU;   /* kick watchdog every second */
         chThdSleepMilliseconds(1000);
     }
     return 0;
