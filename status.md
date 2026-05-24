@@ -37,10 +37,10 @@ CubePilot carrier. Corrected mapping (from ArduPilot hwdef):
 
 | Motor | AUX OUT | Pin  | Timer |
 |-------|---------|------|-------|
-| 0 FR  | AUX 2   | PE13 | TIM1_CH3 |
-| 1 RL  | AUX 3   | PE11 | TIM1_CH2 |
-| 2 FL  | AUX 4   | PE9  | TIM1_CH1 |
-| 3 RR  | AUX 5   | PD13 | TIM4_CH2 |
+| 0 FR  | AUX 3   | PE11 | TIM1_CH2 |
+| 1 RL  | AUX 4   | PE9  | TIM1_CH1 |
+| 2 FL  | AUX 5   | PD13 | TIM4_CH2 |
+| 3 RR  | AUX 2   | PE13 | TIM1_CH3 |
 
 Motors 0–2 use a TIM1 3-channel DMA burst; motor 3 uses TIM4 single-channel DMA.
 

@@ -23,6 +23,7 @@ Dependencies: pip install pyserial rich
 
 import argparse
 import glob
+import queue
 import struct
 import sys
 import threading
@@ -371,84 +372,88 @@ def cmd_motor_test(ser: serial.Serial, _args):
     active_motor = -1
     active_pct   = 0
     reader       = SerialReader(ser)
+    resp_q       = queue.Queue()   # firmware MT,OK / MT,ERR lines
+    stop_bg      = threading.Event()
 
     console.print("[bold red]⚠  MOTOR TEST MODE — REMOVE PROPS BEFORE PROCEEDING[/bold red]")
     console.print("Commands: [cyan]motor <0-3> <pct%>[/cyan]  |  "
                   "[cyan]stop[/cyan]  |  [cyan]quit[/cyan]")
-    console.print("[dim]Tip: 'motor 0 15' spins FR motor at 15%[/dim]")
+    console.print("[dim]Tip: 'motor 0 15' spins FR motor at 15%[/dim]\n")
 
-    try:
-        while True:
-            # Refresh RPM display
-            for line in reader.pop_lines():
-                parse_tel_line(line, state)
+    with Live(build_motor_panel(state, active_motor, active_pct),
+              refresh_per_second=10, console=console, vertical_overflow="visible") as live:
 
-            # Build a quick status line (no Live to keep input prompt clean)
-            rpm_parts = []
-            for i, lbl in enumerate(MOTOR_LABELS):
-                dot = "●" if state.rpm[i] > 0 else "○"
-                rpm_parts.append(f"{lbl}:{state.rpm[i]:6d}rpm{dot}")
-            console.print("  " + "   ".join(rpm_parts), highlight=False, end="\r")
-
-            try:
-                cmd = input("\n> ").strip().lower()
-            except EOFError:
-                break
-
-            if cmd in ("quit", "q", "exit"):
-                send_cmd(ser, "MT,stop")
-                break
-
-            if cmd in ("stop", "s"):
-                send_cmd(ser, "MT,stop")
-                active_motor = -1
-                active_pct   = 0
-                console.print("[green]Motors stopped.")
-                continue
-
-            parts = cmd.split()
-            if len(parts) == 3 and parts[0] == "motor":
-                try:
-                    motor = int(parts[1])
-                    pct   = int(parts[2])
-                except ValueError:
-                    console.print("[yellow]Usage: motor <0-3> <0-100>")
-                    continue
-                if motor < 0 or motor > 3:
-                    console.print("[yellow]Motor index must be 0-3.")
-                    continue
-                if pct < 0 or pct > 100:
-                    console.print("[yellow]Throttle must be 0-100%.")
-                    continue
-                send_cmd(ser, f"MT,{motor},{pct}")
-                # Read one line of response
-                deadline = time.monotonic() + 2.0
-                while time.monotonic() < deadline:
-                    for line in reader.pop_lines():
-                        if line.startswith("MT,"):
-                            if "ERR,armed" in line:
-                                console.print("[bold red]REJECTED: Drone is armed! Disarm first.")
-                            elif "OK" in line:
-                                active_motor = motor
-                                active_pct   = pct
-                                console.print(
-                                    f"[green]{MOTOR_LABELS[motor]} spinning at {pct}%")
-                            else:
-                                console.print(f"[yellow]Response: {line}")
-                            break
+        def bg_loop():
+            while not stop_bg.is_set():
+                for line in reader.pop_lines():
+                    if line.startswith("MT,"):
+                        resp_q.put(line)
                     else:
-                        time.sleep(0.05)
-                        continue
-                    break
-                continue
+                        parse_tel_line(line, state)
+                live.update(build_motor_panel(state, active_motor, active_pct))
+                time.sleep(0.05)
 
-            console.print("[dim]Unknown command. Try: motor 0 20 | stop | quit")
-    except KeyboardInterrupt:
-        pass
-    finally:
-        send_cmd(ser, "MT,stop")
-        reader.stop()
-        console.print("\n[green]Motor test ended. All motors stopped.")
+        bg_t = threading.Thread(target=bg_loop, daemon=True)
+        bg_t.start()
+
+        try:
+            while True:
+                try:
+                    cmd = input("> ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    break
+
+                if cmd in ("quit", "q", "exit"):
+                    send_cmd(ser, "MT,stop")
+                    break
+
+                if cmd in ("stop", "s"):
+                    send_cmd(ser, "MT,stop")
+                    active_motor = -1
+                    active_pct   = 0
+                    continue
+
+                parts = cmd.split()
+                if len(parts) == 3 and parts[0] == "motor":
+                    try:
+                        motor = int(parts[1])
+                        pct   = int(parts[2])
+                    except ValueError:
+                        console.print("[yellow]Usage: motor <0-3> <0-100>")
+                        continue
+                    if motor < 0 or motor > 3:
+                        console.print("[yellow]Motor index must be 0-3.")
+                        continue
+                    if pct < 0 or pct > 100:
+                        console.print("[yellow]Throttle must be 0-100%.")
+                        continue
+                    send_cmd(ser, f"MT,{motor},{pct}")
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline:
+                        try:
+                            resp = resp_q.get(timeout=0.1)
+                        except queue.Empty:
+                            continue
+                        if "ERR,armed" in resp:
+                            console.print("[bold red]REJECTED: Drone is armed! Disarm first.")
+                        elif "OK" in resp:
+                            active_motor = motor
+                            active_pct   = pct
+                        break
+                    continue
+
+                if cmd:
+                    console.print("[dim]Unknown command. Try: motor 0 20 | stop | quit")
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            stop_bg.set()
+            bg_t.join(timeout=1.0)
+
+    send_cmd(ser, "MT,stop")
+    reader.stop()
+    console.print("[green]Motor test ended. All motors stopped.")
 
 
 # ── EKF per-lane state ────────────────────────────────────────────────────

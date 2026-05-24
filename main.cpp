@@ -98,6 +98,7 @@ int main(void)
     };
 
     can_drv_init();
+    motor_output_init();
     threads_start(kRates);
 
     /* Main thread: low-priority idle, feeds IWDG. */
