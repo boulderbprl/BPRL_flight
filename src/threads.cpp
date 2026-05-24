@@ -23,6 +23,7 @@
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
 #include "src/usb_serial.hpp"
+#include "src/coms/CalFlash.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
@@ -49,6 +50,10 @@ MocapRaw  g_mocap   = {};
 
 MUTEX_DECL(esc_mtx);
 ESCTelemetry g_esc_telem[4] = {};
+
+/* ── Calibration data loaded from flash at boot ──────────────────────────── */
+static CalibData g_cal = {};
+static bool      g_cal_valid = false;
 
 /* ── Motor test (always built) ───────────────────────────────────────────── */
 MUTEX_DECL(motor_test_mtx);
@@ -91,6 +96,16 @@ static uint8_t __attribute__((section(".nocache"))) s_usb_dl_buf[2048];
 /* CAN INS message rate counters — incremented by StateEstThread, read by DebugThread */
 static volatile uint32_t s_can_quat_cnt = 0;
 static volatile uint32_t s_can_rate_cnt = 0;
+
+/* Per-lane EKF state (radians) — written by StateEstThread under state_mtx,
+ * read by DebugThread under the same mutex to emit $EKFL. */
+static float s_lane_roll[3] = {};
+static float s_lane_pitch[3] = {};
+static float s_lane_yaw[3] = {};
+static float s_lane_p[3] = {};
+static float s_lane_q[3] = {};
+static float s_lane_r[3] = {};
+static int   s_primary_lane = 0;
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -102,6 +117,10 @@ static THD_FUNCTION(SPIThread, arg)
     chRegSetThreadName("spi");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+    // Load persistent calibration biases before IMU init; zero biases if absent.
+    g_cal_valid = cal_load(g_cal);
+    if (!g_cal_valid) memset(&g_cal, 0, sizeof(g_cal));
+
     spi_drv_init();   // init all three IMUs (may sleep 100 ms each)
 
     systime_t next = chVTGetSystemTime();
@@ -109,29 +128,39 @@ static THD_FUNCTION(SPIThread, arg)
         float a[3], g[3];
 
         if (imu1.read(a, g)) {
+            // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
+            static constexpr float RS = 0.70710678f;
+            const float ra[3] = { RS*(a[1]-a[0]), RS*(a[1]+a[0]), -a[2] };
+            const float rg[3] = { RS*(g[1]-g[0]), RS*(g[1]+g[0]), -g[2] };
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[0].accel, a, sizeof(a));
-            memcpy(g_imu[0].gyro,  g, sizeof(g));
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
+            }
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu2.read(a, g)) {
-            // ROTATION_PITCH_180_YAW_90: [x,y,z] → [-y,-x,-z]
-            const float ra[3] = {-a[1], -a[0], -a[2]};
-            const float rg[3] = {-g[1], -g[0], -g[2]};
+            // Instance 0 (CS=PC15): ROTATION_YAW_90 → NED z-down: [-y,+x,+z]
+            const float ra[3] = {-a[1], +a[0], +a[2]};
+            const float rg[3] = {-g[1], +g[0], +g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[1].accel, ra, sizeof(ra));
-            memcpy(g_imu[1].gyro,  rg, sizeof(rg));
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
+            }
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu3.read(a, g)) {
-            // ROTATION_YAW_90: [x,y,z] → [-y,x,z]
-            const float ra[3] = {-a[1], a[0], a[2]};
-            const float rg[3] = {-g[1], g[0], g[2]};
+            // Instance 1 (CS=PC13): ROTATION_PITCH_180_YAW_90 → NED z-down: [-y,-x,-z]
+            const float ra[3] = {-a[1], -a[0], -a[2]};
+            const float rg[3] = {-g[1], -g[0], -g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[2].accel, ra, sizeof(ra));
-            memcpy(g_imu[2].gyro,  rg, sizeof(rg));
+            for (int k = 0; k < 3; k++) {
+                g_imu[2].accel[k] = ra[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = rg[k] - g_cal.gyro_bias[2][k];
+            }
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
@@ -188,6 +217,10 @@ static THD_FUNCTION(StateEstThread, arg)
 
     state_mgr.init();
 
+    // Ticks since last IMX5 quaternion — clears valid after 100 ticks (200 ms at 500 Hz).
+    uint32_t can_stale_ticks = 0;
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 100;
+
     systime_t next = chVTGetSystemTime();
     while (true) {
         // Snapshot CAN IMU and clear consumed-this-tick flags atomically.
@@ -197,6 +230,16 @@ static THD_FUNCTION(StateEstThread, arg)
         g_can_imu.has_new_quat  = false;
         g_can_imu.has_new_rates = false;
         chMtxUnlock(&can_imu_mtx);
+
+        // Timeout: if no quaternion arrives for CAN_TIMEOUT_TICKS, mark link invalid.
+        if (can_snap.has_new_quat) {
+            can_stale_ticks = 0;
+        } else if (++can_stale_ticks > CAN_TIMEOUT_TICKS) {
+            chMtxLock(&can_imu_mtx);
+            g_can_imu.valid = false;
+            chMtxUnlock(&can_imu_mtx);
+            can_snap.valid = false;
+        }
 
         IMURaw imu_snap[3];
         chMtxLock(&imu_mtx);
@@ -221,6 +264,13 @@ static THD_FUNCTION(StateEstThread, arg)
         g_euler[0] = state_mgr.roll();         // Euler angles derived from quaternion
         g_euler[1] = state_mgr.pitch();
         g_euler[2] = state_mgr.yaw();
+#ifdef BPRL_DEBUG
+        for (int li = 0; li < StateManager::NUM_LANES; ++li) {
+            state_mgr.get_lane_euler(li, s_lane_roll[li], s_lane_pitch[li], s_lane_yaw[li]);
+            state_mgr.get_lane_pqr  (li, s_lane_p[li],   s_lane_q[li],     s_lane_r[li]);
+        }
+        s_primary_lane = state_mgr.primary_lane();
+#endif
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -483,6 +533,9 @@ static void usb_log_erase(void)
     chMtxUnlock(&s_usb_write_mtx);
 }
 
+/* Staging buffer for CAL,set commands; written to flash by CAL,commit. */
+static CalibData s_cal_stage = {};
+
 static void usb_cmd_dispatch(const char *line)
 {
     if (strcmp(line, "BOOT") == 0) {
@@ -547,6 +600,86 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+    } else if (strncmp(line, "CAL,", 4) == 0) {
+        const char *rest = line + 4;
+        if (strncmp(rest, "set,", 4) == 0) {
+            // CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>
+            int   idx = -1;
+            float gx = 0, gy = 0, gz = 0, ax = 0, ay = 0, az = 0;
+            if (sscanf(rest + 4, "%d,%f,%f,%f,%f,%f,%f",
+                       &idx, &gx, &gy, &gz, &ax, &ay, &az) == 7
+                && idx >= 0 && idx <= 2)
+            {
+                s_cal_stage.gyro_bias[idx][0] = gx;
+                s_cal_stage.gyro_bias[idx][1] = gy;
+                s_cal_stage.gyro_bias[idx][2] = gz;
+                s_cal_stage.accel_bias[idx][0] = ax;
+                s_cal_stage.accel_bias[idx][1] = ay;
+                s_cal_stage.accel_bias[idx][2] = az;
+                chMtxLock(&s_usb_write_mtx);
+                chprintf((BaseSequentialStream *)&SDU1, "CAL,SET,%d,OK\r\n", idx);
+                chMtxUnlock(&s_usb_write_mtx);
+            } else {
+                chMtxLock(&s_usb_write_mtx);
+                chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,bad_args\r\n");
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        } else if (strcmp(rest, "commit") == 0) {
+            bool ok = cal_save(s_cal_stage);
+            if (ok) {
+                // Apply immediately so current session benefits without reboot
+                g_cal = s_cal_stage;
+                g_cal_valid = true;
+            }
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1,
+                     ok ? "CAL,OK\r\n" : "CAL,ERR,write_failed\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "clear") == 0) {
+            cal_clear();
+            memset(&g_cal, 0, sizeof(g_cal));
+            g_cal_valid = false;
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "CAL,OK\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "query") == 0) {
+            CalibData stored = {};
+            bool valid = cal_load(stored);
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1,
+                "CAL,DATA,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d\r\n",
+                (double)stored.gyro_bias[0][0], (double)stored.gyro_bias[0][1],
+                (double)stored.gyro_bias[0][2], (double)stored.gyro_bias[1][0],
+                (double)stored.gyro_bias[1][1], (double)stored.gyro_bias[1][2],
+                (double)stored.gyro_bias[2][0], (double)stored.gyro_bias[2][1],
+                (double)stored.gyro_bias[2][2],
+                (double)stored.accel_bias[0][0], (double)stored.accel_bias[0][1],
+                (double)stored.accel_bias[0][2], (double)stored.accel_bias[1][0],
+                (double)stored.accel_bias[1][1], (double)stored.accel_bias[1][2],
+                (double)stored.accel_bias[2][0], (double)stored.accel_bias[2][1],
+                (double)stored.accel_bias[2][2], (int)valid);
+            chMtxUnlock(&s_usb_write_mtx);
+        } else {
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,unknown_cmd\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        }
+    } else if (strcmp(line, "CAN,status") == 0) {
+        // Read FDCAN1 diagnostic registers directly (no driver API needed).
+        // PSR: protocol status (ACT, LEC, EP, EW, BO).
+        // ECR: error counters (TEC[7:0], REC[14:8], RP[15]).
+        // RXF0S: RxFIFO0 fill level (F0FL[6:0]) and overflow flag (RF0L[25]).
+        const uint32_t psr   = FDCAN1->PSR;
+        const uint32_t ecr   = FDCAN1->ECR;
+        const uint32_t rxf0s = FDCAN1->RXF0S;
+        const uint32_t cccr  = FDCAN1->CCCR;
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "CAN,STATUS,psr=0x%08x,ecr=0x%08x,rxf0s=0x%08x,cccr=0x%08x\r\n",
+                 (unsigned)psr, (unsigned)ecr, (unsigned)rxf0s, (unsigned)cccr);
+        chMtxUnlock(&s_usb_write_mtx);
     }
 }
 
@@ -612,6 +745,9 @@ static THD_FUNCTION(DebugThread, arg)
         /* ── Snapshot flight state ──────────────────────────────────────── */
         float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw;
         float p, q, r;
+        float lane_roll[3], lane_pitch[3], lane_yaw[3];
+        float lane_p[3], lane_q[3], lane_r[3];
+        int   primary_lane;
         bool  armed;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
@@ -625,6 +761,15 @@ static THD_FUNCTION(DebugThread, arg)
         rc_pitch = g_input[InputIdx::PITCH_TGT];
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
+        for (int li = 0; li < 3; ++li) {
+            lane_roll[li]  = s_lane_roll[li];
+            lane_pitch[li] = s_lane_pitch[li];
+            lane_yaw[li]   = s_lane_yaw[li];
+            lane_p[li]     = s_lane_p[li];
+            lane_q[li]     = s_lane_q[li];
+            lane_r[li]     = s_lane_r[li];
+        }
+        primary_lane = s_primary_lane;
         chMtxUnlock(&state_mtx);
 
         /* ── Snapshot IMU validity ──────────────────────────────────────── */
@@ -681,6 +826,42 @@ static THD_FUNCTION(DebugThread, arg)
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
                                 (uint8_t *)tel_buf, tlen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
+        /* ── Emit $EKFL per-lane line over USB ─────────────────────────── */
+        /* Format:
+         *   $EKFL,<ms>,<primary>,
+         *         <roll0°>,<pitch0°>,<yaw0°>,<p0>,<q0>,<r0>,
+         *         <roll1°>,<pitch1°>,<yaw1°>,<p1>,<q1>,<r1>,
+         *         <roll2°>,<pitch2°>,<yaw2°>,<p2>,<q2>,<r2>,
+         *         0,0,0,0,0,0          ← IMX5 INS (placeholder)
+         */
+        {
+            static char ekfl_buf[256];
+            MemoryStream ekfl_ms;
+            msObjectInit(&ekfl_ms, (uint8_t *)ekfl_buf, sizeof(ekfl_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&ekfl_ms,
+                "$EKFL,%lu,%d,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "0.00,0.00,0.00,0.0000,0.0000,0.0000\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()), primary_lane,
+                (double)(lane_roll[0]*57.2958f), (double)(lane_pitch[0]*57.2958f),
+                (double)(lane_yaw[0]*57.2958f),
+                (double)lane_p[0], (double)lane_q[0], (double)lane_r[0],
+                (double)(lane_roll[1]*57.2958f), (double)(lane_pitch[1]*57.2958f),
+                (double)(lane_yaw[1]*57.2958f),
+                (double)lane_p[1], (double)lane_q[1], (double)lane_r[1],
+                (double)(lane_roll[2]*57.2958f), (double)(lane_pitch[2]*57.2958f),
+                (double)(lane_yaw[2]*57.2958f),
+                (double)lane_p[2], (double)lane_q[2], (double)lane_r[2]);
+            size_t elen = ekfl_ms.eos;
+            if (elen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)ekfl_buf, elen, TIME_MS2I(50));
                 chMtxUnlock(&s_usb_write_mtx);
             }
         }
@@ -778,12 +959,14 @@ void threads_start(const ThreadRates &rates)
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO - 5,  HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
 
-    // chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
+    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
     chThdCreateStatic(waStateEst, sizeof(waStateEst), NORMALPRIO + 25, StateEstThread, (void *)&rates.est);
     // chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
     // chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
     // chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
     // chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
     chThdCreateStatic(waUSBCmd,   sizeof(waUSBCmd),   NORMALPRIO - 20, USBCmdThread,   nullptr);
+#ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
+#endif
 }

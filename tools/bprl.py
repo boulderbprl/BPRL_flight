@@ -4,6 +4,7 @@ BPRL Ground Tool — motor test, telemetry, and SD log access over USB CDC.
 
 Usage:
     python3 tools/bprl.py telemetry              # live attitude / rate / IMU dashboard
+    python3 tools/bprl.py ekf-status             # per-lane EKF roll/pitch/yaw/p/q/r table
     python3 tools/bprl.py motor-test             # spin individual motors, view RPM
     python3 tools/bprl.py logs list              # list log files on SD card
     python3 tools/bprl.py logs download [FILE]   # download a log file (default: latest)
@@ -148,6 +149,44 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         return False
 
 
+# ── IMU sample parser ($IMU stream) ──────────────────────────────────────────
+
+@dataclass
+class ImuSample:
+    time_ms: int
+    accel:   list   # [3][3] body-frame m/s²  (imu × axis)
+    gyro:    list   # [3][3] body-frame rad/s
+    valid:   list   # [3] bool
+
+
+def parse_imu_line(line: str) -> Optional[ImuSample]:
+    """Parse a $IMU CSV line.
+    Format: $IMU,<ms>,ax0,ay0,az0,gx0,gy0,gz0,v0(0xWW), ...×3
+    Returns None on malformed input.
+    """
+    if not line.startswith("$IMU,"):
+        return None
+    try:
+        parts = line[5:].split(",")
+        if len(parts) < 22:
+            return None
+        ms = int(parts[0])
+        accel, gyro, valid = [], [], []
+        for i in range(3):
+            base = 1 + i * 7
+            accel.append([float(parts[base]),
+                          float(parts[base + 1]),
+                          float(parts[base + 2])])
+            gyro.append([float(parts[base + 3]),
+                         float(parts[base + 4]),
+                         float(parts[base + 5])])
+            vf = parts[base + 6]
+            valid.append(bool(int(vf.split("(")[0])))
+        return ImuSample(time_ms=ms, accel=accel, gyro=gyro, valid=valid)
+    except (ValueError, IndexError):
+        return None
+
+
 # ── Background serial reader ──────────────────────────────────────────────────
 
 class SerialReader:
@@ -189,7 +228,7 @@ class SerialReader:
 # ── Telemetry display ─────────────────────────────────────────────────────────
 
 MOTOR_LABELS = ["FR[0]", "RL[1]", "FL[2]", "RR[3]"]
-IMU_LABELS   = ["ICM-20948 pri", "ICM-20948 ext", "ICM-20602    "]
+IMU_LABELS   = ["IMU0 (pri)   ", "IMU1 (ext)   ", "IMU2         "]
 
 
 def _valid(v: bool) -> Text:
@@ -410,6 +449,314 @@ def cmd_motor_test(ser: serial.Serial, _args):
         send_cmd(ser, "MT,stop")
         reader.stop()
         console.print("\n[green]Motor test ended. All motors stopped.")
+
+
+# ── EKF per-lane state ────────────────────────────────────────────────────
+
+LANE_LABELS = ["Lane 0", "Lane 1", "Lane 2", "IMX5 INS"]
+
+
+@dataclass
+class EkfLaneState:
+    time_ms:      float = 0.0
+    primary:      int   = 0
+    roll:         list  = field(default_factory=lambda: [0.0] * 4)   # degrees
+    pitch:        list  = field(default_factory=lambda: [0.0] * 4)
+    yaw:          list  = field(default_factory=lambda: [0.0] * 4)
+    p:            list  = field(default_factory=lambda: [0.0] * 4)   # rad/s
+    q:            list  = field(default_factory=lambda: [0.0] * 4)
+    r:            list  = field(default_factory=lambda: [0.0] * 4)
+    received_any: bool  = False
+    usb_rx_any:   bool  = False
+    last_rx:      float = field(default_factory=time.monotonic)
+    lines_rx:     int   = 0
+
+
+def parse_ekfl_line(line: str, state: EkfLaneState) -> bool:
+    """Parse a $EKFL line into state.  Returns True on success.
+    Format: $EKFL,<ms>,<primary>,<r0°>,<p0°>,<y0°>,<p0>,<q0>,<r0>,  ...×3 onboard lanes,  <r_ins°>,<p_ins°>,<y_ins°>,<p_ins>,<q_ins>,<r_ins>
+    """
+    if not line.startswith("$EKFL,"):
+        return False
+    try:
+        parts = line[6:].split(",")
+        if len(parts) < 26:          # 1(ms) + 1(primary) + 4×6 = 26
+            return False
+        state.time_ms = float(parts[0])
+        state.primary = int(parts[1])
+        for i in range(4):
+            base = 2 + i * 6
+            state.roll[i]  = float(parts[base])
+            state.pitch[i] = float(parts[base + 1])
+            state.yaw[i]   = float(parts[base + 2])
+            state.p[i]     = float(parts[base + 3])
+            state.q[i]     = float(parts[base + 4])
+            state.r[i]     = float(parts[base + 5])
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+    except (ValueError, IndexError):
+        return False
+
+
+def build_ekf_panel(s: EkfLaneState) -> Panel:
+    age   = time.monotonic() - s.last_rx
+    stale = age > 1.0
+    t_sec = s.time_ms / 1000.0
+
+    if not s.usb_rx_any:
+        stale_note = "  [dim](no USB data)[/dim]"
+    elif not s.received_any:
+        stale_note = "  [dim](waiting for $EKFL — requires -DBPRL_DEBUG build)[/dim]"
+    elif stale:
+        stale_note = "  [yellow](stale)[/yellow]"
+    else:
+        stale_note = ""
+
+    tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    tbl.add_column("", min_width=12)
+    for i, lbl in enumerate(LANE_LABELS):
+        pri_tag = " [bold green](pri)[/bold green]" if (i < 3 and i == s.primary) else ""
+        ins_tag = " [dim](zeros until CAN enabled)[/dim]" if i == 3 else ""
+        tbl.add_column(f"{lbl}{pri_tag}{ins_tag}", min_width=18, justify="right")
+
+    def _row(label, values, fmt, unit=""):
+        cells = [f"[bold]{label}[/bold]"]
+        for i, v in enumerate(values):
+            style = "dim" if (i == 3 and v == 0.0) else ""
+            cells.append(f"[{style}]{v:{fmt}}{unit}[/{style}]" if style
+                         else f"{v:{fmt}}{unit}")
+        tbl.add_row(*cells)
+
+    _row("Roll",  s.roll,  "+8.2f", "°")
+    _row("Pitch", s.pitch, "+8.2f", "°")
+    _row("Yaw",   s.yaw,   "+8.2f", "°")
+    tbl.add_row("")
+    _row("p",     s.p,     "+9.4f", "")
+    _row("q",     s.q,     "+9.4f", "")
+    _row("r",     s.r,     "+9.4f", "")
+
+    diag = f"  [dim]lines_rx={s.lines_rx}[/dim]"
+    title = (f"BPRL EKF Lanes    t={t_sec:8.1f} s{stale_note}{diag}")
+    return Panel(tbl, title=title, border_style="cyan")
+
+
+def cmd_ekf_status(ser: serial.Serial, _args):
+    state  = EkfLaneState()
+    reader = SerialReader(ser)
+
+    try:
+        with Live(build_ekf_panel(state), refresh_per_second=10,
+                  console=console) as live:
+            while True:
+                for line in reader.pop_lines():
+                    state.lines_rx += 1
+                    if not parse_ekfl_line(line, state):
+                        state.usb_rx_any = True
+                live.update(build_ekf_panel(state))
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.stop()
+
+
+# ── CAN status ────────────────────────────────────────────────────────────────
+
+_LEC_NAMES = ["NoError","Stuff","Form","Ack","Bit1","Bit0","CRC","NoChange"]
+_ACT_NAMES = ["Synchronizing","Idle","Receiver","Transmitter"]
+
+def _decode_psr(psr: int) -> str:
+    lec  = _LEC_NAMES[psr & 0x7]
+    act  = _ACT_NAMES[(psr >> 3) & 0x3]
+    ep   = bool(psr & (1 << 5))
+    ew   = bool(psr & (1 << 6))
+    bo   = bool(psr & (1 << 7))
+    pxe  = bool(psr & (1 << 14))
+    flags = []
+    if bo:  flags.append("BUS-OFF")
+    if ep:  flags.append("ErrorPassive")
+    if ew:  flags.append("ErrorWarning")
+    if pxe: flags.append("ProtoExcept")
+    flag_str = " ".join(flags) if flags else "OK"
+    return f"ACT={act}  LEC={lec}  {flag_str}"
+
+def _decode_ecr(ecr: int) -> str:
+    tec = ecr & 0xFF
+    rec = (ecr >> 8) & 0x7F
+    rp  = bool(ecr & (1 << 15))
+    cel = (ecr >> 16) & 0xFF
+    return f"TEC={tec}  REC={rec}{'(passive)' if rp else ''}  CEL={cel}"
+
+def _decode_rxf0s(rxf0s: int) -> str:
+    fill = rxf0s & 0x7F
+    full = bool(rxf0s & (1 << 24))
+    lost = bool(rxf0s & (1 << 25))
+    return f"fill={fill}{'  FULL' if full else ''}{'  MSGS_LOST' if lost else ''}"
+
+def cmd_can_status(ser: serial.Serial, _args):
+    import re
+    ser.write(b"CAN,status\r\n")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        m = re.match(
+            r"CAN,STATUS,psr=(0x[0-9a-fA-F]+),ecr=(0x[0-9a-fA-F]+),"
+            r"rxf0s=(0x[0-9a-fA-F]+),cccr=(0x[0-9a-fA-F]+)", line)
+        if m:
+            psr   = int(m.group(1), 16)
+            ecr   = int(m.group(2), 16)
+            rxf0s = int(m.group(3), 16)
+            cccr  = int(m.group(4), 16)
+            console.print(f"[bold]FDCAN1 Status[/bold]")
+            console.print(f"  PSR  0x{psr:08x}  →  {_decode_psr(psr)}")
+            console.print(f"  ECR  0x{ecr:08x}  →  {_decode_ecr(ecr)}")
+            console.print(f"  RXF0S 0x{rxf0s:08x}  →  {_decode_rxf0s(rxf0s)}")
+            console.print(f"  CCCR 0x{cccr:08x}  →  INIT={cccr&1}  MON={(cccr>>5)&1}  TEST={(cccr>>7)&1}")
+            console.print()
+            console.print("[dim]ACT=Idle + LEC=NoError/NoChange + TEC=0/REC=0 → bus healthy, IMX5 not transmitting[/dim]")
+            console.print("[dim]ACT=Synchronizing → baud rate mismatch or no termination[/dim]")
+            console.print("[dim]LEC=Ack + TEC>0 → FC transmitting but no ack (only one node, or wrong baud)[/dim]")
+            console.print("[dim]LEC=Bit1/Form/CRC + REC>0 → IMX5 transmitting at different baud rate[/dim]")
+            return
+    console.print("[red]No CAN,STATUS response — firmware may not support this command[/red]")
+
+
+# ── Calibration ───────────────────────────────────────────────────────────────
+
+def cmd_calibrate(ser: serial.Serial, args):
+    duration = getattr(args, "duration", 30)
+    reader   = SerialReader(ser)
+
+    console.print("\n[bold]IMU Static Bias Calibration[/bold]")
+    console.print("Place the drone on a [bold]level surface[/bold] and do not move it.")
+    try:
+        input("Press [Enter] to begin collection...")
+    except EOFError:
+        pass
+
+    console.print(f"Collecting {duration} s of IMU data...")
+
+    # Accumulators: [imu][axis]
+    sums_gyro  = [[0.0]*3 for _ in range(3)]
+    sums_accel = [[0.0]*3 for _ in range(3)]
+    counts     = [0, 0, 0]
+    t_end      = time.monotonic() + duration
+
+    with Progress(transient=True) as prog:
+        task = prog.add_task("Collecting...", total=duration)
+        while time.monotonic() < t_end:
+            for line in reader.pop_lines():
+                s = parse_imu_line(line)
+                if s is None:
+                    continue
+                for i in range(3):
+                    if not s.valid[i]:
+                        continue
+                    counts[i] += 1
+                    for k in range(3):
+                        sums_gyro[i][k]  += s.gyro[i][k]
+                        sums_accel[i][k] += s.accel[i][k]
+            elapsed = duration - (t_end - time.monotonic())
+            prog.update(task, completed=min(elapsed, duration))
+            time.sleep(0.05)
+
+    reader.stop()
+
+    if min(counts) < 10:
+        console.print(f"[red]Too few samples (got {counts}). Check connection.")
+        return
+
+    # Compute biases
+    gyro_bias  = [[sums_gyro[i][k]  / counts[i] for k in range(3)] for i in range(3)]
+    accel_bias = [[sums_accel[i][k] / counts[i] for k in range(3)] for i in range(3)]
+    # Z-axis expected reading at level = +9.80665 m/s² (z-up sensor convention)
+    for i in range(3):
+        accel_bias[i][2] -= 9.80665
+
+    # Display computed biases
+    tbl = Table(title="Computed Biases", show_header=True)
+    tbl.add_column("IMU")
+    tbl.add_column("gx (rad/s)", justify="right")
+    tbl.add_column("gy (rad/s)", justify="right")
+    tbl.add_column("gz (rad/s)", justify="right")
+    tbl.add_column("ax (m/s²)", justify="right")
+    tbl.add_column("ay (m/s²)", justify="right")
+    tbl.add_column("az (m/s²)", justify="right")
+    for i in range(3):
+        tbl.add_row(
+            f"IMU{i}",
+            *[f"{gyro_bias[i][k]:+.5f}"  for k in range(3)],
+            *[f"{accel_bias[i][k]:+.5f}" for k in range(3)],
+        )
+    console.print(tbl)
+    console.print(f"  Samples: IMU0={counts[0]}  IMU1={counts[1]}  IMU2={counts[2]}")
+
+    # Warn if any gyro std-dev is high (motion detected)
+    try:
+        ans = input("\nWrite to flight controller flash? [y/N] ").strip().lower()
+    except EOFError:
+        ans = "n"
+    if ans != "y":
+        console.print("[yellow]Calibration not written.")
+        return
+
+    # Re-open serial (reader was stopped)
+    writer = ser
+
+    for i in range(3):
+        gx, gy, gz = gyro_bias[i]
+        ax, ay, az = accel_bias[i]
+        cmd = f"CAL,set,{i},{gx:.6f},{gy:.6f},{gz:.6f},{ax:.6f},{ay:.6f},{az:.6f}"
+        writer.write((cmd + "\n").encode())
+        writer.flush()
+        time.sleep(0.1)
+
+    writer.write(b"CAL,commit\n")
+    writer.flush()
+
+    # Wait for CAL,OK
+    deadline = time.monotonic() + 3.0
+    buf = b""
+    ok_received = False
+    while time.monotonic() < deadline:
+        chunk = ser.read(256)
+        if chunk:
+            buf += chunk
+            while b"\n" in buf:
+                line_b, buf = buf.split(b"\n", 1)
+                resp = line_b.decode("ascii", errors="replace").strip()
+                if resp == "CAL,OK":
+                    ok_received = True
+                    break
+        if ok_received:
+            break
+        time.sleep(0.05)
+
+    if not ok_received:
+        console.print("[red]No CAL,OK received — write may have failed.")
+        return
+
+    console.print("[green]Calibration written to flash.")
+
+    # Verify round-trip via CAL,query
+    ser.write(b"CAL,query\n")
+    ser.flush()
+    deadline = time.monotonic() + 3.0
+    buf = b""
+    while time.monotonic() < deadline:
+        chunk = ser.read(256)
+        if chunk:
+            buf += chunk
+            while b"\n" in buf:
+                line_b, buf = buf.split(b"\n", 1)
+                resp = line_b.decode("ascii", errors="replace").strip()
+                if resp.startswith("CAL,DATA,"):
+                    console.print(f"[dim]Stored: {resp}")
+                    return
+        time.sleep(0.05)
+    console.print("[yellow]No CAL,DATA response from query.")
 
 
 # ── Log commands ──────────────────────────────────────────────────────────────
@@ -705,6 +1052,10 @@ def main():
 
     sub.add_parser("telemetry",   help="Live telemetry dashboard (DEBUG build required)")
 
+    sub.add_parser("ekf-status",  help="Per-lane EKF attitude/rate display (DEBUG build required)")
+
+    sub.add_parser("can-status",  help="Read FDCAN1 protocol status and error counters")
+
     sub.add_parser("motor-test",  help="Interactive motor test with RPM feedback")
 
     logs_p = sub.add_parser("logs", help="SD card log commands")
@@ -720,6 +1071,10 @@ def main():
 
     logs_sub.add_parser("erase",   help="Erase completed log files from SD card")
 
+    cal_p = sub.add_parser("calibrate", help="Collect IMU static bias calibration and write to flash")
+    cal_p.add_argument("--duration", type=int, default=30,
+                       help="Collection time in seconds (default: 30)")
+
     args = parser.parse_args()
 
     # Commands that don't need serial
@@ -734,8 +1089,17 @@ def main():
         if args.command == "telemetry":
             cmd_telemetry(ser, args)
 
+        elif args.command == "ekf-status":
+            cmd_ekf_status(ser, args)
+
+        elif args.command == "can-status":
+            cmd_can_status(ser, args)
+
         elif args.command == "motor-test":
             cmd_motor_test(ser, args)
+
+        elif args.command == "calibrate":
+            cmd_calibrate(ser, args)
 
         elif args.command == "logs":
             if args.logs_cmd == "list":

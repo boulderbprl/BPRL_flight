@@ -60,6 +60,11 @@ public:
     float pitch()   const;
     float yaw()     const;
 
+    // Per-lane accessors — called by StateEstThread only (no mutex needed).
+    void get_lane_euler(int lane, float& roll, float& pitch, float& yaw) const;
+    void get_lane_pqr  (int lane, float& p,    float& q,    float& r)    const;
+    int  primary_lane  () const { return _primary; }
+
 private:
     EKF  _lanes[NUM_LANES];
     int  _primary;
@@ -77,6 +82,9 @@ private:
 
     // Lowpass-filtered uvw_dot output
     float _ud_filt, _vd_filt, _wd_filt;
+
+    // Per-lane bias-corrected angular rates (updated each update() call)
+    float _lane_p[NUM_LANES], _lane_q[NUM_LANES], _lane_r[NUM_LANES];
 
     int  _select_primary() const;
 };

@@ -21,7 +21,8 @@ StateManager::StateManager()
       _blended_ud(0.0f), _blended_vd(0.0f), _blended_wd(0.0f),
       _prev_p(0.0f), _prev_q(0.0f), _prev_r(0.0f),
       _pdot_filt(0.0f), _qdot_filt(0.0f), _rdot_filt(0.0f),
-      _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f)
+      _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f),
+      _lane_p{}, _lane_q{}, _lane_r{}
 {}
 
 void StateManager::init()
@@ -35,6 +36,9 @@ void StateManager::init()
     _prev_p       = _prev_q       = _prev_r       = 0.0f;
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
+
+    for (int i = 0; i < NUM_LANES; ++i)
+        _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
 
     _initialized = true;
 }
@@ -60,8 +64,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     }
 
     // ── 2. IMX5 quaternion update on all lanes (200 Hz, asynchronous) ─────
+    // IMX5 outputs q_NED→body; EKF stores q_body→NED — conjugate {W,-X,-Y,-Z}.
     if (can_imu.valid && can_imu.has_new_quat) {
-        Quat q_meas = { can_imu.q0, can_imu.q1, can_imu.q2, can_imu.q3 };
+        Quat q_meas = { can_imu.q0, -can_imu.q1, -can_imu.q2, -can_imu.q3 };
         for (int i = 0; i < NUM_LANES; ++i)
             _lanes[i].update_quaternion(q_meas, R_QUAT);
     }
@@ -96,16 +101,37 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // ── 6. Soft-blend p/q/r: bias-corrected gyros + IMX5 blend ──
     _blended_p = _blended_q = _blended_r = 0.0f;
     for (int i = 0; i < NUM_LANES; ++i) {
-        if (w[i] < 1e-15f || !imu[i].valid) continue;
+        if (!imu[i].valid || !_lanes[i].is_valid()) {
+            _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
+            continue;
+        }
         const float* st = _lanes[i].state();
-        _blended_p += w[i] * (imu[i].gyro[0] - st[iBgx]);
-        _blended_q += w[i] * (imu[i].gyro[1] - st[iBgy]);
-        _blended_r += w[i] * (imu[i].gyro[2] - st[iBgz]);
+        const float lp = imu[i].gyro[0] - st[iBgx];
+        const float lq = imu[i].gyro[1] - st[iBgy];
+        const float lr = imu[i].gyro[2] - st[iBgz];
+        _lane_p[i] = lp;
+        _lane_q[i] = lq;
+        _lane_r[i] = lr;
+        if (w[i] < 1e-15f) continue;
+        _blended_p += w[i] * lp;
+        _blended_q += w[i] * lq;
+        _blended_r += w[i] * lr;
     }
     if (can_imu.valid) {
-        _blended_p = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_p + STATEMGR_IMX5_RATE_WEIGHT*can_imu.p;
-        _blended_q = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_q + STATEMGR_IMX5_RATE_WEIGHT*can_imu.q;
-        _blended_r = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_r + STATEMGR_IMX5_RATE_WEIGHT*can_imu.r;
+        // IMX5 rates are in NED z-down world frame. Rotate to body frame: v_body = R_b2n^T * v_NED
+        float R_imx[3][3];
+        {
+            const float* st = _lanes[_primary].state();
+            Quat q = { st[iQ0], st[iQ1], st[iQ2], st[iQ3] };
+            quat_to_rot_body2ned(q, R_imx);
+        }
+        // NED z-down: v_body = R_b2n^T * v_NED (standard transpose multiply)
+        const float p_b = R_imx[0][0]*can_imu.p + R_imx[1][0]*can_imu.q + R_imx[2][0]*can_imu.r;
+        const float q_b = R_imx[0][1]*can_imu.p + R_imx[1][1]*can_imu.q + R_imx[2][1]*can_imu.r;
+        const float r_b = R_imx[0][2]*can_imu.p + R_imx[1][2]*can_imu.q + R_imx[2][2]*can_imu.r;
+        _blended_p = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_p + STATEMGR_IMX5_RATE_WEIGHT*p_b;
+        _blended_q = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_q + STATEMGR_IMX5_RATE_WEIGHT*q_b;
+        _blended_r = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_r + STATEMGR_IMX5_RATE_WEIGHT*r_b;
     }
 
     // ── 7. Blend uvw_dot: gravity+Coriolis-corrected IMU accel per lane ───
@@ -131,10 +157,10 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         float oxv[3];
         cross3(pqr_l, vel_l, oxv);
 
-        // Bias-corrected accel minus gravity and Coriolis
-        _blended_ud += w[i] * (imu[i].accel[0] - st[iBax] - g_body[0] - oxv[0]);
-        _blended_vd += w[i] * (imu[i].accel[1] - st[iBay] - g_body[1] - oxv[1]);
-        _blended_wd += w[i] * (imu[i].accel[2] - st[iBaz] - g_body[2] - oxv[2]);
+        // NED z-down: a_true = accel + g_body - ω×v (sensor reads -g at hover)
+        _blended_ud += w[i] * (imu[i].accel[0] - st[iBax] + g_body[0] - oxv[0]);
+        _blended_vd += w[i] * (imu[i].accel[1] - st[iBay] + g_body[1] - oxv[1]);
+        _blended_wd += w[i] * (imu[i].accel[2] - st[iBaz] + g_body[2] - oxv[2]);
     }
 
     // Lowpass filter uvw_dot (recompute alpha in case dt varies)
@@ -200,13 +226,13 @@ void StateManager::get_state(float out[StateIdx::N]) const
     out[StateIdx::V_DOT] = _vd_filt;
     out[StateIdx::W_DOT] = _wd_filt;
 
-    // Quaternion NED→Body — EKF[6–9] → out[9–12]
+    // Quaternion Body→NED — EKF[6–9] → out[9–12]
     out[StateIdx::Q0] = ekf[iQ0];
     out[StateIdx::Q1] = ekf[iQ1];
     out[StateIdx::Q2] = ekf[iQ2];
     out[StateIdx::Q3] = ekf[iQ3];
 
-    // Angular rates (soft-blended) → out[13–15]
+    // Angular rates (soft-blended, NED z-down body frame) → out[13–15]
     out[StateIdx::P] = _blended_p;
     out[StateIdx::Q] = _blended_q;
     out[StateIdx::R] = _blended_r;
@@ -246,5 +272,32 @@ float StateManager::yaw() const
     float ro, pi, ya;
     quat_to_euler(q, ro, pi, ya);
     return ya;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Per-lane accessors (called by StateEstThread only)
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+void StateManager::get_lane_euler(int lane, float& roll, float& pitch, float& yaw) const
+{
+    if (lane < 0 || lane >= NUM_LANES || !_lanes[lane].is_valid()) {
+        roll = pitch = yaw = 0.0f;
+        return;
+    }
+    const float* st = _lanes[lane].state();
+    Quat q = { st[iQ0], st[iQ1], st[iQ2], st[iQ3] };
+    float ro, pi, ya;
+    quat_to_euler(q, ro, pi, ya);
+    roll  = ro;
+    pitch = pi;
+    yaw   = ya;
+}
+
+void StateManager::get_lane_pqr(int lane, float& p, float& q, float& r) const
+{
+    if (lane < 0 || lane >= NUM_LANES) { p = q = r = 0.0f; return; }
+    p = _lane_p[lane];
+    q = _lane_q[lane];
+    r = _lane_r[lane];
 }
 

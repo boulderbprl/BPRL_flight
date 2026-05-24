@@ -74,23 +74,53 @@ private:
     static constexpr float GRAVITY       = 9.80665f;  // m/s²
 
     // Initial error covariance diagonals (P0)
-    static constexpr float P0_POS  = 1.0f;   // position (m²)
-    static constexpr float P0_VEL  = 0.5f;   // body velocity (m/s)²
-    static constexpr float P0_QUAT = 0.1f;   // quaternion (unitless)
+    static constexpr float P0_POS    = 1.0f;    // position (m²)
+    static constexpr float P0_VEL    = 0.5f;    // body velocity (m/s)²
+    static constexpr float P0_QUAT   = 0.1f;    // quaternion (unitless)
+    static constexpr float P0_BIAS_A = 0.01f;   // accel bias (m/s²)² — tighter init after cal
+    static constexpr float P0_BIAS_G = 1e-4f;   // gyro bias (rad/s)²  — ~0.01 rad/s 1σ init
 
-    // Initial error covariance for bias states
-    static constexpr float P0_BIAS_A = 0.1f;   // accel bias initial variance (m/s²)²
-    static constexpr float P0_BIAS_G = 0.01f;  // gyro bias initial variance (rad/s)²
+    // Process noise (Q) per EKF step at 500 Hz
+    static constexpr float Q_POS    = 1e-4f;   // position random walk
+    static constexpr float Q_VEL    = 1e-3f;   // body velocity random walk
+    static constexpr float Q_QUAT   = 1e-5f;   // quaternion random walk
+    // Bias Q matched to ArduPilot EKF3 GBIAS_P_NSE=1e-3 formula:
+    //   dAngBiasVar = sq(sq(dt) * 1e-3) / dt² → ~4e-12 (rad/s)²/step at 500 Hz.
+    // We use 1e-9 (250× more permissive) because we have a direct gravity measurement
+    // rather than ArduPilot's indirect zero-velocity approach; slightly more latitude
+    // lets the filter track temperature-driven drift across the flight envelope.
+    static constexpr float Q_BIAS_G = 1e-9f;   // gyro bias random walk (rad/s)²/step
+    // Accel bias: ArduPilot ABIAS_P_NSE=2e-2 → sq(sq(dt)*2e-2)/dt² ≈ 6e-10 at 500 Hz.
+    // We use 1e-7 — still conservative, accel bias drifts faster than gyro bias.
+    static constexpr float Q_BIAS_A = 1e-7f;   // accel bias random walk (m/s²)²/step
 
-    // Process noise diagonals (Q) — increase to trust IMU more, decrease to smooth more
-    static constexpr float Q_POS    = 1e-4f;  // position (m²/s)
-    static constexpr float Q_VEL    = 1e-3f;  // body velocity (m/s)²/s
-    static constexpr float Q_QUAT   = 1e-5f;  // quaternion (unitless)/s
-    static constexpr float Q_BIAS_A = 1e-6f;  // accel bias random walk — slow thermal drift
-    static constexpr float Q_BIAS_G = 1e-7f;  // gyro bias random walk — even slower
+    // ── Gravity-vector measurement update parameters ───────────────────────
+    // Hard reject: skip update if |a| > this multiple of g (clearly bad sample)
+    static constexpr float GRAV_HARD_GATE = 3.0f * GRAVITY;  // 3g outer limit
 
-    // Gravity-vector update gate — reject update if ||accel|| deviates from g by more than this
-    static constexpr float GRAV_GATE_MS2 = 1.0f;  // m/s²
+    // Chi-squared innovation gate (per-axis normalised, summed over 3 axes).
+    // Mirrors ArduPilot's velTestRatio < 1 pattern:
+    //   test_ratio = sum(innov²) / (sum(S_ii) * GRAV_CHI2_GATE²) < 1
+    // GRAV_CHI2_GATE = 5.0 → 5σ joint gate (very permissive under vibration)
+    static constexpr float GRAV_CHI2_GATE = 5.0f;
+
+    // Adaptive measurement noise: R_eff = R_base + GRAV_R_VIBE * vibe_rms²
+    // where vibe_rms² is the lowpass-filtered squared deviation from g.
+    // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
+    static constexpr float GRAV_R_VIBE    = 0.25f;  // dimensionless scale
+
+    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 500 Hz
+    static constexpr float GRAV_VIBE_ALPHA = 0.02f;
+
+    // ── Covariance variance floors and ceilings (ConstrainVariances) ──────
+    // Gyro bias: floor prevents collapse, ceiling = 0.5 rad/s 1σ
+    static constexpr float P_MIN_BIAS_G = 1e-12f;
+    static constexpr float P_MAX_BIAS_G = 0.25f;
+    // Accel bias: ceiling = 1.0 m/s² 1σ
+    static constexpr float P_MIN_BIAS_A = 1e-12f;
+    static constexpr float P_MAX_BIAS_A = 1.0f;
+    // Quaternion: small floor prevents complete collapse
+    static constexpr float P_MIN_QUAT   = 1e-12f;
 
     // Innovation norm exponential smoothing — higher = slower response to changes
     // τ ≈ 1/(1 - INNOV_SMOOTH) updates  (0.9 → ~10-update time constant)
@@ -100,6 +130,7 @@ private:
     int   _imu_idx;
     bool  _initialized;
     float _innov_norm;    // exponentially-smoothed innovation magnitude
+    float _vibe_filt;     // IIR estimate of (|a| - g)² — drives adaptive R_gravity
 
     float _x[N];          // state vector
     float _P[N][N];       // error covariance

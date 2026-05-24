@@ -97,6 +97,7 @@ int main(void)
         /* .log     = */ { TIME_US2I(10000), TIME_US2I(20000) },
     };
 
+    can_drv_init();
     threads_start(kRates);
 
     /* Main thread: low-priority idle, feeds IWDG. */

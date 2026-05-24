@@ -8,12 +8,14 @@
  *
  * Memory layout:
  *   Bootloader  : 0x08000000  128 K   (reserved, not ours)
- *   Application : 0x08020000  1920 K  (this firmware)
+ *   Application : 0x08020000  1792 K  (this firmware)
+ *   Calibration : 0x081E0000  128 K   (Bank 2 sector 7 — persistent cal data)
  */
 
 MEMORY
 {
-    flash0 (rx) : org = 0x08020000, len = 1920k      /* App flash (after 128 KB BL) */
+    flash0 (rx) : org = 0x08020000, len = 1792k      /* App flash (after 128 KB BL) */
+    cal    (r)  : org = 0x081E0000, len = 128k        /* Calibration sector (Bank2 S7) */
     flash1 (rx) : org = 0x08000000, len = 1M         /* Bank 1 (not directly used)  */
     flash2 (rx) : org = 0x08100000, len = 1M         /* Bank 2 (not directly used)  */
     flash3 (rx) : org = 0x00000000, len = 0
