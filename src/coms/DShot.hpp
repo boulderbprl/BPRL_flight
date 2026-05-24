@@ -19,6 +19,14 @@ struct ESCTelemetry {
     bool     valid; // true once at least one CRC-passing frame has arrived
 };
 
+struct DShotDiag {
+    uint32_t dma_tc[2];    // DMA TC fire count: [0]=TIM1, [1]=TIM4
+    uint32_t cc_isr[2];    // CC ISR decode count: [0]=TIM1, [1]=TIM4
+    uint8_t  edge_cnt[4];  // edge count from last completed frame, per motor
+    uint32_t edges[4][5];  // first 5 edge timestamps from last frame, per motor
+};
+
 void dshot_init(void);
 void dshot_write(const uint16_t throttle[4]); // 0=disarm, 48-2047=throttle
 void dshot_get_telemetry(ESCTelemetry out[4]); // thread-safe snapshot
+void dshot_get_diag(DShotDiag *out);           // thread-safe diagnostic snapshot

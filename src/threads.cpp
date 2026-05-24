@@ -666,6 +666,34 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+    } else if (strcmp(line, "DSHOT,diag") == 0) {
+        DShotDiag d = {};
+        dshot_get_diag(&d);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "DSHOT,DIAG,dma_tc=%u/%u,cc_isr=%u/%u,"
+            "edges=%u/%u/%u/%u,"
+            "e0=%u,%u,%u,%u,%u,"
+            "e1=%u,%u,%u,%u,%u,"
+            "e2=%u,%u,%u,%u,%u,"
+            "e3=%u,%u,%u,%u,%u\r\n",
+            (unsigned)d.dma_tc[0], (unsigned)d.dma_tc[1],
+            (unsigned)d.cc_isr[0], (unsigned)d.cc_isr[1],
+            (unsigned)d.edge_cnt[0], (unsigned)d.edge_cnt[1],
+            (unsigned)d.edge_cnt[2], (unsigned)d.edge_cnt[3],
+            (unsigned)d.edges[0][0], (unsigned)d.edges[0][1],
+            (unsigned)d.edges[0][2], (unsigned)d.edges[0][3],
+            (unsigned)d.edges[0][4],
+            (unsigned)d.edges[1][0], (unsigned)d.edges[1][1],
+            (unsigned)d.edges[1][2], (unsigned)d.edges[1][3],
+            (unsigned)d.edges[1][4],
+            (unsigned)d.edges[2][0], (unsigned)d.edges[2][1],
+            (unsigned)d.edges[2][2], (unsigned)d.edges[2][3],
+            (unsigned)d.edges[2][4],
+            (unsigned)d.edges[3][0], (unsigned)d.edges[3][1],
+            (unsigned)d.edges[3][2], (unsigned)d.edges[3][3],
+            (unsigned)d.edges[3][4]);
+        chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,status") == 0) {
         // Read FDCAN1 diagnostic registers directly (no driver API needed).
         // PSR: protocol status (ACT, LEC, EP, EW, BO).

@@ -628,6 +628,72 @@ def cmd_can_status(ser: serial.Serial, _args):
     console.print("[red]No CAN,STATUS response — firmware may not support this command[/red]")
 
 
+# ── DShot diagnostic ──────────────────────────────────────────────────────────
+
+def cmd_dshot_diag(ser: serial.Serial, _args):
+    import re
+    ser.write(b"DSHOT,diag\r\n")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if not line.startswith("DSHOT,DIAG,"):
+            continue
+        # parse all key=value tokens after the prefix
+        rest = line[len("DSHOT,DIAG,"):]
+        kv   = dict(tok.split("=") for tok in rest.split(",") if "=" in tok)
+
+        dma0   = int(kv.get("dma_tc",  "0/0").split("/")[0])
+        dma1   = int(kv.get("dma_tc",  "0/0").split("/")[1])
+        isr0   = int(kv.get("cc_isr",  "0/0").split("/")[0])
+        isr1   = int(kv.get("cc_isr",  "0/0").split("/")[1])
+        ecnts  = [int(x) for x in kv.get("edges", "0/0/0/0").split("/")]
+
+        # re-parse edge timestamps from e0..e3 fields
+        raw_edges = []
+        for key in ("e0", "e1", "e2", "e3"):
+            if key in kv:
+                raw_edges.append([int(x) for x in kv[key].split("/")])
+            else:
+                raw_edges.append([0] * 5)
+
+        console.print("\n[bold]DShot Bidirectional Diagnostic[/bold]")
+        console.print(f"  DMA TC fires  : TIM1={dma0}  TIM4={dma1}")
+        console.print(f"  CC ISR decode : TIM1={isr0}  TIM4={isr1}")
+        console.print()
+
+        motor_names = ["M0 FR (TIM1/CC3)", "M1 RL (TIM1/CC1)", "M2 FL (TIM4/CC2)", "M3 RR (TIM1/CC2)"]
+        for i, name in enumerate(motor_names):
+            ec = ecnts[i] if i < len(ecnts) else 0
+            es = raw_edges[i] if i < len(raw_edges) else [0]*5
+            # Interpret first edge: should be ~6000+ ticks (≈30µs at 200 MHz)
+            first_us = es[0] / 200.0 if es[0] > 0 else 0.0
+            # Interpret spacing: should be ~267 ticks (1.33 µs per GCR bit)
+            spacing = (es[1] - es[0]) if ec >= 2 and es[1] > es[0] else 0
+            status = "[green]OK[/green]" if ec >= 2 else "[red]NO EDGES[/red]" if ec == 0 else "[yellow]PARTIAL[/yellow]"
+            console.print(f"  {name}: edges={ec}/21  {status}")
+            if ec > 0:
+                console.print(f"    First edge: {es[0]} ticks ({first_us:.1f} µs after TX)  spacing: {spacing} ticks (~{spacing/267:.2f}× expected)")
+                console.print(f"    Raw[0..4]: {es}")
+
+        console.print()
+        # Interpret results
+        if dma0 == 0 and dma1 == 0:
+            console.print("[red]FAIL: DMA TC never fires — DShot TX not completing (check DMAMUX or DMA init)[/red]")
+        elif isr0 == 0 and isr1 == 0:
+            console.print("[red]FAIL: CC ISR never decodes — input capture never triggered (check NVIC/DIER)[/red]")
+        elif all(ec == 0 for ec in ecnts):
+            console.print("[yellow]INFO: ISR fires but no edges captured — ESC not responding")
+            console.print("  → Is the motor spinning? (ESC only responds after arming)")
+            console.print("  → Check bidirectional DShot wiring (pull-up resistor on motor wire?)[/yellow]")
+        elif all(ec >= 2 for ec in ecnts):
+            console.print("[green]INFO: Edges captured on all motors — GCR decode is failing[/green]")
+            console.print("  → Check bit_ticks (~267 expected), CRC inversion, edge polarity")
+        else:
+            console.print("[yellow]INFO: Partial edge capture — some motors responding, some not[/yellow]")
+        return
+    console.print("[red]No DSHOT,DIAG response — flash latest firmware and retry[/red]")
+
+
 # ── Calibration ───────────────────────────────────────────────────────────────
 
 def cmd_calibrate(ser: serial.Serial, args):
@@ -1061,6 +1127,8 @@ def main():
 
     sub.add_parser("can-status",  help="Read FDCAN1 protocol status and error counters")
 
+    sub.add_parser("dshot-diag",  help="DShot bidirectional telemetry diagnostic (edge counts, timing)")
+
     sub.add_parser("motor-test",  help="Interactive motor test with RPM feedback")
 
     logs_p = sub.add_parser("logs", help="SD card log commands")
@@ -1099,6 +1167,9 @@ def main():
 
         elif args.command == "can-status":
             cmd_can_status(ser, args)
+
+        elif args.command == "dshot-diag":
+            cmd_dshot_diag(ser, args)
 
         elif args.command == "motor-test":
             cmd_motor_test(ser, args)

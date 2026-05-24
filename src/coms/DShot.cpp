@@ -56,8 +56,12 @@ static constexpr uint8_t kGcrDecode[32] = {
 /* Placed in .nocache (AHB SRAM3, 0x30040000 — D2 domain, outside D-cache
  * coverage on STM32H743).  Regular AXI SRAM (.bss) is D-cached; DMA reads
  * bypass the cache and would see stale data without this placement. */
-static uint32_t s_dma_buf_tim1[17 * 3] __attribute__((aligned(32), section(".nocache")));
-static uint32_t s_dma_buf_tim4[17]     __attribute__((aligned(32), section(".nocache")));
+/* 18 slots = 16 data bits + 2 gap slots.  The extra gap ensures DMA TC fires
+ * at UEV #18 (end of bit-0 period) rather than UEV #17 (start), so the last
+ * DShot bit completes fully before the timer is stopped and we switch to input
+ * capture.  Without it, bit 0 is cut to ~500 ns and ESC CRC check fails. */
+static uint32_t s_dma_buf_tim1[18 * 3] __attribute__((aligned(32), section(".nocache")));
+static uint32_t s_dma_buf_tim4[18]     __attribute__((aligned(32), section(".nocache")));
 
 /* ── Telemetry state ─────────────────────────────────────────────────────── */
 static ESCTelemetry s_telem[4] = {};
@@ -67,6 +71,12 @@ static ESCTelemetry s_telem[4] = {};
 /* ── Input capture edge buffers (one array per motor) ───────────────────── */
 static uint32_t s_edges[4][21];
 static uint8_t  s_edge_idx[4];
+
+/* ── Diagnostics — written from ISR, read by dshot_get_diag() ───────────── */
+static volatile uint32_t s_dma_tc_count[2] = {};   // [0]=TIM1 TC fires, [1]=TIM4 TC fires
+static volatile uint32_t s_cc_isr_count[2] = {};   // [0]=TIM1 CC ISR fires, [1]=TIM4 ISR fires
+static uint8_t  s_last_edge_cnt[4]  = {};           // edge count from previous frame
+static uint32_t s_last_edges[4][5]  = {};           // first 5 edge timestamps from previous frame
 
 /* ── ChibiOS DMA stream handles ─────────────────────────────────────────── */
 static const stm32_dma_stream_t *s_dma_tim1 = nullptr;
@@ -80,7 +90,7 @@ static void     switch_tim1_to_input_capture(void);
 static void     switch_tim4_to_input_capture(void);
 static void     decode_tim1_channels(void);
 static void     decode_tim4_channel(void);
-static bool     decode_gcr(const uint32_t edges[21], uint32_t *erpm_out);
+static bool     decode_gcr(const uint32_t edges[], uint8_t edge_count, uint32_t *erpm_out);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * DMA TC callbacks — stop timer, hand off to input capture.
@@ -88,6 +98,7 @@ static bool     decode_gcr(const uint32_t edges[21], uint32_t *erpm_out);
 static void dshot_dma_tc_tim1(void *param, uint32_t flags)
 {
     (void)param; (void)flags;
+    s_dma_tc_count[0]++;
     TIM1->CR1 &= ~TIM_CR1_CEN;
     switch_tim1_to_input_capture();
 }
@@ -95,6 +106,7 @@ static void dshot_dma_tc_tim1(void *param, uint32_t flags)
 static void dshot_dma_tc_tim4(void *param, uint32_t flags)
 {
     (void)param; (void)flags;
+    s_dma_tc_count[1]++;
     TIM4->CR1 &= ~TIM_CR1_CEN;
     switch_tim4_to_input_capture();
 }
@@ -125,9 +137,16 @@ OSAL_IRQ_HANDLER(STM32_TIM1_CC_HANDLER)
                     (s_edge_idx[1] >= 21) &&
                     (s_edge_idx[2] >= 21);
     if (all_done || (sr & TIM_SR_UIF)) {
+        s_cc_isr_count[0]++;
         TIM1->DIER &= ~(TIM_DIER_CC1IE | TIM_DIER_CC2IE |
                         TIM_DIER_CC3IE | TIM_DIER_UIE);
         TIM1->CR1  &= ~TIM_CR1_CEN;
+        /* Save diagnostics snapshot before decode resets edge data. */
+        for (int c = 0; c < 3; c++) {
+            s_last_edge_cnt[c] = s_edge_idx[c];
+            uint8_t n = s_edge_idx[c] < 5 ? s_edge_idx[c] : 5;
+            for (uint8_t k = 0; k < n; k++) s_last_edges[c][k] = s_edges[c][k];
+        }
         decode_tim1_channels();
     }
 
@@ -150,8 +169,12 @@ OSAL_IRQ_HANDLER(STM32_TIM4_HANDLER)
 
     bool done = (s_edge_idx[3] >= 21) || (sr & TIM_SR_UIF);
     if (done) {
+        s_cc_isr_count[1]++;
         TIM4->DIER &= ~(TIM_DIER_CC2IE | TIM_DIER_UIE);
         TIM4->CR1  &= ~TIM_CR1_CEN;
+        s_last_edge_cnt[3] = s_edge_idx[3];
+        uint8_t n = s_edge_idx[3] < 5 ? s_edge_idx[3] : 5;
+        for (uint8_t k = 0; k < n; k++) s_last_edges[3][k] = s_edges[3][k];
         decode_tim4_channel();
     }
 
@@ -161,8 +184,8 @@ OSAL_IRQ_HANDLER(STM32_TIM4_HANDLER)
 /* ── make_frame ──────────────────────────────────────────────────────────── */
 static uint16_t make_frame(uint16_t thr)
 {
-    uint16_t val = (uint16_t)((thr << 1) | 0U); // bidir telemetry bit = 0
-    uint16_t crc = (val ^ (val >> 4) ^ (val >> 8)) & 0x0FU;
+    uint16_t val = (uint16_t)((thr << 1) | 1U); // set telemetry bit
+    uint16_t crc = (~(val ^ (val >> 4) ^ (val >> 8))) & 0x0FU; // inverted CRC required for bidir
     return (uint16_t)((val << 4) | crc);
 }
 
@@ -185,14 +208,18 @@ static void build_dma_buf(const uint16_t throttle[4])
         s_dma_buf_tim1[slot * 3 + 1] = (frame[0] & (1U << b)) ? DS_T1H : DS_T0H;
         s_dma_buf_tim1[slot * 3 + 2] = (frame[3] & (1U << b)) ? DS_T1H : DS_T0H;
     }
-    s_dma_buf_tim1[16 * 3 + 0] = 0U; // inter-frame gap
+    s_dma_buf_tim1[16 * 3 + 0] = 0U; // gap slot 1
     s_dma_buf_tim1[16 * 3 + 1] = 0U;
     s_dma_buf_tim1[16 * 3 + 2] = 0U;
+    s_dma_buf_tim1[17 * 3 + 0] = 0U; // gap slot 2 — DMA TC fires here (after bit 0 completes)
+    s_dma_buf_tim1[17 * 3 + 1] = 0U;
+    s_dma_buf_tim1[17 * 3 + 2] = 0U;
 
     /* TIM4 burst writes CCR2: Motor 2 / FL (PD13/CH2) */
     for (int b = 15; b >= 0; b--)
         s_dma_buf_tim4[15 - b] = (frame[2] & (1U << b)) ? DS_T1H : DS_T0H;
-    s_dma_buf_tim4[16] = 0U;
+    s_dma_buf_tim4[16] = 0U; // gap slot 1
+    s_dma_buf_tim4[17] = 0U; // gap slot 2 — DMA TC fires here
 }
 
 /* ── switch_to_output ────────────────────────────────────────────────────── */
@@ -222,15 +249,26 @@ static void switch_to_output(void)
     GPIOD->PUPDR    = (GPIOD->PUPDR & ~(0x3U << 26));
     GPIOD->AFRH     = (GPIOD->AFRH & ~(0xFU << 20)) | (0x2U << 20);
 
-    /* TIM1: CH1/CH2/CH3 → PWM mode 2, preload enabled. CH4 unused. */
-    TIM1->CCMR1 = (6U << 4)  | TIM_CCMR1_OC1PE
-                | (6U << 12) | TIM_CCMR1_OC2PE;
-    TIM1->CCMR2 = (6U << 4)  | TIM_CCMR2_OC3PE;
+    /* CCxS (direction) bits are only writable when CCxE=0 — disable first.
+     *
+     * Bidirectional DShot REQUIRES inverted output (idle=HIGH, pulses LOW).
+     * After each frame we switch pins to input+pull-up; the pull-up holds the
+     * line HIGH between frames.  Standard DShot idles LOW, so the ESC would
+     * see an invalid HIGH inter-frame gap and reject every frame.  PWM mode 2
+     * (OC1M=7) gives output LOW while CNT < CCR, HIGH otherwise — idle=HIGH
+     * when CCR=0, bit pulses go LOW for DS_T0H or DS_T1H ticks.
+     *
+     * BLHeli_32 v32.7+ auto-detects bidirectional from the inverted CRC; no
+     * BLHeli Suite configuration required. */
+    TIM1->CCER  = 0U;
+    TIM1->CCMR1 = (7U << 4)  | TIM_CCMR1_OC1PE   // CH1: PWM mode 2 (inverted, idle=HIGH)
+                | (7U << 12) | TIM_CCMR1_OC2PE;   // CH2: PWM mode 2
+    TIM1->CCMR2 = (7U << 4)  | TIM_CCMR2_OC3PE;  // CH3: PWM mode 2
     TIM1->CCER  = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC3E;
     TIM1->ARR   = DS_ARR;
 
-    /* TIM4: CH2 → PWM mode 2, preload enabled. */
-    TIM4->CCMR1 = (6U << 12) | TIM_CCMR1_OC2PE;
+    TIM4->CCER  = 0U;
+    TIM4->CCMR1 = (7U << 12) | TIM_CCMR1_OC2PE;  // CH2: PWM mode 2 (inverted, idle=HIGH)
     TIM4->CCER  = TIM_CCER_CC2E;
     TIM4->ARR   = DS_ARR;
 }
@@ -240,10 +278,14 @@ static void switch_tim1_to_input_capture(void)
 {
     s_edge_idx[0] = s_edge_idx[1] = s_edge_idx[2] = 0;
 
-    /* PE9/PE11/PE13 → floating inputs. */
+    /* PE9/PE11/PE13 → inputs with pull-up.  Pull-up holds the line HIGH between
+     * ESC response edges so the capture threshold is clean. */
     GPIOE->MODER &= ~((0x3U << 18) | (0x3U << 22) | (0x3U << 26));
-    GPIOE->PUPDR &= ~((0x3U << 18) | (0x3U << 22) | (0x3U << 26));
+    GPIOE->PUPDR  = (GPIOE->PUPDR & ~((0x3U << 18) | (0x3U << 22) | (0x3U << 26)))
+                  | (0x1U << 18) | (0x1U << 22) | (0x1U << 26);
 
+    /* CCxS (direction) bits are only writable when CCxE=0 — disable first. */
+    TIM1->CCER  = 0U;
     /* TIM1 input capture: CH1/CH2/CH3 on both edges, ~100 µs timeout. */
     TIM1->CCMR1 = (1U << 0) | (1U << 8);  // CC1S=TI1, CC2S=TI2
     TIM1->CCMR2 = (1U << 0);               // CC3S=TI3
@@ -263,10 +305,12 @@ static void switch_tim4_to_input_capture(void)
 {
     s_edge_idx[3] = 0;
 
-    /* PD13 → floating input. */
+    /* PD13 → input with pull-up. */
     GPIOD->MODER &= ~(0x3U << 26);
-    GPIOD->PUPDR &= ~(0x3U << 26);
+    GPIOD->PUPDR  = (GPIOD->PUPDR & ~(0x3U << 26)) | (0x1U << 26);
 
+    /* CCxS (direction) bits are only writable when CCxE=0 — disable first. */
+    TIM4->CCER  = 0U;
     /* TIM4 input capture: CH2 on both edges, ~100 µs timeout. */
     TIM4->CCMR1 = (1U << 8);  // CC2S=TI2
     TIM4->CCER  = (TIM_CCER_CC2E | TIM_CCER_CC2P | TIM_CCER_CC2NP);
@@ -278,52 +322,63 @@ static void switch_tim4_to_input_capture(void)
 }
 
 /* ── decode_gcr ──────────────────────────────────────────────────────────── */
-static bool decode_gcr(const uint32_t edges[21], uint32_t *erpm_out)
+static bool decode_gcr(const uint32_t edges[], uint8_t edge_count, uint32_t *erpm_out)
 {
-    const uint32_t bit_ticks = DS_ARR + 1U; // 334 ticks per bit
+    /*
+     * GCR response runs at 5/4 × DShot rate → 750 kHz for DShot600.
+     * At 200 MHz timer: 200e6 / 750e3 = 266.7 ≈ 267 ticks per GCR bit.
+     *
+     * edges[0] is the timestamp of the first falling edge (frame start).
+     * The inter-frame gap (idle HIGH time before the ESC responds) ends at
+     * edges[0] and must NOT be decoded as GCR data.  Decoding begins with the
+     * LOW run from edges[0] to edges[1], and level starts at 0 (LOW).
+     *
+     * BLHeli_32 inverts the 4-bit CRC nibble (XOR 0xF) before transmitting,
+     * so the CRC check is: computed_crc ^ 0xF == received_crc.
+     */
+    const uint32_t bit_ticks = (DS_ARR + 1U) * 4U / 5U; // 267 ticks
 
-    uint32_t bits = 0U;
-    int      bits_filled = 0;
-    uint8_t  level = 1U; // ESC response idles high
+    if (edge_count < 2U) return false;
 
-    for (int i = 0; i < 21 && bits_filled < 21; i++) {
-        uint32_t width;
-        if (i == 0) {
-            width = edges[0];
+    uint32_t bits        = 0U;
+    uint32_t bits_filled = 0U;
+    uint8_t  level       = 0U; // edges[0] was a falling edge → line is now LOW
+
+    for (uint8_t i = 1U; i <= edge_count && bits_filled < 21U; i++) {
+        uint32_t n;
+        if (i < edge_count) {
+            uint32_t diff = edges[i] - edges[i - 1U];
+            n = (diff + bit_ticks / 2U) / bit_ticks;
+            if (n == 0U) n = 1U;
         } else {
-            uint32_t prev = edges[i - 1];
-            uint32_t cur  = edges[i];
-            width = (cur >= prev) ? (cur - prev) : (20001U - prev + cur);
+            n = 21U - bits_filled; // last run: fill remaining at current level
         }
+        if (n > 21U - bits_filled) n = 21U - bits_filled;
 
-        uint32_t n = (width + bit_ticks / 2U) / bit_ticks;
-        if (n == 0U) n = 1U;
-        if (n > (uint32_t)(21 - bits_filled)) n = (uint32_t)(21 - bits_filled);
-
-        for (uint32_t k = 0; k < n && bits_filled < 21; k++) {
-            bits = (bits << 1) | level;
+        for (uint32_t k = 0U; k < n; k++) {
+            bits = (bits << 1U) | level;
             bits_filled++;
         }
         level ^= 1U;
     }
 
-    if (bits_filled < 21) return false;
+    if (bits_filled < 21U) return false;
 
-    uint32_t gcr20 = bits & 0xFFFFFU;
+    uint32_t gcr20 = bits & 0xFFFFFU; // bottom 20 bits = 4 × 5-bit GCR codes
     uint16_t frame = 0U;
     for (int g = 3; g >= 0; g--) {
-        uint8_t code   = (uint8_t)((gcr20 >> (g * 5)) & 0x1FU);
+        uint8_t code   = (uint8_t)((gcr20 >> (g * 5U)) & 0x1FU);
         uint8_t nibble = kGcrDecode[code];
         if (nibble == 0xFF) return false;
-        frame = (uint16_t)((frame << 4) | nibble);
+        frame = (uint16_t)((frame << 4U) | nibble);
     }
 
-    uint16_t val = frame >> 4;
-    uint8_t  crc = (uint8_t)((val ^ (val >> 4) ^ (val >> 8)) & 0x0FU);
-    if (crc != (frame & 0x0FU)) return false;
+    uint16_t val = frame >> 4U;
+    uint8_t  crc = (uint8_t)((val ^ (val >> 4U) ^ (val >> 8U)) & 0x0FU);
+    if ((crc ^ 0x0FU) != (frame & 0x0FU)) return false; // BLHeli_32 inverts CRC
 
-    uint16_t exponent = (val >> 9) & 0x7U;
-    uint16_t mantissa = (val >> 0) & 0x1FFU;
+    uint16_t exponent = (val >> 9U) & 0x7U;
+    uint16_t mantissa = val & 0x1FFU;
     *erpm_out = (uint32_t)mantissa << exponent;
     return true;
 }
@@ -341,7 +396,7 @@ static void decode_tim1_channels(void)
         int m = kChanToMotor[c];
         if (s_edge_idx[c] < 2) { s_telem[m].valid = false; continue; }
         uint32_t erpm = 0U;
-        if (decode_gcr(s_edges[c], &erpm)) {
+        if (decode_gcr(s_edges[c], s_edge_idx[c], &erpm)) {
             s_telem[m].erpm  = erpm;
             s_telem[m].valid = true;
         } else {
@@ -356,7 +411,7 @@ static void decode_tim4_channel(void)
     /* Called from OSAL ISR (I-locked state). Write s_telem directly — no mutex. */
     if (s_edge_idx[3] >= 2) {
         uint32_t erpm = 0U;
-        if (decode_gcr(s_edges[3], &erpm)) {
+        if (decode_gcr(s_edges[3], s_edge_idx[3], &erpm)) {
             s_telem[2].erpm  = erpm;
             s_telem[2].valid = true;
         } else {
@@ -421,13 +476,14 @@ void dshot_init(void)
     dmaSetRequestSource(s_dma_tim1, DMAMUX_TIM1_UP);
     dmaStreamSetPeripheral(s_dma_tim1, &TIM1->DMAR);
     dmaStreamSetMemory0(s_dma_tim1, s_dma_buf_tim1);
-    dmaStreamSetTransactionSize(s_dma_tim1, 51U); // 17 slots × 3 channels
+    dmaStreamSetTransactionSize(s_dma_tim1, 54U); // 18 slots × 3 channels
     s_dma_tim1->stream->FCR = DMA_SxFCR_DMDIS;   // direct mode (no FIFO)
     dmaStreamSetMode(s_dma_tim1,
           DMA_SxCR_MINC
         | (0x2U << DMA_SxCR_MSIZE_Pos) // 32-bit memory
         | (0x2U << DMA_SxCR_PSIZE_Pos) // 32-bit peripheral
         | (0x1U << DMA_SxCR_DIR_Pos)   // memory → peripheral
+        | (0x3U << DMA_SxCR_PL_Pos)    // very-high priority (matches ArduPilot PL=3)
         | DMA_SxCR_TCIE);              // TC interrupt
 
     /* ── DMA stream for TIM4_UP (DMAMUX source 32) ─────────────────────── */
@@ -437,13 +493,14 @@ void dshot_init(void)
     dmaSetRequestSource(s_dma_tim4, DMAMUX_TIM4_UP);
     dmaStreamSetPeripheral(s_dma_tim4, &TIM4->DMAR);
     dmaStreamSetMemory0(s_dma_tim4, s_dma_buf_tim4);
-    dmaStreamSetTransactionSize(s_dma_tim4, 17U); // 17 slots × 1 channel
+    dmaStreamSetTransactionSize(s_dma_tim4, 18U); // 18 slots × 1 channel
     s_dma_tim4->stream->FCR = DMA_SxFCR_DMDIS;
     dmaStreamSetMode(s_dma_tim4,
           DMA_SxCR_MINC
         | (0x2U << DMA_SxCR_MSIZE_Pos)
         | (0x2U << DMA_SxCR_PSIZE_Pos)
         | (0x1U << DMA_SxCR_DIR_Pos)
+        | (0x3U << DMA_SxCR_PL_Pos)    // very-high priority
         | DMA_SxCR_TCIE);
 
     /* ── Enable CC interrupts ───────────────────────────────────────────── */
@@ -460,7 +517,18 @@ void dshot_write(const uint16_t throttle[4])
     TIM4->CR1 &= ~TIM_CR1_CEN;
     switch_to_output();
     TIM1->CNT = 0U; TIM4->CNT = 0U;
-    TIM1->SR  = 0U; TIM4->SR  = 0U;
+
+    /* After input capture the active CCR registers hold captured timestamps
+     * (e.g. 15319) which are larger than ARR=333.  With OC1PE=1 the active
+     * register is only refreshed at TIM_UP, so period-0 would have CCR>ARR
+     * → output HIGH the entire first 1.67 µs → ESC sees an overlong pulse
+     * and rejects the frame.  Writing CCR=0 then EGR=UG flushes the shadow
+     * into the active register immediately while the timer is stopped. */
+    TIM1->CCR1 = 0U; TIM1->CCR2 = 0U; TIM1->CCR3 = 0U;
+    TIM4->CCR2 = 0U;
+    TIM1->EGR  = TIM_EGR_UG;  // shadow → active, also resets CNT
+    TIM4->EGR  = TIM_EGR_UG;
+    TIM1->SR   = 0U; TIM4->SR  = 0U;  // clear UIF set by EGR
 
     /* Restore DMA enable bits.  switch_*_to_input_capture() overwrites DIER
      * (clearing UDE) so it must be re-asserted each frame.  Also re-assert
@@ -469,15 +537,30 @@ void dshot_write(const uint16_t throttle[4])
     TIM1->DIER = TIM_DIER_UDE;
     TIM4->DIER = TIM_DIER_UDE;
 
-    /* Reload DMA streams. */
+    /* Reload DMA streams.  dmaStreamDisable() clears all interrupt-enable bits
+     * (TCIE/HTIE/TEIE/DMEIE) as a ChibiOS workaround for bug 3607518, so
+     * dmaStreamSetMode() must be called after every disable to restore TCIE. */
     dmaStreamDisable(s_dma_tim1);
+    dmaStreamSetMode(s_dma_tim1,
+          DMA_SxCR_MINC
+        | (0x2U << DMA_SxCR_MSIZE_Pos)
+        | (0x2U << DMA_SxCR_PSIZE_Pos)
+        | (0x1U << DMA_SxCR_DIR_Pos)
+        | DMA_SxCR_TCIE);
     dmaStreamSetMemory0(s_dma_tim1, s_dma_buf_tim1);
-    dmaStreamSetTransactionSize(s_dma_tim1, 51U);
+    dmaStreamSetTransactionSize(s_dma_tim1, 54U);
     dmaStreamEnable(s_dma_tim1);
 
     dmaStreamDisable(s_dma_tim4);
+    dmaStreamSetMode(s_dma_tim4,
+          DMA_SxCR_MINC
+        | (0x2U << DMA_SxCR_MSIZE_Pos)
+        | (0x2U << DMA_SxCR_PSIZE_Pos)
+        | (0x1U << DMA_SxCR_DIR_Pos)
+        | (0x3U << DMA_SxCR_PL_Pos)    // very-high priority
+        | DMA_SxCR_TCIE);
     dmaStreamSetMemory0(s_dma_tim4, s_dma_buf_tim4);
-    dmaStreamSetTransactionSize(s_dma_tim4, 17U);
+    dmaStreamSetTransactionSize(s_dma_tim4, 18U);
     dmaStreamEnable(s_dma_tim4);
 
     /* Start both timers back-to-back to minimise inter-frame skew. */
@@ -489,5 +572,20 @@ void dshot_get_telemetry(ESCTelemetry out[4])
 {
     chSysLock();
     memcpy(out, s_telem, 4 * sizeof(ESCTelemetry));
+    chSysUnlock();
+}
+
+void dshot_get_diag(DShotDiag *out)
+{
+    chSysLock();
+    out->dma_tc[0]  = s_dma_tc_count[0];
+    out->dma_tc[1]  = s_dma_tc_count[1];
+    out->cc_isr[0]  = s_cc_isr_count[0];
+    out->cc_isr[1]  = s_cc_isr_count[1];
+    for (int c = 0; c < 4; c++) {
+        out->edge_cnt[c] = s_last_edge_cnt[c];
+        for (int k = 0; k < 5; k++)
+            out->edges[c][k] = s_last_edges[c][k];
+    }
     chSysUnlock();
 }
