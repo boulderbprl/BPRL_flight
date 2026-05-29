@@ -330,8 +330,11 @@ static bool decode_gcr(const uint32_t edges[], uint8_t edge_count, uint32_t *erp
      *
      * edges[0] is the timestamp of the first falling edge (frame start).
      * The inter-frame gap (idle HIGH time before the ESC responds) ends at
-     * edges[0] and must NOT be decoded as GCR data.  Decoding begins with the
-     * LOW run from edges[0] to edges[1], and level starts at 0 (LOW).
+     * edges[0].  Decoding begins with the run from edges[0] to edges[1].
+     *
+     * Encoding is NRZI: each edge (transition) marks a 1; bit clocks with
+     * no transition are 0.  Run of n clocks between edges → bits (1 << (n-1)).
+     * This matches the GCR table which was designed for the NRZI representation.
      *
      * BLHeli_32 inverts the 4-bit CRC nibble (XOR 0xF) before transmitting,
      * so the CRC check is: computed_crc ^ 0xF == received_crc.
@@ -342,8 +345,17 @@ static bool decode_gcr(const uint32_t edges[], uint8_t edge_count, uint32_t *erp
 
     uint32_t bits        = 0U;
     uint32_t bits_filled = 0U;
-    uint8_t  level       = 0U; // edges[0] was a falling edge → line is now LOW
 
+    /*
+     * DShot bidir uses NRZI encoding: each transition edge marks a 1, and
+     * the subsequent bit clocks with no transition are 0s.  The GCR table
+     * was designed for this representation — not for raw NRZ levels.
+     *
+     * For each run of n bit-clocks between consecutive edges, encode as
+     * "1 followed by (n-1) zeros" = (1 << (n-1)) after shifting left by n.
+     * This exactly matches ArduPilot's bdshot_decode_telemetry_packet():
+     *   value <<= len;  value |= 1U << (len - 1U);
+     */
     for (uint8_t i = 1U; i <= edge_count && bits_filled < 21U; i++) {
         uint32_t n;
         if (i < edge_count) {
@@ -351,15 +363,12 @@ static bool decode_gcr(const uint32_t edges[], uint8_t edge_count, uint32_t *erp
             n = (diff + bit_ticks / 2U) / bit_ticks;
             if (n == 0U) n = 1U;
         } else {
-            n = 21U - bits_filled; // last run: fill remaining at current level
+            n = 21U - bits_filled; // last run: fill remaining zeros
         }
         if (n > 21U - bits_filled) n = 21U - bits_filled;
 
-        for (uint32_t k = 0U; k < n; k++) {
-            bits = (bits << 1U) | level;
-            bits_filled++;
-        }
-        level ^= 1U;
+        bits = (bits << n) | (1U << (n - 1U));
+        bits_filled += n;
     }
 
     if (bits_filled < 21U) return false;
@@ -546,6 +555,7 @@ void dshot_write(const uint16_t throttle[4])
         | (0x2U << DMA_SxCR_MSIZE_Pos)
         | (0x2U << DMA_SxCR_PSIZE_Pos)
         | (0x1U << DMA_SxCR_DIR_Pos)
+        | (0x3U << DMA_SxCR_PL_Pos)    // very-high priority (matches init and TIM4)
         | DMA_SxCR_TCIE);
     dmaStreamSetMemory0(s_dma_tim1, s_dma_buf_tim1);
     dmaStreamSetTransactionSize(s_dma_tim1, 54U);
