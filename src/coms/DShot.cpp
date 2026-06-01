@@ -226,27 +226,37 @@ static void build_dma_buf(const uint16_t throttle[4])
 static void switch_to_output(void)
 {
     /*
-     * PE9/PE11/PE13 → TIM1_CH1/CH2/CH3 (AF1), push-pull, very-high speed.
+     * PE9/PE11/PE13 → TIM1_CH1/CH2/CH3 (AF1), push-pull, medium speed, pull-up.
      * MODER bits: pin9=18-19, pin11=22-23, pin13=26-27.
      * AFRH bits:  pin9= 4-7,  pin11=12-15, pin13=20-23.
      */
     GPIOE->MODER   = (GPIOE->MODER
                       & ~(0x3U << 18) & ~(0x3U << 22) & ~(0x3U << 26))
                      | (0x2U << 18) | (0x2U << 22) | (0x2U << 26);
-    GPIOE->OSPEEDR |= (0x3U << 18) | (0x3U << 22) | (0x3U << 26);
-    GPIOE->PUPDR    = (GPIOE->PUPDR
-                       & ~(0x3U << 18) & ~(0x3U << 22) & ~(0x3U << 26));
+    /* Medium speed (0b01 = ~25 MHz) per ArduPilot bdshot_setup_group_ic_DMA():
+     * "bdshot requires less than MID2 speed to avoid noise when switching
+     *  from output to input" — very-high slew rate causes ringing that the
+     *  ESC captures as false edges on the telemetry window. */
+    GPIOE->OSPEEDR = (GPIOE->OSPEEDR
+                      & ~(0x3U << 18) & ~(0x3U << 22) & ~(0x3U << 26))
+                     | (0x1U << 18) | (0x1U << 22) | (0x1U << 26);
+    /* Keep pull-up active in output mode (ArduPilot bdshot uses PUPDR_PULLUP
+     * on output pins); this ensures a defined HIGH state during the brief
+     * MODER transition from input → AF at the start of each frame. */
+    GPIOE->PUPDR   = (GPIOE->PUPDR
+                      & ~(0x3U << 18) & ~(0x3U << 22) & ~(0x3U << 26))
+                     | (0x1U << 18) | (0x1U << 22) | (0x1U << 26);
     GPIOE->AFRH     = (GPIOE->AFRH
                        & ~(0xFU <<  4) & ~(0xFU << 12) & ~(0xFU << 20))
                       | (0x1U <<  4) | (0x1U << 12) | (0x1U << 20);
 
     /*
-     * PD13 → TIM4_CH2 (AF2), push-pull, very-high speed.
+     * PD13 → TIM4_CH2 (AF2), push-pull, medium speed, pull-up.
      * MODER bits: pin13=26-27. AFRH bits: pin13=20-23.
      */
     GPIOD->MODER   = (GPIOD->MODER & ~(0x3U << 26)) | (0x2U << 26);
-    GPIOD->OSPEEDR |= (0x3U << 26);
-    GPIOD->PUPDR    = (GPIOD->PUPDR & ~(0x3U << 26));
+    GPIOD->OSPEEDR = (GPIOD->OSPEEDR & ~(0x3U << 26)) | (0x1U << 26);
+    GPIOD->PUPDR   = (GPIOD->PUPDR & ~(0x3U << 26)) | (0x1U << 26);
     GPIOD->AFRH     = (GPIOD->AFRH & ~(0xFU << 20)) | (0x2U << 20);
 
     /* CCxS (direction) bits are only writable when CCxE=0 — disable first.
@@ -286,9 +296,15 @@ static void switch_tim1_to_input_capture(void)
 
     /* CCxS (direction) bits are only writable when CCxE=0 — disable first. */
     TIM1->CCER  = 0U;
-    /* TIM1 input capture: CH1/CH2/CH3 on both edges, ~100 µs timeout. */
-    TIM1->CCMR1 = (1U << 0) | (1U << 8);  // CC1S=TI1, CC2S=TI2
-    TIM1->CCMR2 = (1U << 0);               // CC3S=TI3
+    /* TIM1 input capture: CH1/CH2/CH3 on both edges, ~100 µs timeout.
+     * IC1F/IC2F/IC3F = 0b0010 → 4-sample filter at fCK_INT (200 MHz).
+     * ArduPilot bdshot_config_icu_dshot() uses TIM_CCMR1_IC1F_1 for the same
+     * reason: any line ringing when the GPIO switches from AF-output to input
+     * appears as sub-20 ns glitches; 4-sample filter rejects them before they
+     * corrupt the GCR edge timestamps. */
+    TIM1->CCMR1 = (1U << 0) | (2U << 4)   // CC1S=TI1, IC1F=0b0010 (4-sample)
+                | (1U << 8) | (2U << 12);  // CC2S=TI2, IC2F=0b0010
+    TIM1->CCMR2 = (1U << 0) | (2U << 4);  // CC3S=TI3, IC3F=0b0010
     TIM1->CCER  = (TIM_CCER_CC1E | TIM_CCER_CC1P | TIM_CCER_CC1NP)
                 | (TIM_CCER_CC2E | TIM_CCER_CC2P | TIM_CCER_CC2NP)
                 | (TIM_CCER_CC3E | TIM_CCER_CC3P | TIM_CCER_CC3NP);
@@ -311,8 +327,9 @@ static void switch_tim4_to_input_capture(void)
 
     /* CCxS (direction) bits are only writable when CCxE=0 — disable first. */
     TIM4->CCER  = 0U;
-    /* TIM4 input capture: CH2 on both edges, ~100 µs timeout. */
-    TIM4->CCMR1 = (1U << 8);  // CC2S=TI2
+    /* TIM4 input capture: CH2 on both edges, ~100 µs timeout.
+     * IC2F = 0b0010 → 4-sample filter, same reasoning as TIM1 above. */
+    TIM4->CCMR1 = (1U << 8) | (2U << 12); // CC2S=TI2, IC2F=0b0010
     TIM4->CCER  = (TIM_CCER_CC2E | TIM_CCER_CC2P | TIM_CCER_CC2NP);
     TIM4->ARR   = 20000U;
     TIM4->CNT   = 0U;
