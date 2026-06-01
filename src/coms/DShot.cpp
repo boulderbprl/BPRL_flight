@@ -33,8 +33,20 @@
 
 /* ── DShot600 timing (200 MHz timer clock, PSC = 0) ─────────────────────── */
 static constexpr uint32_t DS_ARR = 333U; // 334 ticks = 1.667 µs bit period
-static constexpr uint32_t DS_T0H = 125U; // '0' pulse ≈ 625 ns
-static constexpr uint32_t DS_T1H = 250U; // '1' pulse ≈ 1250 ns
+static constexpr uint32_t DS_T0H = 125U; // standard '0' HIGH time = 625 ns  (37.5% of period)
+static constexpr uint32_t DS_T1H = 250U; // standard '1' HIGH time = 1250 ns (75.0% of period)
+/*
+ * Bidirectional DShot uses an INVERTED signal (idle HIGH, bit pulses LOW).
+ * The ESC measures the HIGH portion AFTER each LOW pulse to determine the bit
+ * value — identical to how standard DShot measures the HIGH pulse itself.
+ * With PWM mode 2 (output LOW when CNT < CCR, HIGH when CNT >= CCR):
+ *   LOW  duration = CCR ticks
+ *   HIGH duration = (DS_ARR+1 - CCR) ticks  ← this must equal T0H or T1H
+ * So CCR = (DS_ARR+1) - T_H.  ArduPilot uses the same formula:
+ *   CCR = period_ticks - DSHOT_BIT_x_TICKS  in fill_DMA_buffer_dshot().
+ */
+static constexpr uint32_t DS_T0_CCR = (DS_ARR + 1U) - DS_T0H; // 334-125 = 209 → HIGH 625 ns
+static constexpr uint32_t DS_T1_CCR = (DS_ARR + 1U) - DS_T1H; // 334-250 = 84  → HIGH 1250 ns
 
 /* ── DMAMUX1 request IDs (stm32_dmamux.h, STM32H7xx) ────────────────────── */
 static constexpr uint32_t DMAMUX_TIM1_UP = 15U; // STM32_DMAMUX1_TIM1_UP
@@ -204,9 +216,9 @@ static void build_dma_buf(const uint16_t throttle[4])
      */
     for (int b = 15; b >= 0; b--) {
         int slot = 15 - b;
-        s_dma_buf_tim1[slot * 3 + 0] = (frame[1] & (1U << b)) ? DS_T1H : DS_T0H;
-        s_dma_buf_tim1[slot * 3 + 1] = (frame[0] & (1U << b)) ? DS_T1H : DS_T0H;
-        s_dma_buf_tim1[slot * 3 + 2] = (frame[3] & (1U << b)) ? DS_T1H : DS_T0H;
+        s_dma_buf_tim1[slot * 3 + 0] = (frame[1] & (1U << b)) ? DS_T1_CCR : DS_T0_CCR;
+        s_dma_buf_tim1[slot * 3 + 1] = (frame[0] & (1U << b)) ? DS_T1_CCR : DS_T0_CCR;
+        s_dma_buf_tim1[slot * 3 + 2] = (frame[3] & (1U << b)) ? DS_T1_CCR : DS_T0_CCR;
     }
     s_dma_buf_tim1[16 * 3 + 0] = 0U; // gap slot 1
     s_dma_buf_tim1[16 * 3 + 1] = 0U;
@@ -217,7 +229,7 @@ static void build_dma_buf(const uint16_t throttle[4])
 
     /* TIM4 burst writes CCR2: Motor 2 / FL (PD13/CH2) */
     for (int b = 15; b >= 0; b--)
-        s_dma_buf_tim4[15 - b] = (frame[2] & (1U << b)) ? DS_T1H : DS_T0H;
+        s_dma_buf_tim4[15 - b] = (frame[2] & (1U << b)) ? DS_T1_CCR : DS_T0_CCR;
     s_dma_buf_tim4[16] = 0U; // gap slot 1
     s_dma_buf_tim4[17] = 0U; // gap slot 2 — DMA TC fires here
 }
@@ -266,7 +278,7 @@ static void switch_to_output(void)
      * line HIGH between frames.  Standard DShot idles LOW, so the ESC would
      * see an invalid HIGH inter-frame gap and reject every frame.  PWM mode 2
      * (OC1M=7) gives output LOW while CNT < CCR, HIGH otherwise — idle=HIGH
-     * when CCR=0, bit pulses go LOW for DS_T0H or DS_T1H ticks.
+     * when CCR=0, bit pulses go LOW for DS_T0_CCR or DS_T1_CCR ticks.
      *
      * BLHeli_32 v32.7+ auto-detects bidirectional from the inverted CRC; no
      * BLHeli Suite configuration required. */
