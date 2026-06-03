@@ -75,6 +75,22 @@
 #define LINE_FMU_CH3            PAL_LINE(GPIOE, 13U)
 #define LINE_FMU_CH4            PAL_LINE(GPIOE, 14U)
 
+/* ── AUX output power and voltage selection ─────────────────────────────────── */
+/*
+ * PA8  nVDD_5V_PERIPH_EN — active-LOW enable for the 5 V peripheral power rail.
+ *   The PCB has a pull-up, so the reset default (floating input) leaves the
+ *   rail DISABLED.  This rail powers the AUX-output level-shifter ICs, so
+ *   driving it LOW is required for any signal to reach AUX 1-6.
+ *   ArduPilot hwdef.inc: "PA8 nVDD_5V_PERIPH_EN OUTPUT LOW"
+ *
+ * PB4  PWM_VOLT_SEL — selects 3.3 V (HIGH) or 5 V (LOW) for AUX outputs.
+ *   Must be driven HIGH to put the level-shifter in 3.3 V mode and release
+ *   the output-enable of the buffer.
+ *   ArduPilot hwdef.inc: "PB4 PWM_VOLT_SEL OUTPUT HIGH"
+ */
+#define LINE_PERIPH_5V_EN       PAL_LINE(GPIOA, 8U)   /* nVDD_5V_PERIPH_EN (active LOW) */
+#define LINE_PWM_VOLT_SEL       PAL_LINE(GPIOB, 4U)   /* PWM_VOLT_SEL      (HIGH = 3.3 V) */
+
 /* ── RC input ────────────────────────────────────────────────────────────────── */
 #define LINE_RC_INPUT           PAL_LINE(GPIOC, 7U)
 

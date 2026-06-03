@@ -308,34 +308,16 @@ static THD_FUNCTION(ControlThread, arg)
             }
         }
 
-        float state[StateIdx::N], euler[3], input[4];
-        bool  armed;
-        chMtxLock(&state_mtx);
-        memcpy(state, g_state, sizeof(state));
-        memcpy(euler, g_euler, sizeof(euler));
-        memcpy(input, g_input, sizeof(input));
-        armed = g_armed;
-        chMtxUnlock(&state_mtx);
-
-        // Build 6-element [roll, pitch, yaw, p, q, r] for the cascade controller.
-        // AttitudeController and MotorMixer keep their existing index assumptions
-        // (0=roll, 1=pitch, 2=yaw, 3=p, 4=q, 5=r) — no interface changes needed.
-        const float ctrl_state[6] = {
-            euler[0], euler[1], euler[2],
-            state[StateIdx::P], state[StateIdx::Q], state[StateIdx::R]
-        };
-
-        float   cmds[3];
-        att_ctrl.update(ctrl_state, input, cmds);
-        float   thr = att_ctrl.compute_throttle(ctrl_state, input);
-
-        int32_t out[4];
-        mixer.update(cmds, thr, armed, ctrl_state, out);
-        motor_output_write(out);
-
-        chMtxLock(&state_mtx);
-        memcpy(g_output, out, sizeof(out));
-        chMtxUnlock(&state_mtx);
+        /* ── Disarmed idle path (no radio, no state estimator running) ──────
+         * With only ControlThread + USBCmdThread active, g_armed is always
+         * false and all state is zero.  Skip the full PID/mixer path and
+         * send DShot 0 (disarm/idle) directly so the ESC always receives a
+         * valid, uninterrupted stream of packets at 500 Hz.  The motor-test
+         * bypass above handles actual spin-up via USB commands. */
+        {
+            static const uint16_t kIdle[4] = {0U, 0U, 0U, 0U};
+            dshot_write(kIdle);
+        }
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
@@ -375,11 +357,17 @@ static THD_FUNCTION(HeartbeatThread, arg)
     (void)arg;
     chRegSetThreadName("heartbeat");
 
-    /* Output format (5 Hz, one line per tick):
-     *   $IMU,<ms>,<ax0>,<ay0>,<az0>,<gx0>,<gy0>,<gz0>,<v0>,
-     *            <ax1>,<ay1>,<az1>,<gx1>,<gy1>,<gz1>,<v1>,
-     *            <ax2>,<ay2>,<az2>,<gx2>,<gy2>,<gz2>,<v2>
-     * Accel in m/s², gyro in rad/s, valid=1 when IMU responded to WHOAMI.
+    /* Simplified heartbeat: LED blink + DShot diagnostics over USB.
+     * IMU/EKF output removed since SPIThread and StateEstThread are not
+     * running in the motor-test configuration.
+     *
+     * Every 2 s:
+     *   $DSHOT,<ms>,tc=<tim1_dma_tc>/<tim4_dma_tc>,cc=<tim1_cc>/<tim4_cc>,
+     *           edges=<m0>/<m1>/<m2>/<m3>
+     *
+     * tc increasing → DShot DMA is firing → signal is being sent.
+     * edges > 0     → ESC is responding with GCR telemetry.
+     * tc = 0        → DShot is NOT running (check dshot_init failure).
      */
     uint32_t tick = 0;
     systime_t next = chVTGetSystemTime();
@@ -388,44 +376,20 @@ static THD_FUNCTION(HeartbeatThread, arg)
         if (tick % 10 == 0) palSetLine(LINE_LED_ACTIVITY);
         if (tick % 10 == 1) palClearLine(LINE_LED_ACTIVITY);
 
-        IMURaw snap[3];
-        chMtxLock(&imu_mtx);
-        memcpy(snap, g_imu, sizeof(snap));
-        chMtxUnlock(&imu_mtx);
-
-        char buf[256];
-        int n = chsnprintf(buf, sizeof(buf),
-            "$IMU,%lu,"
-            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X),"
-            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X),"
-            "%.3f,%.3f,%.3f,%.4f,%.4f,%.4f,%d(0x%02X)\r\n",
-            (uint32_t)TIME_I2MS(chVTGetSystemTime()),
-            (double)snap[0].accel[0],(double)snap[0].accel[1],(double)snap[0].accel[2],
-            (double)snap[0].gyro[0], (double)snap[0].gyro[1], (double)snap[0].gyro[2],
-            (int)snap[0].valid, (unsigned)imu1.whoami(),
-            (double)snap[1].accel[0],(double)snap[1].accel[1],(double)snap[1].accel[2],
-            (double)snap[1].gyro[0], (double)snap[1].gyro[1], (double)snap[1].gyro[2],
-            (int)snap[1].valid, (unsigned)imu2.whoami(),
-            (double)snap[2].accel[0],(double)snap[2].accel[1],(double)snap[2].accel[2],
-            (double)snap[2].gyro[0], (double)snap[2].gyro[1], (double)snap[2].gyro[2],
-            (int)snap[2].valid, (unsigned)imu3.whoami());
-        chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf, (size_t)n, TIME_MS2I(50));
-
-        float roll, pitch, yaw;
-        chMtxLock(&state_mtx);
-        roll  = g_euler[0];
-        pitch = g_euler[1];
-        yaw   = g_euler[2];
-        chMtxUnlock(&state_mtx);
-
-        char buf2[64];
-        int n2 = chsnprintf(buf2, sizeof(buf2),
-            "$EKF,%lu,%.2f,%.2f,%.2f\r\n",
-            (uint32_t)TIME_I2MS(chVTGetSystemTime()),
-            (double)(roll  * 57.2958f),
-            (double)(pitch * 57.2958f),
-            (double)(yaw   * 57.2958f));
-        chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf2, (size_t)n2, TIME_MS2I(50));
+        /* Print DShot status every 2 s (every 10th tick at 5 Hz). */
+        if (tick % 10 == 0) {
+            DShotDiag d = {};
+            dshot_get_diag(&d);
+            char buf[128];
+            int n = chsnprintf(buf, sizeof(buf),
+                "$DSHOT,%lu,tc=%u/%u,cc=%u/%u,edges=%u/%u/%u/%u\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                (unsigned)d.dma_tc[0], (unsigned)d.dma_tc[1],
+                (unsigned)d.cc_isr[0], (unsigned)d.cc_isr[1],
+                (unsigned)d.edge_cnt[0], (unsigned)d.edge_cnt[1],
+                (unsigned)d.edge_cnt[2], (unsigned)d.edge_cnt[3]);
+            chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf, (size_t)n, TIME_MS2I(50));
+        }
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, TIME_MS2I(200)));
         tick++;
@@ -984,17 +948,31 @@ static THD_FUNCTION(LogThread, arg)
 /* ── Thread launcher (called from main) ──────────────────────────────────── */
 void threads_start(const ThreadRates &rates)
 {
-    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO - 5,  HeartbeatThread, (void *)&rates.heartbeat);
-    chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
-
-    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
-    chThdCreateStatic(waStateEst, sizeof(waStateEst), NORMALPRIO + 25, StateEstThread, (void *)&rates.est);
-    // chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
-    chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
-    // chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
-    // chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
-    chThdCreateStatic(waUSBCmd,   sizeof(waUSBCmd),   NORMALPRIO - 20, USBCmdThread,   nullptr);
+    /*
+     * Minimal configuration: only the motor output thread and the USB debug
+     * interface.  All other threads are intentionally omitted.
+     *
+     * Why this matters for bidirectional DShot:
+     *   SPIThread runs SPI DMA transfers at 1 kHz.  Each SPI DMA completion
+     *   ISR fires at a priority above the TIM1_CC / TIM4 edge-capture IRQs,
+     *   preempting them mid-GCR-frame.  At 750 kHz GCR a single 5 µs ISR
+     *   preemption can overwrite CCR before we read it.  Removing all sources
+     *   of high-frequency ISR contention lets the edge-capture ISRs run
+     *   uninterrupted within the 1.33 µs GCR bit window.
+     *
+     * ControlThread: calls dshot_write() at 500 Hz.  Handles both the motor-
+     *   test bypass (USB MT commands) and the normal PID/mixer path.  All
+     *   shared state (g_state, g_euler, g_input) defaults to zero — safe
+     *   because with g_armed=false the mixer outputs zeros, and the motor-test
+     *   bypass bypasses the mixer entirely.
+     *
+     * USBCmdThread: MT,* (motor test), DSHOT,diag, BOOT, CAL,* commands.
+     *   Event-driven; near-zero overhead when no USB host is connected.
+     */
+    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
+    chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
+    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
 #ifdef BPRL_DEBUG
-    chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
+    chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif
 }

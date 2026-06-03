@@ -12,6 +12,26 @@
 
 void boardInit(void)
 {
+    /*
+     * ── AUX output power enable (MUST come first) ─────────────────────
+     *
+     * PA8 = nVDD_5V_PERIPH_EN (active LOW).
+     *   Powers the level-shifter ICs on AUX 1-6 output path.
+     *   PCB pull-up → reset default HIGH = rail OFF = no signal to motors.
+     *
+     * PB4 = PWM_VOLT_SEL (HIGH = 3.3 V mode).
+     *   Releases the level-shifter output-enable.
+     *
+     * ArduPilot hwdef/CubeOrange/hwdef.inc:
+     *   PA8 nVDD_5V_PERIPH_EN OUTPUT LOW
+     *   PB4 PWM_VOLT_SEL      OUTPUT HIGH
+     */
+    palSetPadMode(GPIOA, 8U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
+    palClearLine(LINE_PERIPH_5V_EN);   /* LOW = 5 V peripheral rail ON */
+
+    palSetPadMode(GPIOB, 4U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
+    palSetLine(LINE_PWM_VOLT_SEL);     /* HIGH = 3.3 V PWM output level */
+
     /* ── Sensor 3.3V rail ───────────────────────────────────────────────── */
     palSetPadMode(GPIOE, 3U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
     palSetLine(LINE_SENSOR_PWR_EN);

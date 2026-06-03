@@ -97,7 +97,9 @@ int main(void)
         /* .log     = */ { TIME_US2I(10000), TIME_US2I(20000) },
     };
 
-    can_drv_init();
+    /* CAN driver not started — CANThread is not running, so leaving the
+     * FDCAN peripheral uninitialised avoids spurious RxFIFO-overflow
+     * interrupts flooding the system when a CAN bus is attached. */
     motor_output_init();
     threads_start(kRates);
 
