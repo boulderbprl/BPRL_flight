@@ -279,7 +279,7 @@ static THD_FUNCTION(StateEstThread, arg)
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * ControlThread — 500 Hz  NORMALPRIO+20
+ * ControlThread — 400 Hz  NORMALPRIO+20
  * Cascade PID → MotorMixer → motor output.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(ControlThread, arg)
@@ -312,7 +312,7 @@ static THD_FUNCTION(ControlThread, arg)
          * With only ControlThread + USBCmdThread active, g_armed is always
          * false and all state is zero.  Skip the full PID/mixer path and
          * send DShot 0 (disarm/idle) directly so the ESC always receives a
-         * valid, uninterrupted stream of packets at 500 Hz.  The motor-test
+         * valid, uninterrupted stream of packets at 400 Hz.  The motor-test
          * bypass above handles actual spin-up via USB commands. */
         {
             static const uint16_t kIdle[4] = {0U, 0U, 0U, 0U};
@@ -782,7 +782,7 @@ static THD_FUNCTION(DebugThread, arg)
         dshot_get_telemetry(telem);
         uint32_t rpm[4];
         for (int i = 0; i < 4; i++) {
-            rpm[i] = telem[i].valid ? telem[i].erpm / 14U : 0U;
+            rpm[i] = telem[i].valid ? telem[i].erpm / 7U : 0U;
         }
 
         /* ── Emit $TEL line over USB ────────────────────────────────────── */

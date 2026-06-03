@@ -90,7 +90,7 @@ int main(void)
         /* .spi     = */ TIME_US2I(1000),
         /* .est     = */ TIME_US2I(2000),
         /* .i2c     = */ TIME_MS2I(10),
-        /* .control = */ TIME_US2I(2000),
+        /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),

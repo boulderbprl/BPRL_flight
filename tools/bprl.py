@@ -630,6 +630,123 @@ def cmd_can_status(ser: serial.Serial, _args):
 
 # ── DShot diagnostic ──────────────────────────────────────────────────────────
 
+def cmd_dshot_health(ser: serial.Serial, _args):
+    """
+    Live DShot health monitor.  Parses the $DSHOT heartbeat line (printed every
+    2 s by HeartbeatThread) and shows rates, edge counts, and ESC arm status.
+
+    $DSHOT,<ms>,tc=<t1>/<t4>,cc=<c1>/<c4>,edges=<m0>/<m1>/<m2>/<m3>
+    tc   = DMA TX-complete count  → should grow at ~400/s (1 per frame)
+    cc   = IC-complete count      → should grow at ~400/s (TIM1 rotates 3 slots)
+    edges = last IC edge count per motor (0 = ESC not responding)
+    """
+    import re
+
+    console.print("[bold cyan]DShot Health Monitor[/bold cyan]  (Ctrl-C to exit)")
+    console.print("Waiting for $DSHOT heartbeat (prints every 2 s)...\n")
+
+    prev_tc = [None, None]
+    prev_cc = [None, None]
+    prev_ms = None
+    arm_detected = [False, False, False, False]
+
+    MOTOR = ["M0 FR", "M1 RL", "M2 FL", "M3 RR"]
+    ESC_WATCHDOG_S = 30.0   # ESC resets if no valid signal for this long
+
+    try:
+        while True:
+            raw = ser.readline()
+            if not raw:
+                continue
+            line = raw.decode("ascii", errors="replace").strip()
+            if not line.startswith("$DSHOT,"):
+                continue
+
+            # Parse: $DSHOT,<ms>,tc=T1/T4,cc=C1/C4,edges=E0/E1/E2/E3
+            m = re.match(
+                r"\$DSHOT,(\d+),tc=(\d+)/(\d+),cc=(\d+)/(\d+),edges=(\d+)/(\d+)/(\d+)/(\d+)",
+                line
+            )
+            if not m:
+                continue
+
+            ms     = int(m.group(1))
+            tc1    = int(m.group(2));  tc4   = int(m.group(3))
+            cc1    = int(m.group(4));  cc4   = int(m.group(5))
+            edges  = [int(m.group(6+i)) for i in range(4)]
+
+            dt_s   = ((ms - prev_ms) / 1000.0) if prev_ms is not None else 2.0
+            dt_s   = max(dt_s, 0.01)
+
+            tc1_hz = ((tc1 - prev_tc[0]) / dt_s) if prev_tc[0] is not None else 0.0
+            tc4_hz = ((tc4 - prev_tc[1]) / dt_s) if prev_tc[1] is not None else 0.0
+            cc1_hz = ((cc1 - prev_cc[0]) / dt_s) if prev_cc[0] is not None else 0.0
+            cc4_hz = ((cc4 - prev_cc[1]) / dt_s) if prev_cc[1] is not None else 0.0
+
+            prev_tc = [tc1, tc4];  prev_cc = [cc1, cc4];  prev_ms = ms
+
+            # ── Print snapshot ────────────────────────────────────────────────
+            console.rule(f"[dim]t={ms/1000:.1f}s[/dim]")
+
+            # TX rate
+            tc1_ok = 350 < tc1_hz < 450
+            tc4_ok = 350 < tc4_hz < 450
+            tc1_col = "green" if tc1_ok else "red"
+            tc4_col = "green" if tc4_ok else "red"
+            console.print(
+                f"  TX rate  TIM1=[{tc1_col}]{tc1_hz:5.0f}[/{tc1_col}] Hz  "
+                f"TIM4=[{tc4_col}]{tc4_hz:5.0f}[/{tc4_col}] Hz  "
+                f"(expected ~400)"
+            )
+            if not tc1_ok or not tc4_ok:
+                console.print("  [red]→ TX rate wrong: DShot frames not being sent at 400 Hz.[/red]")
+                console.print("  [red]  Check dshot_init() DMA alloc and timer CEN start.[/red]")
+
+            # IC / decode rate
+            cc1_ok = cc1_hz > 50   # at least 50 decodes/s (some may be timeouts)
+            cc1_col = "green" if cc1_ok else "yellow"
+            console.print(
+                f"  IC rate  TIM1=[{cc1_col}]{cc1_hz:5.0f}[/{cc1_col}] Hz  "
+                f"TIM4=[green]{cc4_hz:5.0f}[/green] Hz  "
+                f"(TIM1 expects ~133/s per motor slot; TIM4 ~400/s)"
+            )
+
+            # Edge counts per motor
+            console.print()
+            all_zero = all(e == 0 for e in edges)
+            for i, name in enumerate(MOTOR):
+                e = edges[i]
+                if e == 0:
+                    status = "[red]NO EDGES[/red]"
+                    if not arm_detected[i]:
+                        status += " — ESC not arming yet"
+                elif e < 10:
+                    status = f"[yellow]PARTIAL ({e}/21)[/yellow]"
+                elif e >= 21:
+                    status = f"[green]FULL ({e}/21) — decoding active[/green]"
+                    arm_detected[i] = True
+                else:
+                    status = f"[cyan]{e}/21[/cyan]"
+                console.print(f"    {name}: edges={e:2d}  {status}")
+
+            # Diagnosis
+            console.print()
+            if all_zero and cc1_ok:
+                console.print(
+                    "[yellow]ESC silent: IC is running but no edges arrive.[/yellow]\n"
+                    "  Possible causes:\n"
+                    "  1. ESC not in bidirectional DShot mode (configure in BLHeli/AM32)\n"
+                    "  2. Signal not reaching ESC (probe AUX 2-5 with scope)\n"
+                    "  3. ESC not yet armed — try MT,0,0 or wait for arming beep"
+                )
+            elif any(arm_detected):
+                armed_names = [MOTOR[i] for i in range(4) if arm_detected[i]]
+                console.print(f"[green bold]ESC RESPONDING: {', '.join(armed_names)}[/green bold]")
+                console.print("  GCR edges arriving — RPM telemetry active.")
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_dshot_diag(ser: serial.Serial, _args):
     import re
     ser.write(b"DSHOT,diag\r\n")
@@ -1127,7 +1244,8 @@ def main():
 
     sub.add_parser("can-status",  help="Read FDCAN1 protocol status and error counters")
 
-    sub.add_parser("dshot-diag",  help="DShot bidirectional telemetry diagnostic (edge counts, timing)")
+    sub.add_parser("dshot-health", help="Live DShot TX/IC rate monitor + ESC arm detector (runs continuously)")
+    sub.add_parser("dshot-diag",  help="One-shot DShot bidirectional telemetry snapshot (edge counts, timing)")
 
     sub.add_parser("motor-test",  help="Interactive motor test with RPM feedback")
 
@@ -1167,6 +1285,9 @@ def main():
 
         elif args.command == "can-status":
             cmd_can_status(ser, args)
+
+        elif args.command == "dshot-health":
+            cmd_dshot_health(ser, args)
 
         elif args.command == "dshot-diag":
             cmd_dshot_diag(ser, args)
