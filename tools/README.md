@@ -314,6 +314,8 @@ make flash BOARD=CubeBlueH7
 # Flash debug build (enables $TEL telemetry stream)
 make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeBlueH7
 
+make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeOrangePlus
+
 # Live telemetry dashboard (debug build required)
 python3 tools/bprl.py telemetry
 

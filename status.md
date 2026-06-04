@@ -427,17 +427,22 @@ BDShot response encodes electrical revolution **period** in µs. Decoder was sto
 
 The single-stream burst TX approach (one DMA stream → `TIM1->DMAR`, DCR: DBA=CCR1, DBL=2) wrote CCR1, CCR2, CCR3 on successive UEVs, offset by one timer period (1.67 µs) each. Motor 1 (CCR1) received its value one UEV before motors 0 and 3 — the DShot bit boundaries on M0/M3 were misaligned by 1.67 µs / 3.33 µs, causing those ESCs to reject every frame.
 
-**31. Per-channel TX DMA — fixes motors 0, 2, 3** (`src/coms/DShot.cpp`)
+**31. Per-channel TX DMA attempt — broke all motors** (`src/coms/DShot.cpp`)
 
-Replaced the single burst-DMAR TX stream with **three separate DMA streams**, all mapped to `DMAMUX=TIM1_UP`. DMAMUX routes the same TIM1_UP request to all three streams simultaneously; each stream independently writes to its own CCR on every UEV. CCR1, CCR2, CCR3 are updated at the exact same UEV with zero inter-channel offset.
+Attempted to use three separate DMA streams all mapped to DMAMUX=TIM1_UP, expecting the DMAMUX to fan out each UEV to all three streams simultaneously. In practice on this hardware the DMAMUX appears to deliver each TIM1_UP request to only one stream at a time (round-robin), so each stream received every 3rd UEV → each bit period became 5 µs = DShot200. All ESCs rejected the out-of-spec frames. **Reverted — see change #32.**
 
-| Old | New |
-|-----|-----|
-| 1 TX stream, 54-word interleaved buf, writes to `TIM1->DMAR` | 3 TX streams (`s_dma_tx_m0/m1/m3`), 18-word per-channel bufs, write to `CCR2/CCR1/CCR3` |
-| DCR: DBA=CCR1, DBL=2 (burst) required for TX | DCR not used for TIM1 TX (direct CCR writes) |
-| 1 IC stream reusing the TX stream handle | 1 dedicated IC stream (`s_dma_ic_tim1`) |
+**32. Burst DMAR with correctly interleaved buffer — correct fix** (`src/coms/DShot.cpp`)
 
-All three TX streams share the same TC callback (`dshot_dma_tc_tx_tim1`); the phase check ensures only the first-to-fire transitions TX→IC. TIM4 is unchanged (single motor, no timing offset issue).
+Reverted to a single-stream DMAR burst approach matching ArduPilot exactly. One DMA stream writes to `TIM1->DMAR`. DCR: DBA=CCR1, DBL=3 (4 registers: CCR1/M1, CCR2/M0, CCR3/M3, CCR4/dummy). FIFO full threshold (4 words): one TIM1_UP event drains all 4 FIFO words to DMAR in one burst, updating CCR1/CCR2/CCR3 simultaneously within the same UEV (~5 ns apart).
+
+Buffer: `s_tx_buf_tim1[72]` — interleaved stride-4: `[M1_bit, M0_bit, M3_bit, 0] × 18 rows`.
+
+| Field | Value |
+|-------|-------|
+| DCR | DBA=CCR1(13), DBL=3 |
+| Buffer | 72 words (18 UEVs × 4 words/UEV) |
+| FIFO | full threshold (4 words per TIM_UP drain) |
+| IC stream | `s_dma_ic_tim1` unchanged |
 
 ---
 
@@ -445,7 +450,7 @@ All three TX streams share the same TC callback (`dshot_dma_tc_tx_tim1`); the ph
 
 | # | Issue | Status |
 |---|-------|--------|
-| 1 | **All 4 motors working** | Code fix complete (change #31). **Pending hardware verification** — flash and test `MT,0,10` / `MT,2,10` / `MT,3,10`. |
+| 1 | **All 4 motors working** | Code fix complete (change #32). **Pending hardware verification** — flash and test `MT,0,10` / `MT,1,10` / `MT,2,10` / `MT,3,10`. |
 | 2 | Python GCR test script | 5/15 tests still failing. Low priority — not needed once all 4 motors verified on hardware. |
 | 3 | CAN / IMX5 fusion | Deferred |
 | 4 | CRSF radio | Deferred |
@@ -511,3 +516,20 @@ python3 tools/bprl.py calibrate --duration 30
 ### 4. Full Flight Stack
 
 Once motors work: re-enable SPIThread, StateEstThread, RadioThread, LogThread, and restore ControlThread to full PID/mixer path. Test complete attitude loop.
+
+
+
+
+question: 
+
+im working on getting 4 motors connected over bi-directional dshot600. Currently 1 motor (motor 1) connects and works with rpm feedback. Please read over status.md and ardupilot_comparison.md as well as the motor code. When I use ardupilot flashed with CubeOrangePlus-bdshot and set the parameters 
+
+SERVO_BLH_BDMASK = 7680
+SERVO_BLH_MASK = 7680
+MOT_PWM_TYPE = 6
+AUX2 = motor 1
+AUX3 = motor 2
+AUX4 = motor 3
+AUX5 = motor 4
+
+All motors work and I get RPM feedback. Without changing the wiring or esc firmware when I use my code only one motor connects and spins. The problem is with my code I just cant figure out where. 
