@@ -2,16 +2,18 @@
 #include <cstdint>
 
 /*
- * DShot600 bidirectional motor output driver — TIM1 CH1-4 via DMA burst.
+ * DShot600 bidirectional motor output driver.
  *
- * Output: inverted DShot600 (bidirectional mode) on PA8-PA11.
- * Input:  GCR-encoded eRPM response captured on the same pins after each frame.
+ * Motors: PE9=TIM1_CH1(M1), PE11=TIM1_CH2(M0), PE13=TIM1_CH3(M3), PD13=TIM4_CH2(M2).
+ * TX: 3 separate DMA streams write to TIM1 CCR1/CCR2/CCR3 simultaneously (no CCR skew).
+ *     1 DMA stream writes to TIM4 CCR2 via DMAR.
+ * IC: dedicated DMA stream captures GCR edges; TIM1 rotates M0→M1→M3 (~133 Hz each).
+ *     TIM4 captures M2 every frame (400 Hz).
  *
- * Call dshot_init() once at startup (replaces PWM init).
- * Call dshot_write() each control tick; it returns immediately (DMA-driven).
- * Call dshot_get_telemetry() to snapshot the latest eRPM values.
- *
- * Before use: enable "Bidirectional DSHOT" in BLHeli Suite 32 on the P60A V2.
+ * Before use: enable "Bidirectional DSHOT" on the ESC (BLHeli32 / AM32).
+ * Call dshot_init() once at startup.
+ * Call dshot_write() each control tick (returns immediately — DMA driven).
+ * Call dshot_get_telemetry() to snapshot the latest eRPM values (thread-safe).
  */
 
 struct ESCTelemetry {

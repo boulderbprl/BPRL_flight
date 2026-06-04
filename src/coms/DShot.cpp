@@ -4,7 +4,7 @@
 #include <cstring>
 
 /*
- * DShot600 bidirectional — DMA TX + DMA IC, matching ArduPilot exactly.
+ * DShot600 bidirectional — 4×DMA TX + 1×DMA IC per timer, matching ArduPilot.
  *
  * Motor pin mapping (CubePilot standard carrier, AUX OUT):
  *   Motor 0 (FR) → PE11 = TIM1_CH2  (AUX 3, AF1)
@@ -12,44 +12,59 @@
  *   Motor 2 (FL) → PD13 = TIM4_CH2  (AUX 5, AF2)
  *   Motor 3 (RR) → PE13 = TIM1_CH3  (AUX 2, AF1)
  *
- * ── Why TX and IC cannot overlap on the same timer ───────────────────────────
+ * ── Why TX and IC must be sequential on the same timer ───────────────────────
  *
- *   Both TX burst and IC single-capture use TIM_DMAR, whose address mapping is
- *   controlled by DCR (DBA + DBL).  TX needs DBA=CCR1, DBL=2 (burst of 3).
- *   IC needs DBA=CCRx, DBL=0 (single register).  Only one DCR setting can exist
- *   at a time — running both simultaneously corrupts the TX burst and causes all
- *   TIM1 motors to receive wrong pulse widths → ESCs never arm.
+ *   A timer channel is either in output mode (driving the AF pin) or input mode
+ *   (capturing edges from the AF pin) — never both at once.  After the DShot TX
+ *   frame completes, the timer is stopped, all channels are switched to IC mode,
+ *   the IC DMA stream is armed, the timer restarts in free-run mode, and the ESC
+ *   GCR response is captured.  Only after IC completes (DMA TC or UIE timeout)
+ *   does the next TX frame start.  TX and IC are fully sequential, no overlap.
  *
- *   ArduPilot solves this the same way: TX runs to completion, timer stops,
- *   timer is fully reconfigured for IC (one channel), IC completes, repeat.
- *   No overlap, ever.
+ *   TIM4 has only one motor (M2) so there is no rotation — IC follows every TX.
+ *   TIM4 also uses DCR/DMAR for both TX (DBA=CCR2, DBL=0) and IC; because DBL=0
+ *   in both phases the DCR value never changes.
  *
  * ── DMA stream allocation ────────────────────────────────────────────────────
  *
- *   s_dma_tim1 — TIM1: TX burst then IC in rotation (one stream, two phases).
- *     TX:  DMAMUX=TIM1_UP(15),  M→P, DBA=CCR1, DBL=2 (CCR1/CCR2/CCR3 burst).
- *     IC slot 0 (M0/PE11): DMAMUX=TIM1_CH2(12), P→M, CC2S=TI2, DBA=CCR2, DBL=0.
- *     IC slot 1 (M1/PE9):  DMAMUX=TIM1_CH2(12), P→M, CC2S=TI1 (cross), DBA=CCR2.
- *     IC slot 2 (M3/PE13): DMAMUX=TIM1_CH3(13), P→M, CC3S=TI3, DBA=CCR3, DBL=0.
+ *   TIM1 TX — three separate streams, all triggered by TIM1_UP (DMAMUX=15).
+ *   Each stream writes directly to its own CCR register (no burst, no DMAR).
+ *   All three DMAMUX channels receive the same TIM1_UP request simultaneously,
+ *   so CCR1/CCR2/CCR3 are all updated on the same UEV with zero offset.
  *
- *   s_dma_tim4 — TIM4: TX burst then IC every frame (M2/PD13 only).
- *     TX:  DMAMUX=TIM4_UP(32), M→P, DBA=CCR2, DBL=0.
- *     IC:  DMAMUX=TIM4_CH2(30), P→M, CC2S=TI2, DBA=CCR2, DBL=0.
+ *     s_dma_tx_m1: DMAMUX=TIM1_UP(15), M→P, 18 words → &TIM1->CCR1 (PE9)
+ *     s_dma_tx_m0: DMAMUX=TIM1_UP(15), M→P, 18 words → &TIM1->CCR2 (PE11)
+ *     s_dma_tx_m3: DMAMUX=TIM1_UP(15), M→P, 18 words → &TIM1->CCR3 (PE13)
  *
- * ── ArduPilot CC2 cross-capture for M1 ──────────────────────────────────────
+ *   TIM1 IC — one dedicated stream (separate from TX streams).
+ *   Reconfigured on every rotation slot before each capture session.
  *
- *   STM32 CCMR CC2S field:
- *     0b01 = TI2 → captures PE11 (CH2's own pin) — used for M0
- *     0b10 = TI1 → captures PE9  (CH1's pin, cross-input) — used for M1
- *   Both configurations generate CC2 events and DMA reads from CCR2 via DMAR.
- *   ArduPilot never uses CC1DE; BPRL now matches this exactly.
+ *     s_dma_ic_tim1:
+ *       Slot 0 (M0/PE11): DMAMUX=TIM1_CH2(12), P→M, CC2S=TI2, DBA=CCR2, DBL=0
+ *       Slot 1 (M1/PE9):  DMAMUX=TIM1_CH2(12), P→M, CC2S=TI1 (cross), DBA=CCR2
+ *       Slot 2 (M3/PE13): DMAMUX=TIM1_CH3(13), P→M, CC3S=TI3, DBA=CCR3, DBL=0
  *
- * ── Telemetry rates (400 Hz frame rate) ─────────────────────────────────────
- *   M0 FR (PE11): ~133 Hz  (slot 0 of 3-way TIM1 rotation)
- *   M1 RL (PE9):  ~133 Hz  (slot 1)
- *   M3 RR (PE13): ~133 Hz  (slot 2)
- *   M2 FL (PD13): 400 Hz   (TIM4, every frame)
- *   Identical to ArduPilot with 3 active channels on TIM1 + 1 on TIM4.
+ *   TIM4 — single stream, shared TX/IC (one motor, no rotation).
+ *
+ *     s_dma_tim4:
+ *       TX: DMAMUX=TIM4_UP(32), M→P, 18 words → &TIM4->DMAR (DCR: DBA=CCR2)
+ *       IC: DMAMUX=TIM4_CH2(30), P→M, 22 words → &TIM4->DMAR (DCR: DBA=CCR2)
+ *       DCR.DBA=CCR2, DCR.DBL=0 in both phases — no change required between TX and IC.
+ *
+ * ── ArduPilot CC2 cross-capture trick for M1 ─────────────────────────────────
+ *
+ *   STM32 CCMR CC2S field selects which signal feeds the CC2 capture register:
+ *     0b01 = TI2 → captures PE11 (CH2's own pin) — used for M0 (slot 0)
+ *     0b10 = TI1 → captures PE9  (CH1's pin via cross-input) — used for M1 (slot 1)
+ *   Both generate CC2 events; DMA reads from DMAR which maps to CCR2 via DCR.
+ *   CC1 and CC1DE are never used; this matches ArduPilot exactly.
+ *
+ * ── Telemetry rates (400 Hz DShot frame rate) ────────────────────────────────
+ *   M0 FR (PE11): ~133 Hz  (TIM1 IC rotation slot 0 of 3)
+ *   M1 RL (PE9):  ~133 Hz  (TIM1 IC rotation slot 1 of 3)
+ *   M3 RR (PE13): ~133 Hz  (TIM1 IC rotation slot 2 of 3)
+ *   M2 FL (PD13):  400 Hz  (TIM4, every frame)
+ *   Matches ArduPilot with 3 active TIM1 channels + 1 TIM4 channel.
  */
 
 /* ── DShot600 timing (200 MHz timer clock, PSC = 0) ─────────────────────── */
@@ -298,12 +313,11 @@ static void switch_to_output(void)
 
 /* ── start_ic_tim1 ───────────────────────────────────────────────────────── */
 /*
- * Reconfigure s_dma_tim1 P→M for the current rotation slot and start IC.
- * Called from dshot_dma_tc_tim1 (TX complete, priority 7).
+ * Configure s_dma_ic_tim1 for the current rotation slot and start IC capture.
+ * Called from dshot_dma_tc_tx_tim1 (first TX TC, priority 7) after TIM1 is stopped.
  *
- * IMPORTANT: The timer is fully stopped before this is called (TIM1->CR1 &= ~CEN
- * in the TC callback).  This guarantees DCR can be changed safely and that no
- * UDE DMA requests are pending.
+ * TIM1 is fully stopped before this is called (CR1 &= ~CEN in the TC callback),
+ * so DCR can be safely changed and no UDE requests are in-flight.
  */
 static void start_ic_tim1(void)
 {
@@ -542,12 +556,16 @@ void dshot_init(void)
 
     switch_to_output();
 
-    /* ── DMA stream for TIM1 (shared TX/IC) ─────────────────────────────── */
-    s_dma_tim1 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
-                                 STM32_IRQ_TIM1_CC_PRIORITY,  // priority 7
-                                 dshot_dma_tc_tim1, nullptr);
-    osalDbgAssert(s_dma_tim1 != nullptr, "DMA alloc TIM1");
-    if (s_dma_tim1 == nullptr) {
+    /* ── DMA streams for TIM1 TX (3 channels) + IC (1 channel) ─────────── */
+    /* All 3 TX streams use DMAMUX=TIM1_UP — each UEV fires all three, writing
+     * simultaneously to CCR1/CCR2/CCR3 with zero inter-channel offset.
+     * dshot_dma_tc_tx_tim1 is registered on all three; the phase check ensures
+     * only the first TC to fire transitions TX→IC; the others return early. */
+    s_dma_tx_m1 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
+                                  STM32_IRQ_TIM1_CC_PRIORITY,
+                                  dshot_dma_tc_tx_tim1, nullptr);
+    osalDbgAssert(s_dma_tx_m1 != nullptr, "DMA alloc TIM1 TX M1");
+    if (s_dma_tx_m1 == nullptr) {
         for (;;) {
             for (int i = 0; i < 20; i++) {
                 palToggleLine(LINE_LED_ACTIVITY);
@@ -556,19 +574,47 @@ void dshot_init(void)
             volatile uint32_t n = 16000000U; while (n--) {}
         }
     }
-    dmaSetRequestSource(s_dma_tim1, DMAMUX_TIM1_UP);
-    dmaStreamSetPeripheral(s_dma_tim1, &TIM1->DMAR);
-    dmaStreamSetMemory0(s_dma_tim1, s_tx_buf_tim1);
-    dmaStreamSetTransactionSize(s_dma_tim1, 54U);
-    s_dma_tim1->stream->FCR = DMA_SxFCR_DMDIS | DMA_SxFCR_FTH;
-    dmaStreamSetMode(s_dma_tim1,
-          DMA_SxCR_MINC
-        | (0x2U << DMA_SxCR_MSIZE_Pos)
-        | (0x2U << DMA_SxCR_PSIZE_Pos)
-        | (0x1U << DMA_SxCR_DIR_Pos)
-        | (0x3U << DMA_SxCR_PL_Pos)
-        | DMA_SxCR_TCIE);
-    dmaStreamEnable(s_dma_tim1);
+    s_dma_tx_m0 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
+                                  STM32_IRQ_TIM1_CC_PRIORITY,
+                                  dshot_dma_tc_tx_tim1, nullptr);
+    osalDbgAssert(s_dma_tx_m0 != nullptr, "DMA alloc TIM1 TX M0");
+    if (s_dma_tx_m0 == nullptr) {
+        for (;;) {
+            for (int i = 0; i < 20; i++) {
+                palToggleLine(LINE_LED_ACTIVITY);
+                volatile uint32_t n = 2000000U; while (n--) {}
+            }
+            volatile uint32_t n = 16000000U; while (n--) {}
+        }
+    }
+    s_dma_tx_m3 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
+                                  STM32_IRQ_TIM1_CC_PRIORITY,
+                                  dshot_dma_tc_tx_tim1, nullptr);
+    osalDbgAssert(s_dma_tx_m3 != nullptr, "DMA alloc TIM1 TX M3");
+    if (s_dma_tx_m3 == nullptr) {
+        for (;;) {
+            for (int i = 0; i < 20; i++) {
+                palToggleLine(LINE_LED_ACTIVITY);
+                volatile uint32_t n = 2000000U; while (n--) {}
+            }
+            volatile uint32_t n = 16000000U; while (n--) {}
+        }
+    }
+    s_dma_ic_tim1 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
+                                    STM32_IRQ_TIM1_CC_PRIORITY,
+                                    dshot_dma_tc_ic_tim1, nullptr);
+    osalDbgAssert(s_dma_ic_tim1 != nullptr, "DMA alloc TIM1 IC");
+    if (s_dma_ic_tim1 == nullptr) {
+        for (;;) {
+            for (int i = 0; i < 20; i++) {
+                palToggleLine(LINE_LED_ACTIVITY);
+                volatile uint32_t n = 2000000U; while (n--) {}
+            }
+            volatile uint32_t n = 16000000U; while (n--) {}
+        }
+    }
+    /* TX streams are fully configured in dshot_write() before each frame.
+     * IC stream is fully configured in start_ic_tim1() before each capture. */
 
     /* ── DMA stream for TIM4 (shared TX/IC) ─────────────────────────────── */
     s_dma_tim4 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
@@ -615,7 +661,10 @@ void dshot_write(const uint16_t throttle[4])
     TIM4->DIER = 0U;
     TIM1->SR   = 0U;
     TIM4->SR   = 0U;
-    dmaStreamDisable(s_dma_tim1);
+    dmaStreamDisable(s_dma_tx_m0);
+    dmaStreamDisable(s_dma_tx_m1);
+    dmaStreamDisable(s_dma_tx_m3);
+    dmaStreamDisable(s_dma_ic_tim1);
     dmaStreamDisable(s_dma_tim4);
 
     /* IDLE before reconfiguring — any stale DMA TC sees IDLE and returns. */
@@ -625,26 +674,42 @@ void dshot_write(const uint16_t throttle[4])
     /* ── Restore TX config ───────────────────────────────────────────────── */
     switch_to_output();         // all channels output mode (CC_nS=00)
     TIM1->BDTR = TIM_BDTR_MOE;
-    /* Restore TX burst DCR (IC may have changed it for TIM1). */
-    TIM1->DCR  = (2U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
-    /* TIM4 DCR never changes between TX and IC — no action needed. */
+    /* No DCR for TX: each stream writes directly to its CCR, not DMAR. */
     TIM1->DIER = TIM_DIER_UDE;
     TIM4->DIER = TIM_DIER_UDE;
 
-    /* ── Reload TX DMA (M→P, DMAMUX=TIMx_UP) ────────────────────────────── */
-    dmaSetRequestSource(s_dma_tim1, DMAMUX_TIM1_UP);
-    dmaStreamSetPeripheral(s_dma_tim1, &TIM1->DMAR);
-    dmaStreamSetMemory0(s_dma_tim1, s_tx_buf_tim1);
-    dmaStreamSetTransactionSize(s_dma_tim1, 54U);
-    s_dma_tim1->stream->FCR = DMA_SxFCR_DMDIS | DMA_SxFCR_FTH;
-    dmaStreamSetMode(s_dma_tim1,
+    /* ── Reload TIM1 TX DMA (3 streams, each writing directly to its CCR) ── */
+    static constexpr uint32_t kTxMode =
           DMA_SxCR_MINC
         | (0x2U << DMA_SxCR_MSIZE_Pos)
         | (0x2U << DMA_SxCR_PSIZE_Pos)
         | (0x1U << DMA_SxCR_DIR_Pos)
         | (0x3U << DMA_SxCR_PL_Pos)
-        | DMA_SxCR_TCIE);
-    dmaStreamEnable(s_dma_tim1);
+        | DMA_SxCR_TCIE;
+
+    dmaSetRequestSource(s_dma_tx_m0, DMAMUX_TIM1_UP);
+    dmaStreamSetPeripheral(s_dma_tx_m0, &TIM1->CCR2);
+    dmaStreamSetMemory0(s_dma_tx_m0, s_tx_buf_m0);
+    dmaStreamSetTransactionSize(s_dma_tx_m0, 18U);
+    s_dma_tx_m0->stream->FCR = 0U;
+    dmaStreamSetMode(s_dma_tx_m0, kTxMode);
+    dmaStreamEnable(s_dma_tx_m0);
+
+    dmaSetRequestSource(s_dma_tx_m1, DMAMUX_TIM1_UP);
+    dmaStreamSetPeripheral(s_dma_tx_m1, &TIM1->CCR1);
+    dmaStreamSetMemory0(s_dma_tx_m1, s_tx_buf_m1);
+    dmaStreamSetTransactionSize(s_dma_tx_m1, 18U);
+    s_dma_tx_m1->stream->FCR = 0U;
+    dmaStreamSetMode(s_dma_tx_m1, kTxMode);
+    dmaStreamEnable(s_dma_tx_m1);
+
+    dmaSetRequestSource(s_dma_tx_m3, DMAMUX_TIM1_UP);
+    dmaStreamSetPeripheral(s_dma_tx_m3, &TIM1->CCR3);
+    dmaStreamSetMemory0(s_dma_tx_m3, s_tx_buf_m3);
+    dmaStreamSetTransactionSize(s_dma_tx_m3, 18U);
+    s_dma_tx_m3->stream->FCR = 0U;
+    dmaStreamSetMode(s_dma_tx_m3, kTxMode);
+    dmaStreamEnable(s_dma_tx_m3);
 
     dmaSetRequestSource(s_dma_tim4, DMAMUX_TIM4_UP);
     dmaStreamSetPeripheral(s_dma_tim4, &TIM4->DMAR);
