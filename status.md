@@ -518,9 +518,7 @@ python3 tools/bprl.py calibrate --duration 30
 Once motors work: re-enable SPIThread, StateEstThread, RadioThread, LogThread, and restore ControlThread to full PID/mixer path. Test complete attitude loop.
 
 
-
-
-question: 
+claude question: 
 
 im working on getting 4 motors connected over bi-directional dshot600. Currently 1 motor (motor 1) connects and works with rpm feedback. Please read over status.md and ardupilot_comparison.md as well as the motor code. When I use ardupilot flashed with CubeOrangePlus-bdshot and set the parameters 
 
@@ -533,3 +531,17 @@ AUX4 = motor 3
 AUX5 = motor 4
 
 All motors work and I get RPM feedback. Without changing the wiring or esc firmware when I use my code only one motor connects and spins. The problem is with my code I just cant figure out where. 
+
+I used an logic anlizer and I found this:
+
+What looks correct: the general timing and number of pulses between my code and ardupilot seems to match.
+
+problems: 
+
+1) the signal goes low for 2usec, 1.7usec before the rest of the frame starts. AUX5 does this on every frame. AUX2 does this behavor every other frame. AUX3 does this every 3rd frame. This behavor is absent on AUX4 (motor 1) which is the working motor. Ardupilot does not do this behavor on each frame. each frame is identical between each motor.
+
+2) AUX5 is 58ns behind the other AUX channles this is not the problem, what is the problem is that when the other channels go high AUX 5 also goes high for 6ns before going low 49ns before going high agian. so the frame looks generally correct however there are these very small spikes that break the timing such that the frame period is 1.61 usec not 1.67 like teh others. 
+
+3) Ardupilot sends a frame then 975usec later sends another then 975usec sends another then ~450usec it sends another then repeats. whereas my code has each frame spaced 2.47ms apart.
+
+4) ardupilot has the AUX5 frame sent about 9usec behind the other channels. 
