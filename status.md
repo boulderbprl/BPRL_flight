@@ -518,30 +518,42 @@ python3 tools/bprl.py calibrate --duration 30
 Once motors work: re-enable SPIThread, StateEstThread, RadioThread, LogThread, and restore ControlThread to full PID/mixer path. Test complete attitude loop.
 
 
-claude question: 
 
-im working on getting 4 motors connected over bi-directional dshot600. Currently 1 motor (motor 1) connects and works with rpm feedback. Please read over status.md and ardupilot_comparison.md as well as the motor code. When I use ardupilot flashed with CubeOrangePlus-bdshot and set the parameters 
+Claude prompt:
 
-SERVO_BLH_BDMASK = 7680
-SERVO_BLH_MASK = 7680
-MOT_PWM_TYPE = 6
-AUX2 = motor 1
-AUX3 = motor 2
-AUX4 = motor 3
-AUX5 = motor 4
+I need you to debug a bi-directional DShot600 motor control issue in my codebase by comparing it to ArduPilot's implementation. 
 
-All motors work and I get RPM feedback. Without changing the wiring or esc firmware when I use my code only one motor connects and spins. The problem is with my code I just cant figure out where. 
+### Objective
+Identify the bugs in my PWM/DShot frame generation logic that prevent Motors 2, 3, and 4 from initializing and receiving RPM feedback, and fix the frame-interval timing.
 
-I used an logic anlizer and I found this:
+### Files to Analyze
+* `status.md`
+* `ardupilot_comparison.md`
+* The PWM and DShot source code files in this repository.
 
-What looks correct: the general timing and number of pulses between my code and ardupilot seems to match.
+### Context & Working Baseline
+* **Hardware:** 4 motors, identical wiring/ESC firmware, CubeOrangePlus.
+* **ArduPilot Baseline (Working):** All 4 motors connect, spin, and return RPM feedback. 
+  * *Parameters:* `SERVO_BLH_BDMASK = 7680`, `SERVO_BLH_MASK = 7680`, `MOT_PWM_TYPE = 6`
+* **Current State (My Code):** Only Motor 1 (AUX4) successfully connects, spins, and returns RPM feedback. Motors 0,2,3 fail.
 
-problems: 
+### Logic Analyzer Findings & Debugging Tasks
 
-1) the signal goes low for 2usec, 1.7usec before the rest of the frame starts. AUX5 does this on every frame. AUX2 does this behavor every other frame. AUX3 does this every 3rd frame. This behavor is absent on AUX4 (motor 1) which is the working motor. Ardupilot does not do this behavor on each frame. each frame is identical between each motor.
+1. **Investigate the Faulty Pre-Frame Low Signal (Priority 1)**
+   * *Symptom:* A 2µs low signal appears 1.7µs *before* the actual frame starts. 
+   * *Pattern:* It occurs every frame on AUX5, every 2nd frame on AUX2, and every 3rd frame on AUX3. It is absent on the working AUX4. ArduPilot does not do this.
+   * *Task:* Trace the frame setup and DMA/timer interrupts. This cyclic pattern suggests a faulty buffer address calculation, stride error, or memory corruption during frame initialization.
 
-2) AUX5 is 58ns behind the other AUX channles this is not the problem, what is the problem is that when the other channels go high AUX 5 also goes high for 6ns before going low 49ns before going high agian. so the frame looks generally correct however there are these very small spikes that break the timing such that the frame period is 1.61 usec not 1.67 like teh others. 
+2. **Fix Signal Glitches on AUX5**
+   * *Symptom:* AUX5 on the rising edge spikes high for 6ns, drops for 49ns, and goes high again when other channels trigger. This disrupts timing, cutting the frame period to 1.61µs (vs. the standard 1.67µs).
+   * *Task:* Look for pin multiplexing conflicts, timer channel synchronization issues, or race conditions specific to the AUX5 GPIO/timer configuration.
 
-3) Ardupilot sends a frame then 975usec later sends another then 975usec sends another then ~450usec it sends another then repeats. whereas my code has each frame spaced 2.47ms apart.
+3. **Optimize the Inter-Frame Interval**
+   * *Symptom:* My code spaces frames ~2.47ms apart. ArduPilot sends frames much faster (repeating pattern of 975µs, 975µs, ~450µs).
+   * *Task:* Trace the scheduler or timer update loop trigger. Identify why my code is bottlenecked at 2.5ms and how to match ArduPilot’s throughput.
 
-4) ardupilot has the AUX5 frame sent about 9usec behind the other channels. 
+4. **Review Frame Phase Offsets**
+   * *Observation:* ArduPilot offsets the AUX5 frame by ~9µs behind other channels. My code does not.
+   * *Task:* Determine if this offset is required for DMA/timer stability on this hardware and if its absence in my code causes the AUX5 glitches.
+
+Please trace the path of DShot frame generation in my code vs. ArduPilot, isolate the root causes for these 4 anomalies, and propose specific code fixes.
