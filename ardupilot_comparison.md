@@ -7,48 +7,44 @@ Both target STM32H743 (CubeOrange+) at 200 MHz, DShot600 bidirectional, ChibiOS 
 
 ---
 
-## 1. TX DMA Architecture — Biggest Structural Difference
+## 1. TX DMA Architecture
 
 ### ArduPilot (`send_pulses_DMAR`)
 
-One DMA stream per timer group writes to `TIM->DMAR` using burst mode:
+One DMA stream per timer group writes to `TIM->DMAR` using DCR burst mode:
 
 ```
-DCR: DBA = offset_of(CCR)/4,  DBL = 3  (burst of 4 registers)
-Buffer: [ch0b0][ch1b0][ch2b0][ch3b0][ch0b1][ch1b1][ch2b1][ch3b1]...
-Stride: 4 (one word per channel per bit position)
-Total:  19 words × 4 channels = 76 words per timer group
+DCR: DBA = offsetof(CCR)/4,  DBL = 3  (burst of 4 registers: CCR1–CCR4)
+Buffer: stride-4 interleaved — [ch0b0, ch1b0, ch2b0, ch3b0, ch0b1, ch1b1, ...]
+Total:  19 rows × 4 channels = 76 words per timer group
 ```
 
-Each TIM_UP event fires one DMA request, which triggers a burst of 4 consecutive transfers:
-CCR1 ← buf[N×4+0], CCR2 ← buf[N×4+1], CCR3 ← buf[N×4+2], CCR4 ← buf[N×4+3].
-All four CCRs update within the same UEV, in rapid intra-burst succession (~5–10 ns apart).
+Each TIM_UP event fires one DMA request, which drains 4 words from the FIFO to DMAR.
+The timer routes these DMAR writes to CCR1→CCR2→CCR3→CCR4, all within ~5–10 ns.
+DMA uses FIFO mode with full-threshold (4-word) buffering to ensure the burst is atomic.
 
 ### BPRL (`dshot_write`)
 
-Three separate DMA streams for TIM1, all mapped to `DMAMUX=TIM1_UP`:
+Identical architecture to ArduPilot for TIM1 (3 motors) and TIM4 (1 motor):
 
 ```
-s_dma_tx_m0 → &TIM1->CCR2  (Motor 0 / PE11)   s_tx_buf_m0[18]
-s_dma_tx_m1 → &TIM1->CCR1  (Motor 1 / PE9)    s_tx_buf_m1[18]
-s_dma_tx_m3 → &TIM1->CCR3  (Motor 3 / PE13)   s_tx_buf_m3[18]
+TIM1 — s_dma_tx_tim1 → &TIM1->DMAR, DCR: DBA=CCR1(13), DBL=3
+  Buffer: s_tx_buf_tim1[76], interleaved stride-4 [CCR1=M1, CCR2=M0, CCR3=M3, CCR4=0]
+  19 rows × 4 words = 76 words  (CCR4 column is always 0 — dummy padding)
+  FIFO mode: DMA_SxFCR_DMDIS | DMA_SxFCR_FTH, MBURST=INCR4, PBURST=INCR4
+
+TIM4 — s_dma_tim4 → &TIM4->DMAR, DCR: DBA=CCR2(14), DBL=0
+  Buffer: s_tx_buf_tim4[19], single-channel linear
+  19 words  (CCR2 only — one motor)
+  Direct mode (FCR=0, no burst)
 ```
 
-Each TIM1_UP event is routed by DMAMUX to all three streams simultaneously. Each stream
-independently transfers one word to its own CCR. All three CCRs update on the **exact same
-UEV** with zero inter-channel offset. No DCR or DMAR register is used for TX.
+The only structural difference: BPRL uses DBL=3 with 3 active channels (CCR1/M1, CCR2/M0,
+CCR3/M3) and pads CCR4 with zeros, while ArduPilot targets 4-channel groups and all four
+CCRs carry data. The DMA mechanism and timing are otherwise identical.
 
-TIM4 (Motor 2 / PD13) uses one stream → `&TIM4->DMAR` (DCR: DBA=CCR2, DBL=0) — a
-single-channel timer has no ordering issue, so the DMAR approach is fine there.
-
-### Why BPRL differs from ArduPilot
-
-With ArduPilot's burst approach and a full 4-channel group, CCR intra-burst ordering is
-~5–10 ns — negligible at DShot600 bit widths (1.67 µs). But BPRL uses only 3 of TIM1's 4
-channels. When the old BPRL code attempted the burst approach with DBL=2 (burst of 3), the
-buffer arrangement caused all three CCRs to be written on *sequential* UEVs (1.67 µs apart
-each), giving motors 0 and 3 misaligned frames — they never received a valid DShot packet.
-The per-channel stream approach eliminates any ordering dependency entirely.
+TIM4 uses direct mode because it drives a single channel — no atomic burst needed.
+ArduPilot's FIFO-mode note applies only to the multi-channel burst case.
 
 ---
 
@@ -56,31 +52,41 @@ The per-channel stream approach eliminates any ordering dependency entirely.
 
 | | ArduPilot | BPRL |
 |-|-----------|------|
-| Words before data | 1 (`dshot_pre = 1`, CCR=0) | 0 explicit; 1 implicit (see below) |
+| Words before data | 1 (`dshot_pre=1`, CCR=0) | 1 (row 0 = zeros) |
 | Data bits | 16 (MSB first) | 16 (MSB first) |
-| Words after data | 2 (`dshot_post = 2`, CCR=0) | 2 trailing zeros |
-| **Total per channel** | **19** | **18** |
-| Layout | Interleaved stride-4 | Separate per-channel array |
+| Words after data | 2 (`dshot_post=2`, CCR=0) | 2 (rows 17–18 = zeros) |
+| **Total per channel** | **19** | **19** |
+| Layout | Interleaved stride-4 | Interleaved stride-4 (TIM1) / linear (TIM4) |
 
-BPRL's implicit preamble: `switch_to_output()` sets all CCRs to 0 and calls `EGR=UG`,
-so the first timer period (UEV0, before the DMA writes `buf[0]`) outputs high (CCR=0 with
-PWM mode 2 = always high). This is functionally identical to ArduPilot's `dshot_pre=1`.
+BPRL and ArduPilot have identical buffer sizes and identical leading/trailing zero structure.
 
-`fill_DMA_buffer_dshot()` in ArduPilot (packet MSB first):
+**Why `dshot_pre=1` is necessary:**
+BPRL sets OC preload enable (OC1PE, OC2PE, OC3PE) in CCMR. With preload active, each
+DMA write to DMAR goes to the CCR shadow register and takes effect only on the *next* UEV.
+The pre-word row absorbs this one-UEV delay: the DMA write for bit 15 happens on UEV2 but
+activates on UEV3 — the correct time for the first DShot pulse.
+
+ArduPilot uses `dshot_pre=1` for the same reason, plus it also handles the case where DMA
+is armed mid-period on a running timer (not applicable to BPRL which restarts the timer).
+
+ArduPilot `fill_DMA_buffer_dshot()`:
 ```cpp
-for (; i < dshot_pre; i++)             buffer[i * stride] = 0;        // leading zero
-for (; i < 16 + dshot_pre; i++)        buffer[i * stride] = (packet & 0x8000) ? T1H : T0H;
-for (; i < dshot_bit_length; i++)      buffer[i * stride] = 0;        // trailing zeros
+for (i = 0; i < dshot_pre; i++)              buffer[i * stride] = 0;        // pre
+for (i = dshot_pre; i < 16 + dshot_pre; i++) buffer[i * stride] = bitval;   // data
+for (; i < dshot_bit_length; i++)             buffer[i * stride] = 0;        // post
 ```
 
-`build_tx_buf()` in BPRL (packet MSB first):
+BPRL `build_tx_buf()`:
 ```cpp
-for (int b = 15; b >= 0; b--) {
-    int s = 15 - b;
-    s_tx_buf_m1[s] = (frame[1] & (1U << b)) ? DS_T1H : DS_T0H;
-    ...
+s_tx_buf_tim1[0..3] = 0;                       // row 0: pre-word (dshot_pre=1)
+for (b = 15; b >= 0; b--) {
+    int row = (16 - b) * 4;                    // rows 1–16: data bits 15..0
+    s_tx_buf_tim1[row+0] = (frame[1]>>b)&1 ? DS_T1H : DS_T0H;  // M1 / CCR1
+    s_tx_buf_tim1[row+1] = (frame[0]>>b)&1 ? DS_T1H : DS_T0H;  // M0 / CCR2
+    s_tx_buf_tim1[row+2] = (frame[3]>>b)&1 ? DS_T1H : DS_T0H;  // M3 / CCR3
+    s_tx_buf_tim1[row+3] = 0;                                    // CCR4 dummy
 }
-s_tx_buf_m1[16] = 0U; s_tx_buf_m1[17] = 0U;   // trailing zeros
+for (i = 68; i < 76; i++) s_tx_buf_tim1[i] = 0;  // rows 17–18: trailing zeros
 ```
 
 ---
@@ -91,36 +97,25 @@ s_tx_buf_m1[16] = 0U; s_tx_buf_m1[17] = 0U;   // trailing zeros
 
 ```cpp
 uint16_t packet = (value << 1);
-if (telem_request) packet |= 1;          // telem bit (set once per 32 packets for serial telem)
+if (telem_request) packet |= 1;          // telem bit set for special packets
 uint16_t csum = 0, csum_data = packet;
 for (uint8_t i = 0; i < 3; i++) { csum ^= csum_data; csum_data >>= 4; }
-if (bidir_telem) csum = ~csum;           // invert CRC for bidirectional mode
+if (bidir_telem) csum = ~csum;           // inverted CRC for bidir
 csum &= 0xf;
-packet = (packet << 4) | csum;           // CRC at bits [3:0]
+packet = (packet << 4) | csum;
 ```
-
-ArduPilot conditionally inverts the CRC based on whether bidirectional mode is active.
-The telem bit can be non-zero for special ESC command packets.
 
 ### BPRL (`make_frame`)
 
 ```cpp
-uint16_t val = (uint16_t)(thr << 1);                        // telem bit always 0
+uint16_t val = (uint16_t)(thr << 1);                        // telem bit = 0 always
 uint16_t crc = (~(val ^ (val >> 4) ^ (val >> 8))) & 0x0FU; // inverted CRC directly
 return (uint16_t)((val << 4) | crc);
 ```
 
-BPRL always forces `telem=0` (correct for all throttle packets; the telem bit is only
-meaningful for DShot special command packets, which BPRL does not send). BPRL computes the
-inverted CRC in one pass rather than computing normal then inverting. Both produce identical
-wire frames for telem=0 bidirectional throttle packets.
-
-Wire comparison for `throttle=0`, bidirectional:
-
-| | Frame (hex) | Throttle | Telem | CRC | ESC interpretation |
-|-|-------------|----------|-------|-----|-------------------|
-| ArduPilot | `0x000F` | 0 | 0 | 0xF | Zero throttle → arms |
-| BPRL | `0x000F` | 0 | 0 | 0xF | Zero throttle → arms |
+BPRL always forces `telem=0` (correct for throttle packets; telem=1 is only used for DShot
+special command packets, which BPRL does not send). Both produce identical wire frames for
+the common case. Wire example: throttle=0, bidir → both emit `0x000F`.
 
 ---
 
@@ -143,27 +138,96 @@ DS_T0H  = 125   (37.4% duty)
 DS_T1H  = 250   (74.9% duty)
 ```
 
-Both produce compliant DShot600 timing. The values differ by ~1% due to integer rounding
-of 200MHz/600kHz = 333.33.
+Both produce compliant DShot600 timing. Values differ by ~1% due to rounding of
+200 MHz / 600 kHz = 333.33.
 
 ---
 
-## 5. TX DMA FIFO Mode
+## 5. GPIO Speed and Pin Configuration
 
-| | ArduPilot | BPRL |
-|-|-----------|------|
-| TX | FIFO enabled, full threshold | Direct mode (FCR=0) |
-| IC | FIFO enabled, full threshold | Direct mode (FCR=0) |
+### ArduPilot (`bdshot_setup_group_ic_DMA`)
 
-ArduPilot enables FIFO for burst-DMAR TX to ensure burst writes complete atomically.
-BPRL writes single 32-bit words per transfer (one CCR per UEV) — direct mode is correct
-and simpler. For IC (P→M, single register per CC event), direct mode is equally correct.
+```cpp
+palSetLineMode(group.pal_lines[i],
+    PAL_MODE_ALTERNATE(group.alt_functions[i])
+    | PAL_STM32_OTYPE_PUSHPULL
+    | PAL_STM32_PUPDR_PULLUP
+    | PAL_STM32_OSPEED_MID1);   // medium speed (~50 MHz)
+```
+
+ArduPilot code comment: *"bi-directional dshot requires less than MID2 speed and PUSHPULL
+in order to avoid noise on the line when switching from output to input"*
+
+### BPRL (`dshot_init`)
+
+```cpp
+GPIOE->OSPEEDR = ... | (0x1U<<18) | (0x1U<<22) | (0x1U<<26);  // PE9/11/13: medium
+GPIOD->OSPEEDR = ... | (0x1U<<26);                              // PD13: medium
+// PUPDR = pull-up (0x1) for all pins
+// OTYPE = push-pull (default, OTYPER not written = 0 = push-pull)
+```
+
+Both use medium speed (OSPEEDR=0x1 ≈ 50 MHz) and pull-up. Medium speed is required for
+bidirectional DShot: the slower output slew rate damps ringing during the IC→OC output
+reconnect transition. Very high speed (0x3) would cause overshoot/undershoot on that
+transition that appears as a spurious LOW bit to the ESC.
 
 ---
 
-## 6. IC Timeout Mechanism
+## 6. TX Timer Startup and IC→OC Transition
 
-### ArduPilot — Software virtual timer
+### ArduPilot
+
+TX is started by ChibiOS `pwmStart()` (which configures CCMR, CCER, etc.) followed by
+`send_pulses_DMAR()` which arms DMA on an already-running timer. The transition from IC
+back to OC is handled by `bdshot_reset_pwm()`:
+
+```cpp
+void RCOutput::bdshot_reset_pwm(pwm_group& group, uint8_t telem_channel) {
+    pwmStop(group.pwm_drv);    // stops timer, clears all CCMR/CCER/DIER
+    pwmStart(group.pwm_drv, &group.pwm_cfg);  // full re-init from pwm_cfg
+}
+```
+
+`pwmStart()` configures OC mode (PWM mode from `pwm_cfg.channels[i].mode`), enables CCER,
+and leaves the timer running.
+
+### BPRL (`switch_to_output` + `dshot_write`)
+
+BPRL implements the IC→OC transition manually:
+
+```cpp
+// switch_to_output():
+TIM1->CCER  = 0U;               // disable outputs before touching CCxS
+TIM1->CCMR1 = (7U<<4)|OC1PE | (7U<<12)|OC2PE;  // OC mode 2, preload
+TIM1->CCMR2 = (7U<<4)|OC3PE;
+TIM1->ARR   = DS_ARR;
+TIM1->CCR1  = TIM1->CCR2 = TIM1->CCR3 = 0U;  // idle CCR
+TIM1->EGR   = TIM_EGR_UG;      // flush shadows, reset CNT to 0
+TIM1->SR    = 0U;               // clear UIF from EGR
+TIM1->CCER  = CC1E|CC2E|CC3E;  // re-enable outputs (pin → HIGH, CCR=0 → always active)
+
+// dshot_write():
+TIM1->DCR  = (3U<<DBL_Pos) | (DBA_CCR1<<DBA_Pos);  // burst: CCR1–CCR4
+TIM1->DIER = TIM_DIER_UDE;
+// ... configure DMA ...
+TIM1->CR1 |= TIM_CR1_CEN;      // start timer from CNT=0
+```
+
+Key behaviour: `EGR=UG` resets CNT to 0 and flushes all CCR shadows to 0. When CEN starts,
+the first period (CNT 0→ARR) has CCR=0 (all pins HIGH/idle). UEV1 fires → DMA writes
+pre-word row to shadow → still HIGH. UEV2 → DMA writes bit-15 row to shadow → UEV3 → first
+DShot LOW pulse. This matches ArduPilot's timing with `dshot_pre=1`.
+
+**TIM4 phase offset** (BPRL only):
+TIM4 is started with `TIM4->CNT = DS_ARR/2` (=166) so its UEVs fire halfway between TIM1's,
+preventing simultaneous DMA requests from both timers on the AHB bus.
+
+---
+
+## 7. IC Timeout Mechanism
+
+### ArduPilot — ChibiOS virtual timer
 
 ```cpp
 // in bdshot_receive_pulses_DMAR():
@@ -171,346 +235,304 @@ chVTSetI(&group->dma_timeout,
     chTimeUS2I(group->dshot_pulse_send_time_us + 30U + 10U),
     bdshot_finish_dshot_gcr_transaction, group);
 
-// IC timer CR1:
 TIM->CR1 = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_UDIS | TIM_CR1_CEN;
-//                                        ^^^^ Update disabled — no UEV fires
+//         ^preload       ^overflow only  ^no UEV fired
 ```
 
-The virtual timer fires at precisely `TX_time + 30 + 10` µs (calibrated to just after the
-GCR response window). On fire: disables IC DMA, copies buffer, signals the dshot_waiter
-thread. Timer runs with `UDIS=1` so no hardware UEV fires during IC; `URS=1` so EGR=UG
-(called for PSC loading) doesn't generate a spurious UEV.
+Timeout calibrated to `TX_duration + 30 µs + 10 µs` — just after the GCR response window.
+`UDIS=1` suppresses all hardware update events (safe because the timeout is handled by the
+OS timer, not by UIE). `URS=1` ensures `EGR=UG` (used to flush PSC shadow during IC setup)
+does not generate a spurious UIF.
 
 ### BPRL — Hardware UIE
 
 ```cpp
 // in start_ic_tim1():
-TIM1->ARR = 20000U;   // 100 µs at 200 MHz
-TIM1->CR1 |= TIM_CR1_CEN;
+TIM1->ARR = 20000U;             // 100 µs at 200 MHz (conservative)
+TIM1->CNT = 0U;
+TIM1->SR  = 0U;
+// DIER has CC2DE/CC3DE | UIE — UIE fires when CNT overflows ARR
+dmaStreamEnable(s_dma_ic_tim1);
+TIM1->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
+//           ^overflow only — UIE fires, EGR=UG would not
 
-// TIM1_UP ISR fires when CNT overflows:
+// TIM1_UP ISR:
 uint8_t captured = (uint8_t)(22U - dmaStreamGetTransactionSize(s_dma_ic_tim1));
 finish_ic_tim1(captured);
 ```
 
-BPRL uses the timer's own overflow interrupt (UIE) as a hardware timeout. This is why BPRL
-does NOT set UDIS — it needs UEV to fire for the timeout. ARPE and URS are not needed since
-BPRL does not use a PSC for IC and does not call EGR=UG during IC setup.
+BPRL uses the counter-overflow UIE as a 100 µs hardware timeout. `UDIS` is **not** set
+because BPRL needs the overflow to generate UIF (for UIE). `ARPE` is **not** set because
+`ARR=20000` takes effect immediately without buffering; adding ARPE without flushing via
+`EGR=UG` would leave ARR shadow at DS_ARR=333 from the prior TX phase, causing the IC
+timer to wrap every 1.67 µs and break GCR timestamp decoding.
 
-**Implications:** ArduPilot's vTimer is tighter (calibrated to the GCR window). BPRL's
-100 µs hardware timeout is conservative but always correct at 400 Hz (2.5 ms frame period).
-Both approaches are functionally correct.
+**ArduPilot's ARPE+EGR=UG sequence:**
+```cpp
+TIM->ARR = 0xFFFF;          // preload  (buffered behind ARPE)
+TIM->EGR |= EGR_UG;         // flush preload → shadow (ARR becomes 0xFFFF immediately)
+TIM->SR   = 0;              // clear UIF from EGR
+TIM->CR1  = ARPE|URS|UDIS|CEN;
+```
+
+BPRL avoids needing this sequence by not using ARPE. The 100 µs (20000-tick) timeout is
+conservative but always correct at 400 Hz (2.5 ms frame period).
 
 ---
 
-## 7. IC Timer Setup
+## 8. IC Timer Register Setup
 
 ### ArduPilot
 
 ```cpp
-TIM->CR1 = 0;
-TIM->SR  = 0;
+TIM->CR1  = 0;
+TIM->SR   = 0;
 TIM->CCER = TIM->CCMR1 = TIM->CCMR2 = TIM->DIER = TIM->CR2 = 0;
-TIM->PSC = telempsc;          // prescaler: 16 ticks per GCR bit
-TIM->ARR = 0xFFFF;            // count forever (timeout is vTimer)
-TIM->CNT = 0;
+TIM->PSC  = telempsc;         // 15 → 16 ticks/GCR bit at 200 MHz
+TIM->ARR  = 0xFFFF;           // count forever
+TIM->CNT  = 0;
 bdshot_config_icu_dshot(TIM, curr_ch, telem_tim_ch[curr_ch]);
-TIM->DCR = STM32_TIM_DCR_DBA(ccr_ofs) | STM32_TIM_DCR_DBL(0);
-TIM->EGR |= STM32_TIM_EGR_UG;   // flush PSC shadow
-TIM->SR  = 0;
-TIM->CR1 = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_UDIS | TIM_CR1_CEN;
+TIM->DCR  = DBA(ccr_ofs) | DBL(0);
+TIM->EGR |= EGR_UG;           // flush PSC shadow (required with ARPE)
+TIM->SR   = 0;
+TIM->CR1  = ARPE | URS | UDIS | CEN;
 dmaStreamEnable(ic_dma);
 ```
 
 ### BPRL
 
 ```cpp
-TIM1->CCER = TIM1->CCMR1 = TIM1->CCMR2 = 0;
-// configure CCxS, CCxP, CCxNP, DIER for the rotation slot
-TIM1->DCR  = (0U << TIM_DCR_DBL_Pos) | (kIcDba[slot] << TIM_DCR_DBA_Pos);
-TIM1->ARR  = 20000U;          // 100 µs hardware timeout
-TIM1->CNT  = 0U;
-TIM1->SR   = 0U;
+// (timer already stopped by TX TC callback; CCMR/CCER cleared in start_ic_tim1)
+TIM1->CCER  = TIM1->CCMR1 = TIM1->CCMR2 = 0;
+TIM1->DCR   = DBL(0) | DBA(kIcDba[slot]);
+// configure CCMR (CCxS, ICxF), CCER (CCxE|P|NP), DIER (CCxDE|UIE)
+TIM1->ARR   = 20000U;         // 100 µs timeout (immediate, no ARPE)
+TIM1->CNT   = 0U;
+TIM1->SR    = 0U;
 dmaStreamEnable(s_dma_ic_tim1);
-TIM1->CR1 |= TIM_CR1_CEN;
+TIM1->CR1   = TIM_CR1_URS | TIM_CR1_CEN;
 ```
 
 Key differences:
-- ArduPilot sets `PSC=telempsc`, BPRL uses `PSC=0` (unchanged from TX).
-- ArduPilot sets `ARPE` (not needed without PSC shadow in BPRL).
-- ArduPilot sets `UDIS` (suppresses UEV — not wanted in BPRL which uses UIE as timeout).
-- ArduPilot calls `EGR=UG` to flush PSC shadow (not needed in BPRL — no PSC change).
-- ArduPilot sets `ARR=0xFFFF` (count forever); BPRL sets `ARR=20000` (hardware timeout).
+| | ArduPilot | BPRL |
+|-|-----------|------|
+| PSC | 15 (16 ticks/GCR bit) | 0 (267 ticks/GCR bit) |
+| ARR | 0xFFFF (count forever) | 20000 (100 µs hardware timeout) |
+| ARPE | Set (flushes PSC shadow) | Not set (ARR is immediate) |
+| URS | Set (EGR=UG won't generate UIF) | Set (same, even though EGR not called) |
+| UDIS | Set (no UEV — timeout via OS timer) | **Not set** (UIE needed for timeout) |
+| EGR=UG | Called (flush PSC shadow) | Not called (no PSC change) |
+| Timeout | OS virtual timer | Hardware UIE |
 
 ---
 
-## 8. IC Bit Timing and Buffer Values
+## 9. IC Bit Timing and Buffer Values
 
-**ArduPilot** (`TELEM_IC_SAMPLE = 16`):
+**ArduPilot** (`TELEM_IC_SAMPLE = 16`, PSC=15):
 ```
-PSC = 15 → one IC tick = 16/200MHz = 80 ns
-One GCR bit = 1/750kHz = 1333 ns = 16.7 IC ticks ≈ 16
-Buffer values: ~16 per bit, max ~16×22 = 352 per edge → fits uint16_t
-```
-
-**BPRL** (`GCR_BIT_TICKS = (333+1)*4/5 = 267`):
-```
-PSC = 0 → one IC tick = 1/200MHz = 5 ns
-One GCR bit = 1333 ns = 266.7 ticks ≈ 267
-Buffer values: ~267 per bit, max ~267×21 = 5607 per edge → stored as uint32_t
+One IC tick = 16 / 200 MHz = 80 ns
+GCR bit width = 1/750 kHz = 1333 ns = 16.7 IC ticks ≈ 16
+Buffer: uint16_t values ~16 per GCR bit; max ≈ 16×22 = 352 → fits uint16_t
 ```
 
-Both correctly round inter-edge intervals to the nearest GCR bit count using
-`n = (diff + half_bit) / bit_width`. ArduPilot's prescaler saves memory at the cost of
-a PSC register write during IC setup. BPRL's full-clock approach avoids that write.
+**BPRL** (`GCR_BIT_TICKS = 267`, PSC=0):
+```
+One IC tick = 1 / 200 MHz = 5 ns
+GCR bit width = 1333 ns = 266.7 ticks ≈ 267
+Buffer: uint32_t values ~267 per GCR bit; max ≈ 267×21 = 5607 → needs uint32_t
+```
+
+Both decode using `n = (diff + half_bit) / bit_width`. ArduPilot's PSC saves memory at the
+cost of a PSC register write during IC setup; BPRL's full-clock approach avoids that write.
 
 ---
 
-## 9. IC Channel Selection — Cross-Capture Trick
+## 10. IC Channel Selection — Cross-Capture Trick
 
 Both use the same ArduPilot cross-capture trick for TIM1 CH1 (Motor 1 / PE9):
 
 ```
 CC2S = TI2 (0b01) → CH2 captures its own pin PE11 → Motor 0
 CC2S = TI1 (0b10) → CH2 captures CH1's pin PE9 via cross-input → Motor 1
+CC3S = TI3 (0b01) → CH3 captures its own pin PE13 → Motor 3
 ```
 
-Both M0 and M1 use CC2 and DBA=CCR2 — the same DMA request (`TIM1_CH2`) and DMAR
-address, with only CC2S toggled between slots. ArduPilot's `bdshot_config_icu_dshot()`
-does this via a `switch(ccr_ch)` that handles all four possible CC channels.
+M0 and M1 both use CC2/CCR2 and DMAMUX=TIM1_CH2; only CC2S differs between slots.
+BPRL implements this explicitly for slots 0–1:
 
-BPRL implements the same logic explicitly for slots 0 and 1:
 ```cpp
 uint32_t cc2s = (slot == 0U) ? kCC2S_TI2 : kCC2S_TI1;
 TIM1->CCMR1 = cc2s | kIC2F;
 ```
 
+ArduPilot implements the same logic via `bdshot_config_icu_dshot()` which `switch(ccr_ch)`
+handles all four possible CC channels generically.
+
 ---
 
-## 10. GCR Decode Algorithm
+## 11. GCR Decode Algorithm
 
-Both use **transition-marking** (matching BetaFlight):
+Both use **transition-marking** (from BetaFlight):
 ```
 bits = (bits << n) | (1U << (n - 1U))
 ```
-where `n` = number of GCR bit-widths in the inter-edge interval.
+where `n` = inter-edge interval in GCR bit-widths.
 
-### Loop structure comparison
-
-**ArduPilot:**
+**ArduPilot** loop:
 ```cpp
-dmar_uint_t oldValue = buffer[0];            // edge[0] = reference
-for (uint32_t i = 1; i <= count; i++) {     // i = 1..count
-    if (i < count) diff = buffer[i] - oldValue;
-    else           len = 21 - bits;          // last interval: fill to 21
-    value <<= len; value |= 1U << (len-1U);
+dmar_uint_t oldValue = buffer[0];
+for (uint32_t i = 1; i <= count; i++) {
+    len = (i < count) ? round_to_gcr_bits(buffer[i] - oldValue) : (21 - bits);
+    value <<= len; value |= 1U << (len-1);
     oldValue = buffer[i];
     bits += len;
 }
 ```
 
-**BPRL:**
+**BPRL** loop:
 ```cpp
 for (uint8_t i = 0; i < n_edges && bits_filled < 21U; i++) {
-    if (i + 1U < n_edges) diff = buf[i+1] - buf[i];
-    else                   n = 21U - bits_filled;  // last edge: fill to 21
-    bits = (bits << n) | (1U << (n-1U));
+    n = (i+1 < n_edges) ? round_to_gcr_bits(buf[i+1] - buf[i]) : (21 - bits_filled);
+    bits = (bits << n) | (1U << (n-1));
     bits_filled += n;
 }
 ```
 
-These are mathematically equivalent. The first real inter-edge interval in both cases is
-`buffer[1] - buffer[0]`. The number of real intervals processed is `count - 1` (ArduPilot)
-and `n_edges - 1` (BPRL) — identical since `count == n_edges`.
+Mathematically identical. The first real interval is `buffer[1]-buffer[0]` in both cases.
 
 ---
 
-## 11. GCR Decode Table — BPRL Is More Robust
+## 12. GCR Decode Table — BPRL Is Stricter
 
 **ArduPilot** — invalid codes silently return 0:
 ```cpp
 static const uint32_t decode[32] = {
     0, 0, 0, 0, 0, 0, 0, 0, 0, 9, 10, 11, 0, 13, 14, 15,
-    0, 0, 2, 3, 0, 5, 6, 7, 0, 0, 8,  1, 0,  4, 12,  0
-};
+    0, 0, 2, 3, 0, 5, 6, 7, 0, 0, 8, 1, 0, 4, 12, 0 };
 // No validity check — invalid code → nibble=0 → decode continues
 ```
 
 **BPRL** — invalid codes immediately abort:
 ```cpp
 static constexpr uint8_t kGcrDecode[32] = {
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0x09, 0x0A, 0x0B, 0xFF, 0x0D, 0x0E, 0x0F,
-    0xFF, 0xFF, 0x02, 0x03, 0xFF, 0x05, 0x06, 0x07,
-    0xFF, 0x00, 0x08, 0x01, 0xFF, 0x04, 0x0C, 0xFF,
-};
-if (nibble == 0xFF) return false;   // invalid GCR code → reject packet
+    0xFF, 0xFF, ... 0x09, 0x0A, ... };  // 0xFF = invalid
+if (nibble == 0xFF) return false;
 ```
 
-BPRL is stricter: any invalid 5-bit GCR code immediately fails the packet. ArduPilot's
-decode-to-zero approach could, in theory, allow a corrupt packet to pass the CRC check if
-the errors cancel — unlikely but not impossible.
+BPRL rejects any packet containing an invalid 5-bit GCR code. ArduPilot's decode-to-zero
+approach could theoretically allow a corrupt packet to pass the CRC check if errors cancel.
 
 ---
 
-## 12. CRC Check
+## 13. CRC Check
 
-Both use the **inverted nibble sum**: the XOR of all four 4-bit nibbles of the decoded
-16-bit frame must equal 0xF.
+Both use the inverted nibble sum: XOR of all four 4-bit nibbles of the 16-bit decoded
+frame must equal 0xF.
 
 **ArduPilot:**
 ```cpp
-uint32_t csum = decodedValue;
-csum = csum ^ (csum >> 8U);   // xor bytes
-csum = csum ^ (csum >> 4U);   // xor nibbles
+csum = csum ^ (csum >> 8U); csum = csum ^ (csum >> 4U);
 if ((csum & 0xfU) != 0xfU) return INVALID_ERPM;
 ```
 
 **BPRL:**
 ```cpp
-uint16_t csum = frame ^ (frame >> 4U) ^ (frame >> 8U) ^ (frame >> 12U);
-if ((csum & 0x0FU) != 0x0FU) return false;
+uint16_t csum = frame ^ (frame>>4) ^ (frame>>8) ^ (frame>>12);
+if ((csum & 0xF) != 0xF) return false;
 ```
 
-Identical algorithm, different notation. Both correctly check the 4-nibble XOR against 0xF.
+Same algorithm, different notation.
 
 ---
 
-## 13. eRPM Decoding and Conversion
+## 14. eRPM Decoding and Conversion
 
-The BDShot telemetry packet encodes the electrical revolution **period** in µs:
-`period_µs = mantissa << exponent` (9-bit mantissa, 3-bit exponent).
-`eRPM = 60,000,000 / period_µs`.
+The ESC response encodes the electrical period: `period_µs = mantissa << exponent`,
+then `eRPM = 60,000,000 / period_µs`.
 
-### ArduPilot (`bdshot_decode_telemetry_from_erpm`)
-
-Stores eRPM in units of **eRPM/100** to fit in `uint16_t`:
+**ArduPilot** stores eRPM/100 in uint16_t:
 ```cpp
-uint8_t expo   = (encodederpm >> 9) & 0x7;
-uint16_t value = encodederpm & 0x1FF;
-uint16_t erpm  = value << expo;                       // period in µs
-erpm = (1000000U * 60U / 100U + erpm/2U) / erpm;    // = 600000 / period_µs = eRPM/100
-_bdshot.erpm[chan] = erpm;                            // stored as eRPM/100
-// Converted to mechanical RPM for ESC telemetry:
-update_rpm(chan, erpm * 200U / motor_poles);          // eRPM/100 * 200/poles = eRPM*2/poles
+erpm = (1000000U * 60U / 100U + erpm/2U) / erpm;  // = 600000 / period_µs = eRPM/100
+update_rpm(chan, erpm * 200U / motor_poles);          // eRPM/100 × 200/poles = RPM
 ```
 
-### BPRL (`decode_gcr`)
-
-Stores actual eRPM in `uint32_t`:
+**BPRL** stores full eRPM in uint32_t:
 ```cpp
-uint32_t period   = (uint32_t)mantissa << exponent;   // period in µs
-*erpm_out = (period > 0U) ? (60000000U / period) : 0U; // actual eRPM
-// Displayed as mechanical RPM:
-rpm[i] = telem[i].erpm / 7U;                          // eRPM / pole_pairs (14-pole motor)
+*erpm_out = (period > 0U) ? (60000000U / period) : 0U;
+rpm = erpm / 7U;  // eRPM / pole_pairs (14-pole motor, 7 pole pairs)
 ```
 
-Both implement `mechanical_RPM = 60,000,000 / (period_µs × pole_pairs)` — the same
-formula, different scaling. ArduPilot divides by 100 to keep values in uint16_t (useful
-for high-RPM motors that exceed 65535 eRPM). BPRL uses uint32_t and stores full eRPM.
-
-Example for a 5000 eRPM motor (period = 12000 µs):
-- ArduPilot stores: 600000/12000 = 50 (units: eRPM/100), mechanical RPM = 50×200/14 ≈ 714
-- BPRL stores: 60000000/12000 = 5000 (actual eRPM), mechanical RPM = 5000/7 ≈ 714 ✓
+Equivalent formula; ArduPilot scales down to avoid uint16_t overflow at high RPM.
 
 ---
 
-## 14. Cache Coherency
+## 15. Cache Coherency
 
-**ArduPilot** — explicit cache operations per transaction:
+**ArduPilot** — explicit per-transaction cache operations:
 ```cpp
-// Before TX DMA:
-stm32_cacheBufferFlush(group.dma_buffer, buffer_length);
-// After IC DMA:
-stm32_cacheBufferInvalidate(group.dma_buffer, dma_tx_size);
+stm32_cacheBufferFlush(group.dma_buffer, buffer_length);      // before TX DMA
+stm32_cacheBufferInvalidate(group.dma_buffer, dma_tx_size);   // after IC DMA
 ```
 
-**BPRL** — buffers placed in non-cacheable MPU region:
+**BPRL** — `.nocache` MPU section (no per-transaction operations):
 ```cpp
-static uint32_t s_tx_buf_m0[18] __attribute__((aligned(32), section(".nocache")));
-static uint32_t s_ic_buf_tim1[22] __attribute__((aligned(32), section(".nocache")));
-// etc.
+static uint32_t s_tx_buf_tim1[76] __attribute__((aligned(32), section(".nocache")));
 ```
 
-BPRL's `.nocache` section is simpler — no per-transaction flush/invalidate required. The
-tradeoff is slightly slower CPU access to DMA buffers (no cache benefit), but these buffers
-are small and infrequently accessed by the CPU, so the cost is negligible.
+Simpler at the cost of slightly slower CPU access to these small, infrequently-read buffers.
 
 ---
 
-## 15. IC Double-Buffering
+## 16. IC Double-Buffering
 
 **ArduPilot** — copies IC data in ISR, decodes in thread context:
 ```cpp
-// In bdshot_finish_dshot_gcr_transaction() (ISR):
-memcpy(group->bdshot.dma_buffer_copy, group->dma_buffer,
-       sizeof(dmar_uint_t) * group->bdshot.dma_tx_size);
-chEvtSignalI(group->dshot_waiter, group->dshot_event_mask);
-// In dshot_send() (thread), next iteration:
-bdshot_decode_dshot_telemetry(group, prev_telem_chan);  // processes dma_buffer_copy
+// ISR: memcpy dma_buffer → dma_buffer_copy, signal dshot_waiter thread
+// Thread: bdshot_decode_dshot_telemetry() on dma_buffer_copy
 ```
 
-**BPRL** — decodes in-place within ISR/callback context:
+**BPRL** — decodes in-place within the DMA TC callback or UIE ISR:
 ```cpp
 // In finish_ic_tim1() (called from DMA TC callback or TIM1_UP ISR):
-if (decode_gcr(s_ic_buf_tim1, n_edges, &erpm)) {
-    s_telem[motor].erpm  = erpm;
-    s_telem[motor].valid = true;
-}
+if (decode_gcr(s_ic_buf_tim1, n_edges, &erpm)) { ... }
 ```
 
-ArduPilot's double-buffer approach allows the main thread to decode GCR while the next TX
-is already in flight. BPRL decodes synchronously in ISR context — simpler but adds a few
-microseconds of ISR time. At 400 Hz with 100 µs IC timeout budget, this is not a concern.
+ArduPilot's double-buffer allows the next TX to start while decoding the previous frame.
+BPRL decodes synchronously (~5–10 µs of ISR time at most) — acceptable at 400 Hz.
 
 ---
 
-## 16. State Machine Complexity
+## 17. State Machine Complexity
 
-**ArduPilot** — 6-state machine managed across ISR and dedicated timer thread:
-
+**ArduPilot** — 6-state, managed across ISR and dedicated timer thread:
 ```
 IDLE → SEND_START → SEND_COMPLETE → RECV_START → RECV_COMPLETE → RECV_FAILED → IDLE
 ```
+Supports: multi-group, serial ESC passthrough, DShot command queue, EDT v1/v2 telemetry.
 
-Supports: concurrent multi-group operation, serial ESC pass-through, DShot command queue
-(arm, save settings, direction change, etc.), ESC active detection, safety switch, per-ESC
-enable/disable masks, EDT v1/v2 telemetry (temperature, voltage, current, stress).
-
-**BPRL** — 3-state machine, ISR-only, no thread:
-
+**BPRL** — 3-state, ISR-only:
 ```
 IDLE → TX → IC → IDLE
 ```
-
-Supports: 4-motor throttle output, eRPM feedback. Simple, deterministic, zero OS overhead.
+Supports: 4-motor throttle, eRPM feedback. Simple, deterministic, zero OS overhead.
 
 ---
 
-## 17. Extended DShot Telemetry (EDT)
+## 18. Extended DShot Telemetry (EDT)
 
-**ArduPilot** (`bdshot_decode_telemetry_from_erpm`):
+**ArduPilot** decodes EDT v1/v2 alongside eRPM based on the `expo` field:
 
-Decodes EDT v1 and v2 alongside eRPM based on the `expo` field of the 12-bit period value:
+| expo | meaning |
+|------|---------|
+| 001 | Temperature (°C) |
+| 010 | Voltage (×0.25 V) |
+| 011 | Current (A) |
+| 100–101 | Debug |
+| 110 | Stress level (EDT v2) |
+| 111 | Status flags (EDT v2) |
 
-| expo | EDT v1/v2 meaning |
-|------|-------------------|
-| `0b001` | Temperature (°C) |
-| `0b010` | Voltage (×0.25 V) |
-| `0b011` | Current (A) |
-| `0b100–0b101` | Debug |
-| `0b110` | Stress level (EDT v2) |
-| `0b111` | Status flags (EDT v2) |
-| `0b000` or high bit set | eRPM (standard period encoding) |
-
-**BPRL:**
-
-Only decodes eRPM. The GCR decoder assumes all packets contain the period encoding. EDT
-packets (where bit 8 of the 9-bit value is 0 and expo is 001–111) would be misinterpreted
-as corrupt eRPM data and return false — which is the safe behavior (no crash, no wrong RPM).
-
-EDT support is not required for motor testing. It would be needed to surface ESC temperature
-warnings during sustained flight.
+**BPRL** only decodes eRPM. EDT packets return `false` from `decode_gcr()` — safe but ESC
+temperature/voltage warnings are not visible. Add EDT decode before sustained flight.
 
 ---
 
@@ -518,42 +540,37 @@ warnings during sustained flight.
 
 | Aspect | ArduPilot | BPRL |
 |--------|-----------|------|
-| TX DMA streams per timer | 1 (burst DMAR, all channels) | 3 TX + 1 IC (direct CCR) |
-| TX buffer layout | Interleaved stride-4 | Separate per-channel |
-| TX FIFO mode | Enabled (full threshold) | Direct mode |
-| Preamble bits | 1 explicit (`dshot_pre=1`) | 1 implicit (CCR=0 init period) |
-| IC timeout | ChibiOS virtual timer | Hardware UIE (ARR=20000) |
+| TX DMA streams per timer | 1 (burst DMAR, FIFO mode) | 1 TIM1 (burst DMAR, FIFO) + 1 TIM4 (direct) |
+| TX buffer rows per channel | 19 (pre=1, data=16, post=2) | 19 (pre=1, data=16, post=2) |
+| TX buffer layout | Interleaved stride-4 | Interleaved stride-4 (TIM1) / linear (TIM4) |
+| TX CCR4 padding | Active channel | Zero (dummy) |
+| TX FIFO mode | Enabled, full threshold | TIM1: enabled; TIM4: direct mode |
+| OC preload (OC1PE) | Enabled | Enabled |
+| TIM4 phase offset | N/A (single timer) | CNT=DS_ARR/2 → interleaved UEVs |
+| GPIO speed | Medium (PAL_STM32_OSPEED_MID1) | Medium (OSPEEDR=0x1) |
+| GPIO pull | Pull-up | Pull-up |
+| IC→OC transition | pwmStop()/pwmStart() | switch_to_output() (manual) |
+| IC timeout | ChibiOS virtual timer | Hardware UIE (ARR=20000 = 100 µs) |
 | IC timer PSC | 15 (16 ticks/GCR bit) | 0 (267 ticks/GCR bit) |
-| IC timer CR1 flags | ARPE + URS + UDIS + CEN | CEN only |
-| IC FIFO mode | Enabled (full threshold) | Direct mode |
-| IC ARR | 0xFFFF (count forever) | 20000 (100 µs timeout) |
+| IC timer CR1 | ARPE + URS + UDIS + CEN | URS + CEN |
+| IC ARR | 0xFFFF (count forever) | 20000 (hardware timeout) |
+| IC FIFO mode | Enabled | Direct mode |
+| IC double-buffering | Yes (copy in ISR) | No (decode in-place) |
 | GCR invalid code handling | Silently decode as 0 | Return false immediately |
 | eRPM units stored | eRPM/100 in uint16_t | Full eRPM in uint32_t |
-| eRPM formula | 600,000 / period_µs | 60,000,000 / period_µs |
 | Cache management | Explicit flush/invalidate | `.nocache` MPU section |
-| IC double-buffering | Yes (copy in ISR) | No (decode in-place) |
 | State machine | 6-state + thread | 3-state ISR-only |
 | ESC command queue | Yes | No |
 | Extended DShot Telemetry | Full EDT v1/v2 | eRPM only |
 
 ---
 
-## Potential Issues to Address
+## Open Items
 
-### Low risk — understood differences
-
-| # | Item | Risk | Notes |
-|---|------|------|-------|
-| 1 | IC timer: no ARPE | None | ARPE only needed when ARR has a shadow register; BPRL writes ARR before CEN. |
-| 2 | IC timer: no URS | None | BPRL does not call EGR=UG during IC setup, so URS has no effect. |
-| 3 | IC timer: no UDIS | Intentional | BPRL relies on UIE for timeout; setting UDIS would prevent the timeout ISR from firing. |
-| 4 | FIFO vs direct mode | None | Direct mode is correct for single 32-bit word transfers (TX) and P→M single-register IC. |
-| 5 | eRPM stored at full scale | None | uint32_t avoids overflow; division by 7 for display is correct. |
-
-### Medium priority — add when ready
-
-| # | Item | Impact | Notes |
-|---|------|--------|-------|
-| 6 | No EDT (temp/voltage/current) | Low during testing | ESC will occasionally send EDT packets; BPRL returns false for these (safe). Add EDT decode before sustained flight to catch overtemperature. |
-| 7 | No DShot command queue | Low during testing | Cannot send ESC commands (arm sequence, motor direction, save settings). Not required for basic motor test or autonomous flight if ESC is pre-configured. |
-| 8 | GCR decode in ISR | Low | A few µs of extra ISR time. Fine at 400 Hz. If re-enabling SPIThread creates ISR contention, move GCR decode to a deferred callback. |
+| # | Item | Priority | Notes |
+|---|------|----------|-------|
+| 1 | Motors 0, 2, 3 — hardware verification | **P0** | Code complete; awaiting bench test after recent GPIO/buffer/IC fixes. |
+| 2 | EDT telemetry | Add before sustained flight | ESC sends EDT; BPRL safely returns false. |
+| 3 | DShot command queue | Low | Cannot send ESC commands (arm/direction/save). Not needed for basic test. |
+| 4 | GCR decode in ISR | Low | ~5–10 µs extra ISR time. Fine at 400 Hz; revisit if SPIThread re-enable creates contention. |
+| 5 | SPIThread re-enable | After all 4 motors verified | Needs ISR priority audit at DShot priority 7. |

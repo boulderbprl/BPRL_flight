@@ -93,10 +93,15 @@ static constexpr uint8_t kGcrDecode[32] = {
 };
 
 /* ── DMA TX buffers (.nocache — bypasses D-cache on STM32H743) ───────────── */
-/* Interleaved stride-4: [CCR1, CCR2, CCR3, CCR4_dummy] × 18 rows = 72 words.
- * One TIM1_UP drains 4 words from FIFO → all four CCRs updated per UEV. */
-static uint32_t s_tx_buf_tim1[72] __attribute__((aligned(32), section(".nocache")));
-static uint32_t s_tx_buf_tim4[18] __attribute__((aligned(32), section(".nocache")));
+/* Interleaved stride-4: [CCR1, CCR2, CCR3, CCR4_dummy] × 19 rows = 76 words.
+ * Row 0:    pre-word zeros  (dshot_pre=1, keeps line idle for one extra UEV)
+ * Rows 1–16: data bits 15..0
+ * Rows 17–18: trailing zeros (dshot_post=2)
+ * One TIM1_UP drains 4 words from FIFO → all four CCRs updated per UEV.
+ * With OC preload (OC1PE=1) the DMA write on UEVn takes effect on UEVn+1,
+ * so the pre-word absorbs this one-UEV delay — matches ArduPilot exactly. */
+static uint32_t s_tx_buf_tim1[76] __attribute__((aligned(32), section(".nocache")));
+static uint32_t s_tx_buf_tim4[19] __attribute__((aligned(32), section(".nocache")));
 
 /* ── DMA IC buffer (single buffer reused each rotation) ─────────────────── */
 static uint32_t s_ic_buf_tim1[22] __attribute__((aligned(32), section(".nocache")));
@@ -139,7 +144,7 @@ static const stm32_dma_stream_t *s_dma_tim4     = nullptr;  // TIM4 TX + IC
 /* ── Forward declarations ────────────────────────────────────────────────── */
 static uint16_t make_frame(uint16_t thr);
 static void     build_tx_buf(const uint16_t throttle[4]);
-static void     switch_to_output(void);
+static void     reset_pwm_for_tx(void);
 static void     start_ic_tim1(void);
 static void     start_ic_tim4(void);
 static void     finish_ic_tim1(uint8_t n_edges);
@@ -255,51 +260,76 @@ static void build_tx_buf(const uint16_t throttle[4])
     uint16_t frame[4];
     for (int c = 0; c < 4; c++) frame[c] = make_frame(throttle[c]);
 
-    /* Interleaved stride-4: [CCR1=M1, CCR2=M0, CCR3=M3, CCR4=0] per row.
-     * One TIM1_UP drains 4 words from FIFO → all CCRs updated on same UEV. */
+    /* Row 0: pre-word zeros — idle period before bit 15 (dshot_pre=1).
+     * With OC preload, the DMA write on UEVn is shadowed until UEVn+1.
+     * This pre-row absorbs that one-UEV delay so bit 15 fires on UEV3,
+     * matching ArduPilot's fill_DMA_buffer_dshot() layout exactly. */
+    s_tx_buf_tim1[0] = 0U; s_tx_buf_tim1[1] = 0U;
+    s_tx_buf_tim1[2] = 0U; s_tx_buf_tim1[3] = 0U;
+
+    /* Rows 1–16: data bits 15..0, interleaved [CCR1=M1, CCR2=M0, CCR3=M3, 0]. */
     for (int b = 15; b >= 0; b--) {
-        int row = (15 - b) * 4;
+        int row = (16 - b) * 4;
         s_tx_buf_tim1[row + 0] = (frame[1] & (1U << b)) ? DS_T1H : DS_T0H;
         s_tx_buf_tim1[row + 1] = (frame[0] & (1U << b)) ? DS_T1H : DS_T0H;
         s_tx_buf_tim1[row + 2] = (frame[3] & (1U << b)) ? DS_T1H : DS_T0H;
         s_tx_buf_tim1[row + 3] = 0U;
     }
-    s_tx_buf_tim1[64] = 0U; s_tx_buf_tim1[65] = 0U;
-    s_tx_buf_tim1[66] = 0U; s_tx_buf_tim1[67] = 0U;
-    s_tx_buf_tim1[68] = 0U; s_tx_buf_tim1[69] = 0U;
-    s_tx_buf_tim1[70] = 0U; s_tx_buf_tim1[71] = 0U;
+    /* Rows 17–18: trailing zeros. */
+    for (int i = 68; i < 76; i++) s_tx_buf_tim1[i] = 0U;
 
+    /* TIM4: pre-word, 16 data bits, 2 trailing zeros (19 words). */
+    s_tx_buf_tim4[0] = 0U;
     for (int b = 15; b >= 0; b--)
-        s_tx_buf_tim4[15 - b] = (frame[2] & (1U << b)) ? DS_T1H : DS_T0H;
-    s_tx_buf_tim4[16] = 0U;
+        s_tx_buf_tim4[16 - b] = (frame[2] & (1U << b)) ? DS_T1H : DS_T0H;
     s_tx_buf_tim4[17] = 0U;
+    s_tx_buf_tim4[18] = 0U;
 }
 
-/* ── switch_to_output ────────────────────────────────────────────────────── */
+/* ── reset_pwm_for_tx ────────────────────────────────────────────────────── */
 /*
- * Put ALL channels into PWM mode 2 (active-LOW, bidir idle = HIGH).
- * Called at the start of every dshot_write() to guarantee a clean TX state.
- * CC_nS = 00 (output mode) for all channels — the timer drives the AF pin.
+ * Equivalent to ArduPilot bdshot_reset_pwm() = pwmStop() + pwmStart().
+ * rccResetTIMx() performs a full APB peripheral reset (all regs → 0),
+ * then we replicate the exact register writes ChibiOS pwmStart() makes
+ * for PWM_OUTPUT_ACTIVE_LOW (OCxM=6, CCxP=1) with preload.
+ * After this function both timers are running; DMA is armed in dshot_write().
+ * DCR is written here (driver does not touch it).
  */
-static void switch_to_output(void)
+static void reset_pwm_for_tx(void)
 {
-    TIM1->CCER  = 0U;            // clear enables before writing CCxS
-    TIM1->CCMR1 = (7U << 4)  | TIM_CCMR1_OC1PE   // CH1: mode 2, preload
-                | (7U << 12) | TIM_CCMR1_OC2PE;   // CH2: mode 2, preload
-    TIM1->CCMR2 = (7U << 4)  | TIM_CCMR2_OC3PE;  // CH3: mode 2, preload
+    rccResetTIM1();
+    TIM1->PSC   = 0U;
     TIM1->ARR   = DS_ARR;
-    TIM1->CCR1  = 0U; TIM1->CCR2 = 0U; TIM1->CCR3 = 0U;
-    TIM1->EGR   = TIM_EGR_UG;   // flush shadow registers, reset CNT to 0
-    TIM1->SR    = 0U;            // clear UIF from EGR
-    TIM1->CCER  = TIM_CCER_CC1E | TIM_CCER_CC2E | TIM_CCER_CC3E;
+    TIM1->CR2   = 0U;
+    TIM1->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | TIM_CCMR1_OC1PE
+                | STM32_TIM_CCMR1_OC2M(6) | TIM_CCMR1_OC2PE;
+    TIM1->CCMR2 = STM32_TIM_CCMR2_OC3M(6) | TIM_CCMR2_OC3PE
+                | STM32_TIM_CCMR2_OC4M(6) | TIM_CCMR2_OC4PE;
+    TIM1->CCR1  = 0U; TIM1->CCR2 = 0U; TIM1->CCR3 = 0U; TIM1->CCR4 = 0U;
+    TIM1->CCER  = STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1E
+                | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E
+                | STM32_TIM_CCER_CC3P | STM32_TIM_CCER_CC3E;
+    TIM1->EGR   = TIM_EGR_UG;
+    TIM1->SR    = 0U;
+    TIM1->DIER  = TIM_DIER_UDE;
+    TIM1->BDTR  = TIM_BDTR_MOE;
+    TIM1->DCR   = (3U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
+    TIM1->CR1   = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
 
-    TIM4->CCER  = 0U;
-    TIM4->CCMR1 = (7U << 12) | TIM_CCMR1_OC2PE;  // CH2: mode 2, preload
+    rccResetTIM4();
+    TIM4->PSC   = 0U;
     TIM4->ARR   = DS_ARR;
+    TIM4->CR2   = 0U;
+    TIM4->CCMR1 = STM32_TIM_CCMR1_OC2M(6) | TIM_CCMR1_OC2PE;
     TIM4->CCR2  = 0U;
+    TIM4->CCER  = STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E;
     TIM4->EGR   = TIM_EGR_UG;
     TIM4->SR    = 0U;
-    TIM4->CCER  = TIM_CCER_CC2E;
+    TIM4->DIER  = TIM_DIER_UDE;
+    TIM4->DCR   = (0U << TIM_DCR_DBL_Pos) | (DBA_CCR2 << TIM_DCR_DBA_Pos);
+    TIM4->CNT   = DS_ARR / 2U;   // half-period offset → interleaves DMA bursts
+    TIM4->SR    = 0U;
+    TIM4->CR1   = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
 }
 
 /* ── start_ic_tim1 ───────────────────────────────────────────────────────── */
@@ -358,7 +388,10 @@ static void start_ic_tim1(void)
     TIM1->SR  = 0U;
 
     dmaStreamEnable(s_dma_ic_tim1);
-    TIM1->CR1 |= TIM_CR1_CEN;
+    /* URS=1: only counter overflow (not software EGR=UG) sets UIF, so no spurious
+     * UIF if EGR is called elsewhere.  UDIS must NOT be set — BPRL uses the
+     * counter-overflow UIE as a 100 µs hardware timeout for the IC phase. */
+    TIM1->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
 }
 
 /* ── start_ic_tim4 ───────────────────────────────────────────────────────── */
@@ -388,7 +421,7 @@ static void start_ic_tim4(void)
     TIM4->DIER  = TIM_DIER_CC2DE | TIM_DIER_UIE;
 
     dmaStreamEnable(s_dma_tim4);
-    TIM4->CR1 |= TIM_CR1_CEN;
+    TIM4->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
 }
 
 /* ── finish_ic_tim1 ──────────────────────────────────────────────────────── */
@@ -507,7 +540,9 @@ void dshot_init(void)
     RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOEEN | RCC_AHB4ENR_GPIODEN;
 
     /* ── GPIO: AF mode once, never changed ───────────────────────────────── */
-    /* PE9=TIM1_CH1, PE11=TIM1_CH2, PE13=TIM1_CH3 → AF1, medium speed, pull-up */
+    /* PE9=TIM1_CH1, PE11=TIM1_CH2, PE13=TIM1_CH3 → AF1, medium speed, pull-up
+     * BiDir DShot requires medium speed (not high/very-high) to avoid ringing
+     * on the IC→OC output reconnect transition — matches ArduPilot bdshot. */
     GPIOE->MODER   = (GPIOE->MODER & ~(0x3U<<18) & ~(0x3U<<22) & ~(0x3U<<26))
                    | (0x2U<<18) | (0x2U<<22) | (0x2U<<26);
     GPIOE->OSPEEDR = (GPIOE->OSPEEDR & ~(0x3U<<18) & ~(0x3U<<22) & ~(0x3U<<26))
@@ -523,28 +558,50 @@ void dshot_init(void)
     GPIOD->PUPDR   = (GPIOD->PUPDR & ~(0x3U<<26)) | (0x1U<<26);
     GPIOD->AFRH    = (GPIOD->AFRH & ~(0xFU<<20)) | (0x2U<<20);
 
-    /* ── TIM1 base config ─────────────────────────────────────────────────── */
-    TIM1->CR1  = 0U; TIM1->CR2 = 0U;
-    TIM1->PSC  = 0U;
-    TIM1->ARR  = DS_ARR;
-    TIM1->RCR  = 0U;
-    TIM1->BDTR = TIM_BDTR_MOE;  // required for TIM1 (advanced timer)
-    TIM1->EGR  = TIM_EGR_UG;
-    TIM1->CCR1 = 0U; TIM1->CCR2 = 0U; TIM1->CCR3 = 0U; TIM1->CCR4 = 0U;
-    /* DCR set in dshot_write() for TX (DBA=CCR1, DBL=3) and in start_ic_tim1() for IC. */
-    TIM1->DIER = TIM_DIER_UDE;
+    /* ── TIM1 and TIM4 — replicates pwmStart() register sequence exactly ─────
+     * rccResetTIM1/4 performs a full APB peripheral reset (all registers → 0),
+     * equivalent to pwmStop()+pwmStart()'s rccResetTIMx call in ChibiOS.
+     * Subsequent register writes match ArduPilot set_group_mode(active_high=false):
+     *   CCMR: OCxM=6 (PWM mode 1), OC preload   → active-low DShot output
+     *   CCER: CCxP=1 (inverted), CCxE=1          → pin HIGH when CCR=0 (idle)
+     *   DIER: UDE                                 → DMA on update event
+     *   BDTR: MOE                                 → TIM1 main output enable
+     *   CR1:  ARPE|URS|CEN                        → matches ArduPilot CR1
+     * DCR is not touched by ArduPilot's pwmStart(); set separately. */
+    rccResetTIM1();
+    TIM1->PSC   = 0U;
+    TIM1->ARR   = DS_ARR;
+    TIM1->CR2   = 0U;
+    TIM1->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | TIM_CCMR1_OC1PE
+                | STM32_TIM_CCMR1_OC2M(6) | TIM_CCMR1_OC2PE;
+    TIM1->CCMR2 = STM32_TIM_CCMR2_OC3M(6) | TIM_CCMR2_OC3PE
+                | STM32_TIM_CCMR2_OC4M(6) | TIM_CCMR2_OC4PE;
+    TIM1->CCR1  = 0U; TIM1->CCR2 = 0U; TIM1->CCR3 = 0U; TIM1->CCR4 = 0U;
+    TIM1->CCER  = STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1E
+                | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E
+                | STM32_TIM_CCER_CC3P | STM32_TIM_CCER_CC3E;
+    TIM1->EGR   = TIM_EGR_UG;
+    TIM1->SR    = 0U;
+    TIM1->DIER  = TIM_DIER_UDE;
+    TIM1->BDTR  = TIM_BDTR_MOE;
+    TIM1->DCR   = (3U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
+    TIM1->CR1   = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
 
-    /* ── TIM4 base config ─────────────────────────────────────────────────── */
-    TIM4->CR1  = 0U; TIM4->CR2 = 0U;
-    TIM4->PSC  = 0U;
-    TIM4->ARR  = DS_ARR;
-    TIM4->EGR  = TIM_EGR_UG;
-    TIM4->CCR1 = 0U; TIM4->CCR2 = 0U; TIM4->CCR3 = 0U; TIM4->CCR4 = 0U;
-    /* TX burst: DBA=CCR2(14), DBL=0.  IC also uses DBA=CCR2 — DCR never changes. */
-    TIM4->DCR  = (0U << TIM_DCR_DBL_Pos) | (DBA_CCR2 << TIM_DCR_DBA_Pos);
-    TIM4->DIER = TIM_DIER_UDE;
-
-    switch_to_output();
+    rccResetTIM4();
+    TIM4->PSC   = 0U;
+    TIM4->ARR   = DS_ARR;
+    TIM4->CR2   = 0U;
+    TIM4->CCMR1 = STM32_TIM_CCMR1_OC2M(6) | TIM_CCMR1_OC2PE;
+    TIM4->CCR2  = 0U;
+    TIM4->CCER  = STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E;
+    TIM4->EGR   = TIM_EGR_UG;
+    TIM4->SR    = 0U;
+    TIM4->DIER  = TIM_DIER_UDE;
+    TIM4->DCR   = (0U << TIM_DCR_DBL_Pos) | (DBA_CCR2 << TIM_DCR_DBA_Pos);
+    /* Phase offset: TIM4 UEV fires ~0.84µs before TIM1 (interleaves DMA bursts). */
+    TIM4->CNT   = DS_ARR / 2U;
+    TIM4->SR    = 0U;
+    TIM4->CR1   = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
 
     /* ── DMA streams for TIM1: one TX burst stream + one IC stream ──────── */
     s_dma_tx_tim1 = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY,
@@ -592,7 +649,7 @@ void dshot_init(void)
     dmaSetRequestSource(s_dma_tim4, DMAMUX_TIM4_UP);
     dmaStreamSetPeripheral(s_dma_tim4, &TIM4->DMAR);
     dmaStreamSetMemory0(s_dma_tim4, s_tx_buf_tim4);
-    dmaStreamSetTransactionSize(s_dma_tim4, 18U);
+    dmaStreamSetTransactionSize(s_dma_tim4, 19U);
     s_dma_tim4->stream->FCR = 0U;    // direct mode: 1 word/TIM4_UP → CCR2 (DBL=0)
     dmaStreamSetMode(s_dma_tim4,
           DMA_SxCR_MINC
@@ -628,20 +685,17 @@ void dshot_write(const uint16_t throttle[4])
     s_phase_tim1 = DshotPhase::IDLE;
     s_phase_tim4 = DshotPhase::IDLE;
 
-    /* ── Restore TX config ───────────────────────────────────────────────── */
-    switch_to_output();         // all channels output mode (CC_nS=00)
-    TIM1->BDTR = TIM_BDTR_MOE;
-    /* DCR: DBA=CCR1(13), DBL=3 → burst of 4: CCR1/M1, CCR2/M0, CCR3/M3, CCR4/dummy.
-     * One TIM1_UP drains 4 words from FIFO (full threshold) → all CCRs per UEV. */
-    TIM1->DCR  = (3U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
-    TIM1->DIER = TIM_DIER_UDE;
-    TIM4->DIER = TIM_DIER_UDE;
+    /* ── Full IC→OC reset (matches ArduPilot bdshot_reset_pwm) ──────────── */
+    /* rccResetTIMx → complete register wipe, then fresh CCMR/CCER/BDTR/DIER/CR1.
+     * Both timers running after this call; DMA is armed below.
+     * DCR, BDTR, and DIER are all set inside reset_pwm_for_tx(). */
+    reset_pwm_for_tx();
 
-    /* ── Reload TIM1 TX DMA (single burst stream → DMAR, 72 words) ─────── */
+    /* ── Reload TIM1 TX DMA (single burst stream → DMAR, 76 words) ─────── */
     dmaSetRequestSource(s_dma_tx_tim1, DMAMUX_TIM1_UP);
     dmaStreamSetPeripheral(s_dma_tx_tim1, &TIM1->DMAR);
     dmaStreamSetMemory0(s_dma_tx_tim1, s_tx_buf_tim1);
-    dmaStreamSetTransactionSize(s_dma_tx_tim1, 72U);
+    dmaStreamSetTransactionSize(s_dma_tx_tim1, 76U);
     s_dma_tx_tim1->stream->FCR = DMA_SxFCR_DMDIS | DMA_SxFCR_FTH;
     dmaStreamSetMode(s_dma_tx_tim1,
           DMA_SxCR_MINC
@@ -657,7 +711,7 @@ void dshot_write(const uint16_t throttle[4])
     dmaSetRequestSource(s_dma_tim4, DMAMUX_TIM4_UP);
     dmaStreamSetPeripheral(s_dma_tim4, &TIM4->DMAR);
     dmaStreamSetMemory0(s_dma_tim4, s_tx_buf_tim4);
-    dmaStreamSetTransactionSize(s_dma_tim4, 18U);
+    dmaStreamSetTransactionSize(s_dma_tim4, 19U);
     s_dma_tim4->stream->FCR = 0U;    // direct mode: 1 word/TIM4_UP → CCR2 (DBL=0)
     dmaStreamSetMode(s_dma_tim4,
           DMA_SxCR_MINC
@@ -668,11 +722,13 @@ void dshot_write(const uint16_t throttle[4])
         | DMA_SxCR_TCIE);
     dmaStreamEnable(s_dma_tim4);
 
-    /* ── Start timers ────────────────────────────────────────────────────── */
+    /* ── Arm phase and let running timers drive DMA ─────────────────────── */
+    /* Both timers are already running from reset_pwm_for_tx() (pwmStart sets
+     * CR1=ARPE|URS|CEN). TIM4 CNT offset is also set there. DMA responds to
+     * the next UEV; dshot_pre=1 ensures a clean idle period regardless of
+     * where in the period DMA was armed. */
     s_phase_tim1 = DshotPhase::TX;
     s_phase_tim4 = DshotPhase::TX;
-    TIM1->CR1 |= TIM_CR1_CEN;
-    TIM4->CR1 |= TIM_CR1_CEN;
 }
 
 void dshot_get_telemetry(ESCTelemetry out[4])

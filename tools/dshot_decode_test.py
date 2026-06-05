@@ -214,7 +214,7 @@ if __name__ == "__main__":
     # Corrupt one edge timestamp
     ts_good, _ = gcr_encode_packet(5000)
     ts_bad = ts_good[:]
-    ts_bad[5] += 50   # small offset → wrong bit count
+    ts_bad[5] += 140  # > GCR_BIT_TICKS/2 (133) → flips rounding → wrong bit count
     run_rejection("corrupted edge",        ts_bad)
 
     # ── Verify CRC inversion ─────────────────────────────────────────────────
