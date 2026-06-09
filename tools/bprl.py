@@ -600,6 +600,204 @@ def _decode_rxf0s(rxf0s: int) -> str:
     lost = bool(rxf0s & (1 << 25))
     return f"fill={fill}{'  FULL' if full else ''}{'  MSGS_LOST' if lost else ''}"
 
+def _poll_can_diag(ser: serial.Serial) -> Optional[dict]:
+    """Send CAN,diag and return parsed counters, or None on timeout."""
+    import re
+    ser.reset_input_buffer()
+    ser.write(b"CAN,diag\r\n")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        m = re.search(r"total_rx=(\d+),dispatched=(\d+),"
+                      r"last_sid=(0x[0-9a-fA-F]+).*last_dlc=(\d+)", line)
+        if m:
+            return {
+                "total_rx":   int(m.group(1)),
+                "dispatched": int(m.group(2)),
+                "last_sid":   m.group(3),
+                "last_dlc":   int(m.group(4)),
+            }
+    return None
+
+
+def cmd_can_rate(ser: serial.Serial, _args):
+    """Poll CAN,diag twice 1 s apart and show frame rates."""
+    console.print("Sampling CAN bus — measuring over 1 second...")
+
+    a = _poll_can_diag(ser)
+    if a is None:
+        console.print("[red]No CAN,DIAG response — is firmware running?[/red]")
+        return
+
+    time.sleep(1.0)
+
+    b = _poll_can_diag(ser)
+    if b is None:
+        console.print("[red]Second CAN,DIAG poll failed.[/red]")
+        return
+
+    total_hz      = b["total_rx"]   - a["total_rx"]
+    dispatched_hz = b["dispatched"] - a["dispatched"]
+    unmatched_hz  = total_hz - dispatched_hz
+
+    # Expected frame rates at the configured rates
+    expected_total      = 200 + 100 + 100 + 100   # IDs 0x01-0x04
+    expected_dispatched = expected_total
+
+    def _bar(actual, expected):
+        pct = (actual / expected * 100) if expected else 0
+        col = "green" if pct >= 90 else ("yellow" if pct >= 50 else "red")
+        return f"[{col}]{actual:4d} Hz  ({pct:5.1f}% of {expected})[/{col}]"
+
+    console.print()
+    console.print(f"[bold]CAN Frame Rate  (last_sid={b['last_sid']}  dlc={b['last_dlc']})[/bold]")
+    console.print(f"  Total on bus  : {_bar(total_hz, expected_total)}")
+    console.print(f"  Dispatched    : {_bar(dispatched_hz, expected_dispatched)}  ← matched IDs 0x01–0x04")
+    console.print(f"  Unmatched     : [dim]{unmatched_hz:4d} Hz[/dim]  ← other IMX5 frames")
+    console.print()
+
+    if total_hz == 0:
+        console.print("[red]No frames at all — check baud rate, termination, and GPIO pins.[/red]")
+    elif dispatched_hz == 0:
+        console.print("[red]Frames arriving but none match IDs 0x01–0x04.[/red]")
+        console.print("[red]IMX5 may be using different CAN IDs or extended frames.[/red]")
+    elif dispatched_hz < expected_dispatched * 0.5:
+        console.print("[yellow]Dispatch rate is below 50% of expected — IMX5 may not be[/yellow]")
+        console.print("[yellow]configured for 200/100/100/100 Hz output.[/yellow]")
+    else:
+        console.print("[green]Frame rate looks healthy.[/green]")
+
+
+def cmd_can_scan(ser: serial.Serial, args):
+    """Scan all CAN IDs arriving on the bus for `duration` seconds."""
+    import re
+    duration = getattr(args, "duration", 1)
+
+    ser.reset_input_buffer()
+    ser.write(b"CAN,scan,start\r\n")
+    deadline = time.monotonic() + 2.0
+    started = False
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if "started" in line:
+            started = True
+            break
+    if not started:
+        console.print("[red]No response to CAN,scan,start — is firmware running?[/red]")
+        return
+
+    console.print(f"[dim]Scanning all CAN IDs for {duration} s...[/dim]")
+    time.sleep(duration)
+
+    ser.write(b"CAN,scan,stop\r\n")
+    entries = []
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if line == "CAN,SCAN,END":
+            break
+        m = re.match(r"CAN,SCAN,id=(EXT:)?(0x[0-9a-fA-F]+),count=(\d+)", line)
+        if m:
+            entries.append({
+                "is_ext": m.group(1) is not None,
+                "id_str": m.group(2),
+                "id_int": int(m.group(2), 16),
+                "count":  int(m.group(3)),
+            })
+
+    if not entries:
+        console.print("[red]No CAN,SCAN results — no frames on bus or firmware too old.[/red]")
+        return
+
+    entries.sort(key=lambda e: e["count"], reverse=True)
+    total = sum(e["count"] for e in entries)
+
+    REGISTERED = {0x01, 0x02, 0x03, 0x04}
+
+    tbl = Table(title=f"CAN IDs seen in {duration} s  (total {total} frames = {total//duration} Hz)",
+                show_header=True, header_style="bold")
+    tbl.add_column("ID",       style="cyan", min_width=8)
+    tbl.add_column("Type",     min_width=5)
+    tbl.add_column("Frames",   justify="right", min_width=8)
+    tbl.add_column("Hz",       justify="right", min_width=6)
+    tbl.add_column("% total",  justify="right", min_width=8)
+    tbl.add_column("Registered?", min_width=12)
+
+    for e in entries:
+        pct    = e["count"] / total * 100
+        hz     = e["count"] / duration
+        is_reg = e["id_int"] in REGISTERED
+        reg_str = "[green]● 0x{:02x} yes[/green]".format(e["id_int"]) if is_reg \
+                  else "[dim]○ no[/dim]"
+        tbl.add_row(
+            e["id_str"],
+            "EXT" if e["is_ext"] else "STD",
+            str(e["count"]),
+            f"{hz:.0f}",
+            f"{pct:.1f}%",
+            reg_str,
+        )
+
+    console.print(tbl)
+    unmatched_hz = sum(e["count"] for e in entries if e["id_int"] not in REGISTERED) // duration
+    if unmatched_hz > 10:
+        ids = ", ".join(e["id_str"] for e in entries if e["id_int"] not in REGISTERED)
+        console.print(f"\n[yellow]{unmatched_hz} Hz of unregistered frames on: {ids}[/yellow]")
+        console.print("[yellow]Register these IDs with bprl_can_register() to use their data.[/yellow]")
+
+
+def cmd_can_regdump(ser: serial.Serial, _args):
+    """Print raw FDCAN1 hardware register values — confirms RXESC element-size bug."""
+    import re
+    ser.write(b"CAN,regdump\r\n")
+    regs = {}
+    deadline = time.monotonic() + 3.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if line == "CAN,REG,END":
+            break
+        m = re.match(r"CAN,REG,(\w+)=(0x[0-9a-fA-F]+)", line)
+        if m:
+            regs[m.group(1)] = int(m.group(2), 16)
+
+    if not regs:
+        console.print("[red]No response — firmware too old or not running?[/red]")
+        return
+
+    tbl = Table(title="FDCAN1 hardware registers", show_header=True, header_style="bold")
+    tbl.add_column("Register", style="cyan", min_width=8)
+    tbl.add_column("Value",    style="white", min_width=12)
+    tbl.add_column("Key fields / notes", min_width=40)
+
+    notes = {
+        "RXESC": lambda v: (
+            f"F0DS={v&7}, F1DS={(v>>4)&7}, RBDS={(v>>8)&7}  "
+            + ("[green]OK — 64-byte elements, stride=72 B[/green]" if (v&7)==7
+               else "[red]BUG — 8-byte elements (stride=16 B) vs SW stride=72 B → reads zeroed RAM[/red]")
+        ),
+        "NBTP":  lambda v: f"BRP={(v>>16)&0x1ff}+1, BS1={(v>>8)&0xff}+1, BS2={v&0x7f}+1",
+        "RXF0C": lambda v: f"F0S={(v>>16)&0x3f} elements, F0SA=0x{v&0xffff:04x}",
+        "RXF0S": lambda v: f"F0FL={v&0x7f} fill, F0GI={(v>>8)&0x3f} get-idx",
+        "PSR":   lambda v: f"LEC={v&7}, EP={1 if v&(1<<5) else 0}, BO={1 if v&(1<<6) else 0}",
+        "ECR":   lambda v: f"TEC={(v>>16)&0xff}, REC={v&0xff}",
+        "CCCR":  lambda v: f"INIT={v&1}, CCE={(v>>1)&1}, FDOE={(v>>8)&1}",
+        "RXGFC": lambda v: f"ANFS={v&3}, ANFE={(v>>2)&3}",
+    }
+    for name, value in regs.items():
+        note = notes[name](value) if name in notes else ""
+        tbl.add_row(name, f"0x{value:08X}", note)
+
+    console.print(tbl)
+
+    rxesc = regs.get("RXESC", None)
+    if rxesc is not None and (rxesc & 7) != 7:
+        console.print("\n[bold red]RXESC bug confirmed[/bold red] — F0DS should be 7 (64-byte) but is "
+                      f"{rxesc & 7} ({[8,12,16,20,24,32,48,64][rxesc&7]}-byte). "
+                      "Fix: add RXESC=0x777 in can_lld_start() before exiting init mode.")
+    elif rxesc is not None:
+        console.print("\n[green]RXESC correct (F0DS=7, 64-byte elements, stride matches SW)[/green]")
+
+
 def cmd_can_status(ser: serial.Serial, _args):
     import re
     ser.write(b"CAN,status\r\n")
@@ -947,6 +1145,196 @@ def cmd_calibrate(ser: serial.Serial, args):
     console.print("[yellow]No CAL,DATA response from query.")
 
 
+# ── IMU side-by-side comparison ───────────────────────────────────────────────
+
+@dataclass
+class ImuCompareState:
+    time_ms:      float = 0.0
+    accel:        list  = field(default_factory=lambda: [[0.0]*3 for _ in range(3)])
+    gyro:         list  = field(default_factory=lambda: [[0.0]*3 for _ in range(3)])
+    valid:        list  = field(default_factory=lambda: [False]*3)
+    # CAN IMX5 rates (from $IMU extension fields)
+    can_pqr:      list  = field(default_factory=lambda: [0.0]*3)
+    can_valid:    bool  = False
+    # EKF lane angles deg, index 3 = CAN IMX5 (from $EKFL)
+    ekf_roll:     list  = field(default_factory=lambda: [0.0]*4)
+    ekf_pitch:    list  = field(default_factory=lambda: [0.0]*4)
+    ekf_yaw:      list  = field(default_factory=lambda: [0.0]*4)
+    ekf_primary:  int   = 0
+    received_imu: bool  = False
+    received_ekf: bool  = False
+    received_any: bool  = False
+    usb_rx_any:   bool  = False
+    last_rx:      float = field(default_factory=time.monotonic)
+    lines_rx:     int   = 0
+
+
+def parse_imu_compare_line(line: str, state: ImuCompareState) -> bool:
+    """Parse $IMU or $EKFL into ImuCompareState. Returns True on success."""
+    if line.startswith("$IMU,"):
+        s = parse_imu_line(line)
+        if s is None:
+            return False
+        state.time_ms  = float(s.time_ms)
+        state.accel    = s.accel
+        state.gyro     = s.gyro
+        state.valid    = s.valid
+        # Extra CAN fields appended after the 3rd IMU block (fields 22-25)
+        parts = line[5:].split(",")
+        if len(parts) >= 26:
+            try:
+                state.can_pqr   = [float(parts[22]), float(parts[23]), float(parts[24])]
+                state.can_valid = bool(int(parts[25]))
+            except (ValueError, IndexError):
+                pass
+        state.received_imu = True
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+
+    if line.startswith("$EKFL,"):
+        tmp = EkfLaneState()
+        if not parse_ekfl_line(line, tmp):
+            return False
+        state.ekf_roll    = list(tmp.roll)    # 4 entries: lane0-2 + CAN
+        state.ekf_pitch   = list(tmp.pitch)
+        state.ekf_yaw     = list(tmp.yaw)
+        state.ekf_primary = tmp.primary
+        state.received_ekf = True
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+
+    return False
+
+
+_AXIS_LABELS    = ["X / P", "Y / Q", "Z / R"]
+_IMU_COL_LABELS = ["IMU0 (pri)", "IMU1 (ext)", "IMU2      "]
+_EKF_COL_LABELS = ["Lane 0", "Lane 1", "Lane 2", "CAN IMX5"]
+
+
+def _delta_style(v: float, warn: float, err: float) -> str:
+    if abs(v) > err:   return "red"
+    if abs(v) > warn:  return "yellow"
+    return "green"
+
+
+def build_imu_compare_panel(s: ImuCompareState) -> Panel:
+    age   = time.monotonic() - s.last_rx
+    stale = age > 1.0
+    t_sec = s.time_ms / 1000.0
+
+    if not s.usb_rx_any:
+        stale_note = "  [dim](no USB data)[/dim]"
+    elif not s.received_any:
+        stale_note = "  [dim](waiting for $IMU/$EKFL — requires -DBPRL_DEBUG build)[/dim]"
+    elif stale:
+        stale_note = "  [yellow](stale)[/yellow]"
+    else:
+        stale_note = ""
+
+    # ── Accel table ───────────────────────────────────────────────────────────
+    a_tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    a_tbl.add_column("Accel (m/s²)", min_width=12)
+    for lbl in _IMU_COL_LABELS:
+        a_tbl.add_column(lbl, min_width=13, justify="right")
+    a_tbl.add_column("Δ 1−0", min_width=10, justify="right")
+    a_tbl.add_column("Δ 2−0", min_width=10, justify="right")
+
+    for k, ax in enumerate(["X", "Y", "Z"]):
+        vals   = [s.accel[i][k] for i in range(3)]
+        d1, d2 = vals[1]-vals[0], vals[2]-vals[0]
+        a_tbl.add_row(
+            f"  {ax}",
+            *[f"{v:+10.4f}" for v in vals],
+            f"[{_delta_style(d1,.1,.5)}]{d1:+9.4f}[/{_delta_style(d1,.1,.5)}]",
+            f"[{_delta_style(d2,.1,.5)}]{d2:+9.4f}[/{_delta_style(d2,.1,.5)}]",
+        )
+
+    # ── Rate table (onboard gyros + CAN IMX5 p/q/r) ──────────────────────────
+    r_tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    r_tbl.add_column("Rate (rad/s)", min_width=12)
+    for lbl in _IMU_COL_LABELS:
+        r_tbl.add_column(lbl, min_width=13, justify="right")
+    can_v_tag = "[green]CAN IMX5[/green]" if s.can_valid else "[dim]CAN IMX5[/dim]"
+    r_tbl.add_column(can_v_tag, min_width=13, justify="right")
+    r_tbl.add_column("Δ 1−0", min_width=10, justify="right")
+    r_tbl.add_column("Δ 2−0", min_width=10, justify="right")
+
+    for k, ax in enumerate(_AXIS_LABELS):
+        imu_vals = [s.gyro[i][k] for i in range(3)]
+        can_val  = s.can_pqr[k] if s.can_valid else float("nan")
+        d1, d2   = imu_vals[1]-imu_vals[0], imu_vals[2]-imu_vals[0]
+        can_str  = f"{can_val:+10.5f}" if s.can_valid else "  [dim]  ------[/dim]"
+        r_tbl.add_row(
+            f"  {ax}",
+            *[f"{v:+10.5f}" for v in imu_vals],
+            can_str,
+            f"[{_delta_style(d1,.01,.05)}]{d1:+9.5f}[/{_delta_style(d1,.01,.05)}]",
+            f"[{_delta_style(d2,.01,.05)}]{d2:+9.5f}[/{_delta_style(d2,.01,.05)}]",
+        )
+
+    # ── Angle table (EKF lanes + CAN IMX5 from quaternion) ───────────────────
+    ang_tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    ang_tbl.add_column("Angle (°)", min_width=12)
+    for i, lbl in enumerate(_EKF_COL_LABELS):
+        pri = " [bold green](pri)[/bold green]" if (i < 3 and i == s.ekf_primary) else ""
+        can = " [green]●[/green]" if (i == 3 and s.can_valid) else \
+              (" [dim]○[/dim]"   if i == 3 else "")
+        ang_tbl.add_column(f"{lbl}{pri}{can}", min_width=14, justify="right")
+    ang_tbl.add_column("Δ max−min", min_width=10, justify="right")
+
+    not_received = not s.received_ekf
+    for label, vals in [("  Roll",  s.ekf_roll),
+                         ("  Pitch", s.ekf_pitch),
+                         ("  Yaw",   s.ekf_yaw)]:
+        if not_received:
+            ang_tbl.add_row(label, *["[dim]---[/dim]"]*4, "[dim]---[/dim]")
+            continue
+        active = vals if s.can_valid else vals[:3]
+        spread = max(active) - min(active)
+        sp_col = _delta_style(spread, 1.0, 5.0)
+        cells  = [f"{v:+9.2f}°" for v in vals[:3]]
+        can_cell = f"{vals[3]:+9.2f}°" if s.can_valid else "[dim]  ------[/dim]"
+        ang_tbl.add_row(label, *cells, can_cell,
+                        f"[{sp_col}]{spread:+8.2f}°[/{sp_col}]")
+
+    valid_row = ["[green]● valid[/green]" if v else "[dim]○[/dim]" for v in s.valid]
+    valid_row.append("[green]● valid[/green]" if s.can_valid else "[dim]○[/dim]")
+    a_tbl.add_row("[bold]Valid[/bold]", *["[green]●[/green]" if v else "[dim]○[/dim]" for v in s.valid], "", "")
+
+    diag  = f"  [dim]lines_rx={s.lines_rx}[/dim]"
+    title = f"IMU Comparison    t={t_sec:8.1f} s{stale_note}{diag}"
+
+    body = Table.grid()
+    body.add_row(Panel(a_tbl,   title="Accelerometers", border_style="dim"))
+    body.add_row(Panel(r_tbl,   title="Angular Rates",  border_style="dim"))
+    body.add_row(Panel(ang_tbl, title="Attitude (EKF lanes + CAN IMX5)", border_style="dim"))
+    return Panel(body, title=title, border_style="magenta")
+
+
+def cmd_imu_compare(ser: serial.Serial, _args):
+    state  = ImuCompareState()
+    reader = SerialReader(ser)
+
+    try:
+        with Live(build_imu_compare_panel(state), refresh_per_second=10,
+                  console=console) as live:
+            while True:
+                for line in reader.pop_lines():
+                    state.lines_rx += 1
+                    if not parse_imu_compare_line(line, state):
+                        state.usb_rx_any = True
+                live.update(build_imu_compare_panel(state))
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.stop()
+
+
 # ── Log commands ──────────────────────────────────────────────────────────────
 
 def _read_line(ser: serial.Serial, timeout: float = 5.0) -> Optional[str]:
@@ -1242,7 +1630,15 @@ def main():
 
     sub.add_parser("ekf-status",  help="Per-lane EKF attitude/rate display (DEBUG build required)")
 
+    sub.add_parser("imu-compare", help="Side-by-side IMU0/IMU1/IMU2 accel+gyro with deltas (DEBUG build required)")
+
     sub.add_parser("can-status",  help="Read FDCAN1 protocol status and error counters")
+    sub.add_parser("can-rate",    help="Measure live CAN frame rate (polls CAN,diag over 1 s)")
+    sub.add_parser("can-regdump", help="Dump FDCAN1 hardware registers (diagnoses RXESC element-size bug)")
+
+    scan_p = sub.add_parser("can-scan",   help="Scan all CAN IDs on bus and show Hz breakdown")
+    scan_p.add_argument("--duration", type=int, default=1,
+                        help="Scan window in seconds (default: 1)")
 
     sub.add_parser("dshot-health", help="Live DShot TX/IC rate monitor + ESC arm detector (runs continuously)")
     sub.add_parser("dshot-diag",  help="One-shot DShot bidirectional telemetry snapshot (edge counts, timing)")
@@ -1286,8 +1682,20 @@ def main():
         elif args.command == "ekf-status":
             cmd_ekf_status(ser, args)
 
+        elif args.command == "imu-compare":
+            cmd_imu_compare(ser, args)
+
         elif args.command == "can-status":
             cmd_can_status(ser, args)
+
+        elif args.command == "can-rate":
+            cmd_can_rate(ser, args)
+
+        elif args.command == "can-scan":
+            cmd_can_scan(ser, args)
+
+        elif args.command == "can-regdump":
+            cmd_can_regdump(ser, args)
 
         elif args.command == "dshot-health":
             cmd_dshot_health(ser, args)

@@ -77,9 +77,9 @@ void boardInit(void)
     palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOA, 12U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── FDCAN1 (PH13=TX, PH14=RX) → AF9 ──────────────────────────────── */
-    palSetPadMode(GPIOH, 13U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
-    palSetPadMode(GPIOH, 14U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
+    /* ── FDCAN1 (PD1=TX, PD0=RX) → AF9 ────────────────────────────────── */
+    palSetPadMode(GPIOD, 1U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOD, 0U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
 
     /* ── SDMMC1 — microSD card → AF12 ──────────────────────────────────
      * D0=PC8, D1=PC9, D2=PC10, D3=PC11, CK=PC12, CMD=PD2

@@ -64,9 +64,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     }
 
     // ── 2. IMX5 quaternion update on all lanes (200 Hz, asynchronous) ─────
-    // IMX5 outputs q_NED→body; EKF stores q_body→NED — conjugate {W,-X,-Y,-Z}.
+    // IMX5 quaternion is body→NED (verified: Euler angles match physical attitude).
     if (can_imu.valid && can_imu.has_new_quat) {
-        Quat q_meas = { can_imu.q0, -can_imu.q1, -can_imu.q2, -can_imu.q3 };
+        Quat q_meas = { can_imu.q0, can_imu.q1, can_imu.q2, can_imu.q3 };
         for (int i = 0; i < NUM_LANES; ++i)
             _lanes[i].update_quaternion(q_meas, R_QUAT);
     }

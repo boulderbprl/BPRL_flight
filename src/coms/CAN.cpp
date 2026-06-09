@@ -1,13 +1,15 @@
 #include "src/coms/CAN.hpp"
 #include "src/threads.hpp"
+#include <cstring>
 
 /*
- * FDCAN1 bit timing — 1000 kbps, HSE = 24 MHz.
- * BRP=1, TSEG1=18, TSEG2=5 → 24 Tq/bit, 79% sample point.
- * NBTP: NSJW=3, NBRP=0, NTSEG1=17, NTSEG2=4.
+ * FDCAN1 bit timing — 500 kbit/s, PLL2Q = 80 MHz.
+ * BRP=10, TSEG1=13, TSEG2=2 → 16 Tq/bit, 87.5% sample point.
+ * 80 MHz / (10 × 16) = 500 kbit/s.
+ * NBTP: NSJW=0, NBRP=9, NTSEG1=12, NTSEG2=1.
  */
 static const CANConfig can_cfg = {
-    0x06001104,   // NBTP
+    0x00090C01,   // NBTP
     0x00000000,   // DBTP: unused (classical CAN)
     0x00000000,   // CCCR: normal mode, FDOE=0
     0x00000000,   // TEST
@@ -31,6 +33,31 @@ void bprl_can_register(uint32_t id, CANCallback cb, void *ctx)
     }
 }
 
+// ── ID scanner ───────────────────────────────────────────────────────────────
+
+static volatile bool s_scan_active = false;
+static CANScanEntry  s_scan[CAN_SCAN_MAX];
+static int           s_scan_n = 0;
+
+void can_scan_start(void)
+{
+    s_scan_active = false;
+    s_scan_n      = 0;
+    memset(s_scan, 0, sizeof(s_scan));
+    s_scan_active = true;
+}
+
+void can_scan_stop(void)  { s_scan_active = false; }
+
+int can_scan_get(CANScanEntry *out, int max)
+{
+    int n = s_scan_n < max ? s_scan_n : max;
+    memcpy(out, s_scan, (size_t)n * sizeof(CANScanEntry));
+    return n;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 void can_dispatch(const CANRxFrame &frame)
 {
     const bool is_ext    = frame.common.XTD;
@@ -44,8 +71,21 @@ void can_dispatch(const CANRxFrame &frame)
     s_diag.last_dlc  = frame.DLC;
     for (int i = 0; i < 8; i++) s_diag.last_data[i] = frame.data8[i];
 
+    // Accumulate per-ID counts for the scanner.
+    if (s_scan_active) {
+        bool found = false;
+        for (int i = 0; i < s_scan_n && !found; i++) {
+            if (s_scan[i].id == match && s_scan[i].is_ext == (uint8_t)is_ext) {
+                s_scan[i].count++;
+                found = true;
+            }
+        }
+        if (!found && s_scan_n < CAN_SCAN_MAX) {
+            s_scan[s_scan_n++] = {match, 1, (uint8_t)is_ext};
+        }
+    }
+
     // Match on SID for standard frames, full EID for extended frames.
-    // IMX5 may send either; this handles both without code changes.
     bool matched = false;
     for (int i = 0; i < num_can_devices; i++) {
         if (can_table[i].id == match) {
@@ -69,9 +109,11 @@ void can_get_diag(CANDiag &out)
 
 // ── IMX5 callback ────────────────────────────────────────────────────────────
 
-static inline int16_t be16s(const uint8_t *p)
+static inline int16_t le16s(const uint8_t *p)
 {
-    return static_cast<int16_t>((uint16_t(p[0]) << 8) | p[1]);
+    int16_t v;
+    __builtin_memcpy(&v, p, sizeof(v));
+    return v;
 }
 
 static void imx5_can_cb(const CANRxFrame &f, void *ctx)
@@ -81,29 +123,55 @@ static void imx5_can_cb(const CANRxFrame &f, void *ctx)
     switch (f.std.SID) {
     case 0x01:
         // CID_INS_QUATN2B — quaternion NED→Body [W,X,Y,Z], each int16 scaled by 10000.
-        g_can_imu.q0 = be16s(&f.data8[0]) * (1.0f / 10000.0f);  // W
-        g_can_imu.q1 = be16s(&f.data8[2]) * (1.0f / 10000.0f);  // X
-        g_can_imu.q2 = be16s(&f.data8[4]) * (1.0f / 10000.0f);  // Y
-        g_can_imu.q3 = be16s(&f.data8[6]) * (1.0f / 10000.0f);  // Z
+        g_can_imu.q0 = le16s(&f.data8[0]) * (1.0f / 10000.0f);  // W
+        g_can_imu.q1 = le16s(&f.data8[2]) * (1.0f / 10000.0f);  // X
+        g_can_imu.q2 = le16s(&f.data8[4]) * (1.0f / 10000.0f);  // Y
+        g_can_imu.q3 = le16s(&f.data8[6]) * (1.0f / 10000.0f);  // Z
         g_can_imu.has_new_quat = true;
         g_can_imu.valid        = true;
         break;
     case 0x02:
-        g_can_imu.p  = be16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.ax = be16s(&f.data8[2]) * (1.0f / 100.0f);
+        g_can_imu.p  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        g_can_imu.ax = le16s(&f.data8[2]) * (1.0f / 100.0f);
         g_can_imu.has_new_rates = true;
+        g_can_imu.valid         = true;
         break;
     case 0x03:
-        g_can_imu.q  = be16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.ay = be16s(&f.data8[2]) * (1.0f / 100.0f);
+        g_can_imu.q  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        g_can_imu.ay = le16s(&f.data8[2]) * (1.0f / 100.0f);
         break;
     case 0x04:
-        g_can_imu.r  = be16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.az = be16s(&f.data8[2]) * (1.0f / 100.0f);
+        g_can_imu.r  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        g_can_imu.az = le16s(&f.data8[2]) * (1.0f / 100.0f);
         break;
     default: break;
     }
     chMtxUnlock(&can_imu_mtx);
+}
+
+int can_read_regs(CANRegEntry *out, int max)
+{
+    if (!out || max < 1) return 0;
+    auto *f = CAND1.fdcan;
+    static const struct { const char *n; uint32_t off; } regs[] = {
+        { "CCCR",  0x018 },
+        { "NBTP",  0x01C },
+        { "RXGFC", 0x080 },
+        { "RXF0C", 0x0A0 },
+        { "RXF0S", 0x0A4 },
+        { "RXESC", 0x1BC },
+        { "PSR",   0x044 },
+        { "ECR",   0x040 },
+    };
+    int n = 0;
+    const uint8_t *base = reinterpret_cast<const uint8_t *>(f);
+    for (auto &r : regs) {
+        if (n >= max) break;
+        uint32_t v;
+        __builtin_memcpy(&v, base + r.off, 4);
+        out[n++] = { r.n, v };
+    }
+    return n;
 }
 
 void can_drv_init(void)

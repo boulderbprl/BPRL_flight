@@ -29,6 +29,7 @@
 #include "ff.h"
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 /* ── Shared state definitions ────────────────────────────────────────────── */
 
@@ -43,7 +44,7 @@ MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
 
 MUTEX_DECL(can_imu_mtx);
-CANIMURaw g_can_imu = {};
+CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0 before first frame
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
@@ -219,7 +220,7 @@ static THD_FUNCTION(StateEstThread, arg)
 
     // Ticks since last IMX5 quaternion — clears valid after 100 ticks (200 ms at 500 Hz).
     uint32_t can_stale_ticks = 0;
-    static constexpr uint32_t CAN_TIMEOUT_TICKS = 100;
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 500;  // 1 s at 500 Hz — tolerates IMX5 init pauses
 
     systime_t next = chVTGetSystemTime();
     while (true) {
@@ -231,8 +232,8 @@ static THD_FUNCTION(StateEstThread, arg)
         g_can_imu.has_new_rates = false;
         chMtxUnlock(&can_imu_mtx);
 
-        // Timeout: if no quaternion arrives for CAN_TIMEOUT_TICKS, mark link invalid.
-        if (can_snap.has_new_quat) {
+        // Timeout: if no IMX5 data (quat or rates) arrives for CAN_TIMEOUT_TICKS, mark link invalid.
+        if (can_snap.has_new_quat || can_snap.has_new_rates) {
             can_stale_ticks = 0;
         } else if (++can_stale_ticks > CAN_TIMEOUT_TICKS) {
             chMtxLock(&can_imu_mtx);
@@ -702,6 +703,36 @@ static void usb_cmd_dispatch(const char *line)
                  d.last_data[0], d.last_data[1], d.last_data[2], d.last_data[3],
                  d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7]);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,scan,start") == 0) {
+        can_scan_start();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,SCAN,started\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,scan,stop") == 0) {
+        can_scan_stop();
+        CANScanEntry entries[CAN_SCAN_MAX];
+        int n = can_scan_get(entries, CAN_SCAN_MAX);
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < n; i++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "CAN,SCAN,id=%s0x%03lx,count=%lu\r\n",
+                     entries[i].is_ext ? "EXT:" : "",
+                     (uint32_t)entries[i].id,
+                     (uint32_t)entries[i].count);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,SCAN,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,regdump") == 0) {
+        CANRegEntry regs[12];
+        int n = can_read_regs(regs, 12);
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < n; i++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "CAN,REG,%s=0x%08lx\r\n",
+                     regs[i].name, (uint32_t)regs[i].value);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,REG,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
     }
 }
 
@@ -794,18 +825,49 @@ static THD_FUNCTION(DebugThread, arg)
         primary_lane = s_primary_lane;
         chMtxUnlock(&state_mtx);
 
-        /* ── Snapshot IMU validity ──────────────────────────────────────── */
-        bool imu_v[3];
+        /* ── Snapshot full IMU data ─────────────────────────────────────── */
+        float imu_ax[3], imu_ay[3], imu_az[3];
+        float imu_gx[3], imu_gy[3], imu_gz[3];
+        bool  imu_v[3];
         chMtxLock(&imu_mtx);
-        imu_v[0] = g_imu[0].valid;
-        imu_v[1] = g_imu[1].valid;
-        imu_v[2] = g_imu[2].valid;
+        for (int _i = 0; _i < 3; _i++) {
+            imu_ax[_i] = g_imu[_i].accel[0];
+            imu_ay[_i] = g_imu[_i].accel[1];
+            imu_az[_i] = g_imu[_i].accel[2];
+            imu_gx[_i] = g_imu[_i].gyro[0];
+            imu_gy[_i] = g_imu[_i].gyro[1];
+            imu_gz[_i] = g_imu[_i].gyro[2];
+            imu_v[_i]  = g_imu[_i].valid;
+        }
         chMtxUnlock(&imu_mtx);
 
+        float can_p_snap, can_q_snap, can_r_snap;
+        float can_qw, can_qx, can_qy, can_qz;
         bool can_v;
         chMtxLock(&can_imu_mtx);
-        can_v = g_can_imu.valid;
+        can_v      = g_can_imu.valid;
+        can_p_snap = g_can_imu.p;
+        can_q_snap = g_can_imu.q;
+        can_r_snap = g_can_imu.r;
+        can_qw     = g_can_imu.q0;
+        can_qx     = g_can_imu.q1;
+        can_qy     = g_can_imu.q2;
+        can_qz     = g_can_imu.q3;
         chMtxUnlock(&can_imu_mtx);
+
+        // Quaternion → ZYX Euler (deg) for the CAN IMX5 lane in $EKFL.
+        // Always computed from the stored quaternion so the display shows the
+        // last known attitude instead of zeroing out during brief dropouts.
+        // can_v = false just means the data is stale, not that q0-q3 are gone.
+        float roll_r  = atan2f(2.0f*(can_qw*can_qx + can_qy*can_qz),
+                               1.0f - 2.0f*(can_qx*can_qx + can_qy*can_qy));
+        float pitch_r = asinf(fmaxf(-1.0f, fminf(1.0f,
+                               2.0f*(can_qw*can_qy - can_qz*can_qx))));
+        float yaw_r   = atan2f(2.0f*(can_qw*can_qz + can_qx*can_qy),
+                               1.0f - 2.0f*(can_qy*can_qy + can_qz*can_qz));
+        float can_roll_deg  = roll_r  * 57.2958f;
+        float can_pitch_deg = pitch_r * 57.2958f;
+        float can_yaw_deg   = yaw_r   * 57.2958f;
 
         /* ── Snapshot ESC telemetry ─────────────────────────────────────── */
         ESCTelemetry telem[4];
@@ -869,7 +931,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
-                "0.00,0.00,0.00,0.0000,0.0000,0.0000\r\n",
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f\r\n",
                 (uint32_t)TIME_I2MS(chVTGetSystemTime()), primary_lane,
                 (double)(lane_roll[0]*57.2958f), (double)(lane_pitch[0]*57.2958f),
                 (double)(lane_yaw[0]*57.2958f),
@@ -879,11 +941,42 @@ static THD_FUNCTION(DebugThread, arg)
                 (double)lane_p[1], (double)lane_q[1], (double)lane_r[1],
                 (double)(lane_roll[2]*57.2958f), (double)(lane_pitch[2]*57.2958f),
                 (double)(lane_yaw[2]*57.2958f),
-                (double)lane_p[2], (double)lane_q[2], (double)lane_r[2]);
+                (double)lane_p[2], (double)lane_q[2], (double)lane_r[2],
+                (double)can_roll_deg, (double)can_pitch_deg, (double)can_yaw_deg,
+                (double)can_p_snap, (double)can_q_snap, (double)can_r_snap);
             size_t elen = ekfl_ms.eos;
             if (elen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
                                 (uint8_t *)ekfl_buf, elen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
+        /* ── Emit $IMU line over USB (raw sensor + CAN IMU rates) ─────── */
+        /* Format: $IMU,<ms>,<ax0>,<ay0>,<az0>,<gx0>,<gy0>,<gz0>,<v0>, ...×3,
+         *               <can_p>,<can_q>,<can_r>,<can_v>                       */
+        {
+            static char imu_buf[300];
+            MemoryStream imu_ms;
+            msObjectInit(&imu_ms, (uint8_t *)imu_buf, sizeof(imu_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&imu_ms,
+                "$IMU,%lu,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.5f,%.5f,%.5f,%d\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                (double)imu_ax[0], (double)imu_ay[0], (double)imu_az[0],
+                (double)imu_gx[0], (double)imu_gy[0], (double)imu_gz[0], (int)imu_v[0],
+                (double)imu_ax[1], (double)imu_ay[1], (double)imu_az[1],
+                (double)imu_gx[1], (double)imu_gy[1], (double)imu_gz[1], (int)imu_v[1],
+                (double)imu_ax[2], (double)imu_ay[2], (double)imu_az[2],
+                (double)imu_gx[2], (double)imu_gy[2], (double)imu_gz[2], (int)imu_v[2],
+                (double)can_p_snap, (double)can_q_snap, (double)can_r_snap, (int)can_v);
+            size_t ilen = imu_ms.eos;
+            if (ilen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)imu_buf, ilen, TIME_MS2I(50));
                 chMtxUnlock(&s_usb_write_mtx);
             }
         }

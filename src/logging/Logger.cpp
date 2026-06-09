@@ -39,19 +39,6 @@ extern "C" {
 bool sdc_lld_is_card_inserted(SDCDriver *sdcp) { (void)sdcp; return true; }
 bool sdc_lld_is_write_protected(SDCDriver *sdcp) { (void)sdcp; return false; }
 
-/* ── FatFS reentrancy hooks (FF_FS_REENTRANT = 1) ───────────────────────
- * One binary semaphore per volume (FF_VOLUMES = 1, plus one extra slot).
- * USBCmdThread and LogThread both call FatFS; these serialize their access. */
-static binary_semaphore_t s_ff_bsem[FF_VOLUMES + 1];
-
-int ff_mutex_create(int vol)
-{
-    chBSemObjectInit(&s_ff_bsem[vol], false);  // starts unlocked
-    return 1;
-}
-void ff_mutex_delete(int vol) { (void)vol; }
-int  ff_mutex_take(int vol)   { return chBSemWait(&s_ff_bsem[vol]) == MSG_OK ? 1 : 0; }
-void ff_mutex_give(int vol)   { chBSemSignal(&s_ff_bsem[vol]); }
 }
 
 /* ── SDC configuration: 4-bit bus ───────────────────────────────────────── */
@@ -73,6 +60,7 @@ bool Logger::init()
 
     if (sdcStart(&SDCD1, &sdc_cfg) != MSG_OK) {
         _last_init_err = 1;
+        sdcStop(&SDCD1);
         return false;
     }
     if (sdcConnect(&SDCD1) != HAL_SUCCESS) {

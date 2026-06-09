@@ -2,13 +2,13 @@
 #include "hal.h"
 
 /*
- * CAN bus driver — FDCAN1 at 1000 kbps.
+ * CAN bus driver — FDCAN1 at 500 kbit/s.
  *
  * Device registration:
  *   Call bprl_can_register() in main() before threads_start().
  *   can_drv_init() pre-registers the IMX5 IMU callbacks.
  *
- * IMX5 frame protocol (1000 kbps, standard 11-bit IDs):
+ * IMX5 frame protocol (1 Mbit/s, standard 11-bit IDs):
  *   ID 0x01  CID_INS_QUATN2B — quaternion NED→Body [W,X,Y,Z] (int16 ÷ 10000), 200 Hz
  *            bytes 0-1 = W (q0), 2-3 = X (q1), 4-5 = Y (q2), 6-7 = Z (q3)
  *   ID 0x02  bytes 0-1 = p rate  (int16 ÷ 1000 → rad/s), 2-3 = x accel (÷ 100 → m/s²)
@@ -44,3 +44,26 @@ void can_get_diag(CANDiag &out);
 
 // Start FDCAN1 and register the built-in IMX5 callbacks.
 void can_drv_init(void);
+
+// Read key FDCAN1 hardware registers into out[].  Returns number of entries.
+// Format: out[i] = {name, value}.
+struct CANRegEntry { const char *name; uint32_t value; };
+int can_read_regs(CANRegEntry *out, int max);
+
+// ── ID scanner (diagnostic) ───────────────────────────────────────────────
+#define CAN_SCAN_MAX 48
+
+struct CANScanEntry {
+    uint32_t id;
+    uint32_t count;
+    uint8_t  is_ext;  // 1 = extended frame (29-bit EID), 0 = standard (11-bit SID)
+};
+
+// Start accumulating unique-ID counts.  Resets the buffer each call.
+void can_scan_start(void);
+
+// Stop accumulating.
+void can_scan_stop(void);
+
+// Copy the accumulated entries into `out` (up to `max`).  Returns entry count.
+int  can_scan_get(CANScanEntry *out, int max);

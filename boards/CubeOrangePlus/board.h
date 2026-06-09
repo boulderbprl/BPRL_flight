@@ -48,11 +48,11 @@
 #define LINE_IMU2_DRDY          PAL_LINE(GPIOD, 10U)
 
 /* ── FDCAN1 ─────────────────────────────────────────────────────────────────── */
-#define LINE_CAN1_TX            PAL_LINE(GPIOH, 13U)
-#define LINE_CAN1_RX            PAL_LINE(GPIOH, 14U)
+#define LINE_CAN1_TX            PAL_LINE(GPIOD, 1U)
+#define LINE_CAN1_RX            PAL_LINE(GPIOD, 0U)
 
 /* ── FDCAN2 ─────────────────────────────────────────────────────────────────── */
-#define LINE_CAN2_TX            PAL_LINE(GPIOB, 13U)
+#define LINE_CAN2_TX            PAL_LINE(GPIOB, 6U)
 #define LINE_CAN2_RX            PAL_LINE(GPIOB, 12U)
 
 /* ── SDMMC1 (SD card) ───────────────────────────────────────────────────────── */
