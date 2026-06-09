@@ -1658,6 +1658,8 @@ def main():
 
     logs_sub.add_parser("erase",   help="Erase completed log files from SD card")
 
+    sub.add_parser("log-status", help="Query SD card logger status (ready / error code)")
+
     cmd_p = sub.add_parser("cmd", help="Send a raw USB command and print the response")
     cmd_p.add_argument("raw", help="Command string to send (e.g. \"LOG,status\")")
 
@@ -1708,6 +1710,19 @@ def main():
 
         elif args.command == "calibrate":
             cmd_calibrate(ser, args)
+
+        elif args.command == "log-status":
+            ser.reset_input_buffer()
+            send_cmd(ser, "LOG,status")
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                resp = _read_line(ser, timeout=deadline - time.monotonic())
+                if resp is None:
+                    print("(no response)")
+                    break
+                if resp.startswith("LOG,STATUS"):
+                    print(resp)
+                    break
 
         elif args.command == "cmd":
             ser.reset_input_buffer()

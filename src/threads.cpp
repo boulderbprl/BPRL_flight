@@ -559,12 +559,17 @@ static void usb_cmd_dispatch(const char *line)
             static const char *const err_str[] = {
                 "not_tried", "sdcStart", "sdcConnect", "f_mount", "f_open", "ok"
             };
-            uint8_t e = logger.last_init_err();
+            uint8_t e  = logger.last_init_err();
+            uint8_t ff = logger.last_ff_err();
             const char *es = (e <= 5) ? err_str[e] : "unknown";
             chMtxLock(&s_usb_write_mtx);
             if (logger.is_ready()) {
                 chprintf((BaseSequentialStream *)&SDU1,
                          "LOG,STATUS,ready,file=%s\r\n", logger.current_path());
+            } else if (ff != 0) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,not_ready,last_err=%u(%s),ff=%u\r\n",
+                         (unsigned)e, es, (unsigned)ff);
             } else {
                 chprintf((BaseSequentialStream *)&SDU1,
                          "LOG,STATUS,not_ready,last_err=%u(%s)\r\n", (unsigned)e, es);

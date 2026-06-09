@@ -68,11 +68,15 @@ bool Logger::init()
         sdcStop(&SDCD1);
         return false;
     }
-    if (f_mount(&s_fs, "/", 1) != FR_OK) {
-        _last_init_err = 3;
-        sdcDisconnect(&SDCD1);
-        sdcStop(&SDCD1);
-        return false;
+    {
+        FRESULT fr = f_mount(&s_fs, "/", 1);
+        if (fr != FR_OK) {
+            _last_init_err = 3;
+            _last_ff_err   = (uint8_t)fr;
+            sdcDisconnect(&SDCD1);
+            sdcStop(&SDCD1);
+            return false;
+        }
     }
 
     f_mkdir("/LOGS");  // ignore error if directory already exists
