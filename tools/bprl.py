@@ -1477,6 +1477,8 @@ def cmd_logs_download(ser: serial.Serial, args):
 
     if received == total:
         console.print(f"[green]Saved {out_path} ({received:,} bytes).")
+        if getattr(args, "decode", False):
+            _decode_log(out_path)
     else:
         console.print(f"[yellow]Partial download: {received}/{total} bytes.")
 
@@ -1545,15 +1547,15 @@ _BODY_SIZES = {
 }
 
 
-def cmd_logs_decode(_, args):
-    src = Path(args.decode_file)
+def _decode_log(src: Path, out_dir: Path | None = None) -> None:
     if not src.exists():
         console.print(f"[red]File not found: {src}")
         return
 
     stem       = src.stem
-    imu_path   = src.with_name(f"{stem}_imu.csv")
-    state_path = src.with_name(f"{stem}_state.csv")
+    dest       = out_dir if out_dir is not None else Path.cwd()
+    imu_path   = dest / f"{stem}_imu.csv"
+    state_path = dest / f"{stem}_state.csv"
 
     imu_rows   = []
     state_rows = []
@@ -1616,6 +1618,11 @@ def cmd_logs_decode(_, args):
         console.print(f"[dim]Skipped {skipped} non-sync bytes.")
 
 
+def cmd_logs_decode(_, args):
+    out_dir = Path(args.out_dir) if args.out_dir else None
+    _decode_log(Path(args.decode_file), out_dir)
+
+
 # ── Argument parsing and dispatch ─────────────────────────────────────────────
 
 def main():
@@ -1652,9 +1659,13 @@ def main():
     dl_p = logs_sub.add_parser("download", help="Download a log file")
     dl_p.add_argument("file", nargs="?", default=None,
                       help="Filename (default: latest completed log)")
+    dl_p.add_argument("--decode", action="store_true",
+                      help="Decode to CSV after downloading")
 
     dec_p = logs_sub.add_parser("decode", help="Decode a local binary log to CSV")
     dec_p.add_argument("decode_file", help="Path to .BIN file")
+    dec_p.add_argument("--out-dir", default=None,
+                       help="Directory for output CSVs (default: current directory)")
 
     logs_sub.add_parser("erase",   help="Erase completed log files from SD card")
 

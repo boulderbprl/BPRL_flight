@@ -2,7 +2,7 @@
 #include "hal.h"
 
 /*
- * CAN bus driver — FDCAN1 at 500 kbit/s.
+ * CAN bus driver — FDCAN1 at 1 Mbit/s.
  *
  * Device registration:
  *   Call bprl_can_register() in main() before threads_start().

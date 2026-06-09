@@ -3,13 +3,13 @@
 #include <cstring>
 
 /*
- * FDCAN1 bit timing — 500 kbit/s, PLL2Q = 80 MHz.
- * BRP=10, TSEG1=13, TSEG2=2 → 16 Tq/bit, 87.5% sample point.
- * 80 MHz / (10 × 16) = 500 kbit/s.
- * NBTP: NSJW=0, NBRP=9, NTSEG1=12, NTSEG2=1.
+ * FDCAN1 bit timing — 1 Mbit/s, PLL2Q = 80 MHz.
+ * BRP=5, TSEG1=13, TSEG2=2 → 16 Tq/bit, 87.5% sample point.
+ * 80 MHz / (5 × 16) = 1 Mbit/s.
+ * NBTP: NSJW=0, NBRP=4, NTSEG1=12, NTSEG2=1.
  */
 static const CANConfig can_cfg = {
-    0x00090C01,   // NBTP
+    0x00040C01,   // NBTP
     0x00000000,   // DBTP: unused (classical CAN)
     0x00000000,   // CCCR: normal mode, FDOE=0
     0x00000000,   // TEST
