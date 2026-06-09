@@ -54,7 +54,7 @@ int  ff_mutex_take(int vol)   { return chBSemWait(&s_ff_bsem[vol]) == MSG_OK ? 1
 void ff_mutex_give(int vol)   { chBSemSignal(&s_ff_bsem[vol]); }
 }
 
-/* ── SDC configuration: 4-bit bus, no clock slowdown ───────────────────── */
+/* ── SDC configuration: 4-bit bus ───────────────────────────────────────── */
 static const SDCConfig sdc_cfg = {
     SDC_MODE_4BIT,
     0U
@@ -72,13 +72,16 @@ bool Logger::init()
     _sync_count = 0;
 
     if (sdcStart(&SDCD1, &sdc_cfg) != MSG_OK) {
+        _last_init_err = 1;
         return false;
     }
     if (sdcConnect(&SDCD1) != HAL_SUCCESS) {
+        _last_init_err = 2;
         sdcStop(&SDCD1);
         return false;
     }
     if (f_mount(&s_fs, "/", 1) != FR_OK) {
+        _last_init_err = 3;
         sdcDisconnect(&SDCD1);
         sdcStop(&SDCD1);
         return false;
@@ -90,12 +93,14 @@ bool Logger::init()
     find_next_log_index(path, sizeof(path));
 
     if (f_open(&s_file, path, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        _last_init_err = 4;
         f_mount(nullptr, "/", 0);
         sdcDisconnect(&SDCD1);
         sdcStop(&SDCD1);
         return false;
     }
 
+    _last_init_err = 5;
     _open = true;
     strncpy(_current_path, path, sizeof(_current_path) - 1);
     write_schema_header();

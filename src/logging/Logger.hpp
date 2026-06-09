@@ -24,6 +24,8 @@ public:
     bool init();
     bool is_ready() const;
     const char* current_path() const { return _open ? _current_path : nullptr; }
+    uint8_t last_init_err() const { return _last_init_err; }
+    // Error codes: 0=not tried, 1=sdcStart, 2=sdcConnect, 3=f_mount, 4=f_open, 5=ok
 
     template<typename T>
     bool write(uint8_t msg_id, const T &msg)
@@ -45,8 +47,9 @@ private:
     uint8_t  _buf[BUF_SIZE];
     size_t   _head        = 0;
     size_t   _tail        = 0;
-    bool     _open        = false;
-    uint32_t _sync_count  = 0;
+    bool     _open          = false;
+    uint8_t  _last_init_err = 0;
+    uint32_t _sync_count    = 0;
     char     _current_path[32] = {};
 
     bool   ring_write(const void *data, size_t n);

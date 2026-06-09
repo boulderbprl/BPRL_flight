@@ -23,11 +23,24 @@
 #define MAX_CAN_DEVICES 8
 typedef void (*CANCallback)(const CANRxFrame &frame, void *ctx);
 
+struct CANDiag {
+    uint32_t total_rx;     // total frames received by CANThread (any ID)
+    uint32_t dispatched;   // frames that matched a registered callback
+    uint32_t last_sid;     // SID of most recent frame (11-bit standard ID field)
+    uint32_t last_eid;     // EID of most recent frame (18-bit extension, 0 if std)
+    uint8_t  last_eff;     // 1 = extended frame (29-bit ID), 0 = standard (11-bit)
+    uint8_t  last_dlc;
+    uint8_t  last_data[8];
+};
+
 // Register a handler for a specific standard CAN ID.
 void bprl_can_register(uint32_t id, CANCallback cb, void *ctx);
 
 // Dispatch one received frame to its registered handler (called by CANThread).
 void can_dispatch(const CANRxFrame &frame);
+
+// Copy out current diagnostic counters (safe to call from any thread).
+void can_get_diag(CANDiag &out);
 
 // Start FDCAN1 and register the built-in IMX5 callbacks.
 void can_drv_init(void);

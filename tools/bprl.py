@@ -1262,6 +1262,9 @@ def main():
 
     logs_sub.add_parser("erase",   help="Erase completed log files from SD card")
 
+    cmd_p = sub.add_parser("cmd", help="Send a raw USB command and print the response")
+    cmd_p.add_argument("raw", help="Command string to send (e.g. \"LOG,status\")")
+
     cal_p = sub.add_parser("calibrate", help="Collect IMU static bias calibration and write to flash")
     cal_p.add_argument("--duration", type=int, default=30,
                        help="Collection time in seconds (default: 30)")
@@ -1297,6 +1300,19 @@ def main():
 
         elif args.command == "calibrate":
             cmd_calibrate(ser, args)
+
+        elif args.command == "cmd":
+            ser.reset_input_buffer()
+            send_cmd(ser, args.raw)
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                resp = _read_line(ser, timeout=deadline - time.monotonic())
+                if resp is None:
+                    print("(no response)")
+                    break
+                if not resp.startswith("$"):
+                    print(resp)
+                    break
 
         elif args.command == "logs":
             if args.logs_cmd == "list":

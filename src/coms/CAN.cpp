@@ -22,6 +22,8 @@ struct CANDevice {
 static CANDevice can_table[MAX_CAN_DEVICES];
 static int       num_can_devices = 0;
 
+static volatile CANDiag s_diag = {};
+
 void bprl_can_register(uint32_t id, CANCallback cb, void *ctx)
 {
     if (num_can_devices < MAX_CAN_DEVICES) {
@@ -31,11 +33,38 @@ void bprl_can_register(uint32_t id, CANCallback cb, void *ctx)
 
 void can_dispatch(const CANRxFrame &frame)
 {
+    const bool is_ext    = frame.common.XTD;
+    const uint32_t match = is_ext ? frame.ext.EID : frame.std.SID;
+
+    // Record every frame that reaches CANThread, regardless of ID.
+    s_diag.total_rx++;
+    s_diag.last_sid  = frame.std.SID;
+    s_diag.last_eff  = is_ext ? 1U : 0U;
+    s_diag.last_eid  = is_ext ? frame.ext.EID : 0U;
+    s_diag.last_dlc  = frame.DLC;
+    for (int i = 0; i < 8; i++) s_diag.last_data[i] = frame.data8[i];
+
+    // Match on SID for standard frames, full EID for extended frames.
+    // IMX5 may send either; this handles both without code changes.
+    bool matched = false;
     for (int i = 0; i < num_can_devices; i++) {
-        if (can_table[i].id == frame.std.SID) {
+        if (can_table[i].id == match) {
             can_table[i].callback(frame, can_table[i].ctx);
+            matched = true;
         }
     }
+    if (matched) s_diag.dispatched++;
+}
+
+void can_get_diag(CANDiag &out)
+{
+    out.total_rx   = s_diag.total_rx;
+    out.dispatched = s_diag.dispatched;
+    out.last_sid   = s_diag.last_sid;
+    out.last_eid   = s_diag.last_eid;
+    out.last_eff   = s_diag.last_eff;
+    out.last_dlc   = s_diag.last_dlc;
+    for (int i = 0; i < 8; i++) out.last_data[i] = s_diag.last_data[i];
 }
 
 // ── IMX5 callback ────────────────────────────────────────────────────────────

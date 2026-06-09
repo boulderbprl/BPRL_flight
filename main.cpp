@@ -97,10 +97,9 @@ int main(void)
         /* .log     = */ { TIME_US2I(10000), TIME_US2I(20000) },
     };
 
-    /* CAN driver not started — CANThread is not running, so leaving the
-     * FDCAN peripheral uninitialised avoids spurious RxFIFO-overflow
-     * interrupts flooding the system when a CAN bus is attached. */
     motor_output_init();
+    can_drv_init();        // start FDCAN1, register IMX5 callbacks (Phase 3)
+    radio_input_init();    // start USART3 CRSF receiver at 420000 baud (Phase 4)
     threads_start(kRates);
 
     /* Main thread: low-priority idle, feeds IWDG. */

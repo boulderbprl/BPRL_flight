@@ -2,7 +2,7 @@
 #include "ch.h"
 #include "hal.h"
 #include "src/FlightState.hpp"
-#include "src/coms/DShot.hpp"
+#include "src/coms/DShot.hpp"   // ESCTelemetry
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -40,7 +40,7 @@ extern mutex_t state_mtx;
 extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
 extern float   g_input[4];           // InputIdx::*  (thrust, roll/pitch/yaw targets)
-extern int32_t g_output[4];          // motor PWM µs [FR, RL, FL, RR]
+extern int32_t g_output[4];          // motor output 0–1000 [FR, RL, FL, RR]
 extern bool    g_armed;
 
 extern mutex_t imu_mtx;
@@ -58,11 +58,11 @@ extern ESCTelemetry g_esc_telem[4]; // [FR, RL, FL, RR] — written by DShot ISR
 /* ── Motor test (always built) ───────────────────────────────────────────────
  * Set by USBCmdThread in response to "MT,<motor>,<pct>" USB commands.
  * ControlThread checks g_motor_test_active each tick; if set it bypasses the
- * PID+mixer and calls dshot_write(g_motor_test_cmd) directly.
+ * PID+mixer and calls motor_output_write(g_motor_test_cmd) directly.
  * Safety: USBCmdThread refuses to arm test mode while g_armed is true.      */
 extern mutex_t   motor_test_mtx;
 extern bool      g_motor_test_active;
-extern uint16_t  g_motor_test_cmd[4]; // DShot values [FR, RL, FL, RR]
+extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
 
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
  * All rates live in main.cpp.  Change them there to retune loop timing.    */

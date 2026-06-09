@@ -10,11 +10,11 @@ void MotorMixer::update(const float cmds[3], float thrust,
                         int32_t out[4]) const
 {
     if (!armed || should_disarm(state)) {
-        for (int i = 0; i < 4; i++) out[i] = PWM_IDLE;
+        for (int i = 0; i < 4; i++) out[i] = 0;
         return;
     }
 
-    const float thr = (float)PWM_MIN + thrust * (float)(PWM_MAX - PWM_MIN);
+    const float thr = (float)PWM_IDLE + thrust * (float)(PWM_MAX - PWM_IDLE);
     const float r   = cmds[0] * ATT_SCALE;
     const float p   = cmds[1] * ATT_SCALE;
     const float y   = cmds[2] * YAW_SCALE;

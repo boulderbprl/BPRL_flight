@@ -57,8 +57,8 @@ static bool      g_cal_valid = false;
 
 /* ── Motor test (always built) ───────────────────────────────────────────── */
 MUTEX_DECL(motor_test_mtx);
-bool     g_motor_test_active = false;
-uint16_t g_motor_test_cmd[4] = {};
+bool    g_motor_test_active = false;
+int32_t g_motor_test_cmd[4] = {};
 
 /* Serialises all USB CDC writes between USBCmdThread and DebugThread.
  * chprintf is NOT atomic — it puts characters one at a time, so concurrent
@@ -282,6 +282,7 @@ static THD_FUNCTION(StateEstThread, arg)
  * ControlThread — 400 Hz  NORMALPRIO+20
  * Cascade PID → MotorMixer → motor output.
  * ══════════════════════════════════════════════════════════════════════════ */
+
 static THD_FUNCTION(ControlThread, arg)
 {
     chRegSetThreadName("ctrl");
@@ -291,15 +292,15 @@ static THD_FUNCTION(ControlThread, arg)
     while (true) {
         /* ── Motor test bypass: skip PID/mixer, drive ESCs directly ──────── */
         {
-            bool     test_active;
-            uint16_t test_cmd[4];
+            bool    test_active;
+            int32_t test_cmd[4];
             chMtxLock(&motor_test_mtx);
             test_active = g_motor_test_active;
             if (test_active) memcpy(test_cmd, g_motor_test_cmd, sizeof(test_cmd));
             chMtxUnlock(&motor_test_mtx);
 
             if (test_active) {
-                dshot_write(test_cmd);
+                motor_output_write(test_cmd);
                 chMtxLock(&state_mtx);
                 memset(g_output, 0, sizeof(g_output));
                 chMtxUnlock(&state_mtx);
@@ -308,16 +309,33 @@ static THD_FUNCTION(ControlThread, arg)
             }
         }
 
-        /* ── Disarmed idle path (no radio, no state estimator running) ──────
-         * With only ControlThread + USBCmdThread active, g_armed is always
-         * false and all state is zero.  Skip the full PID/mixer path and
-         * send DShot 0 (disarm/idle) directly so the ESC always receives a
-         * valid, uninterrupted stream of packets at 400 Hz.  The motor-test
-         * bypass above handles actual spin-up via USB commands. */
-        {
-            static const uint16_t kIdle[4] = {0U, 0U, 0U, 0U};
-            dshot_write(kIdle);
-        }
+        /* ── Full cascade: EKF state → PID → mixer → DShot ─────────────── */
+        float ctrl_state[6];
+        bool  armed;
+        float input[4];
+        chMtxLock(&state_mtx);
+        ctrl_state[0] = g_euler[0];             // roll  (rad)
+        ctrl_state[1] = g_euler[1];             // pitch (rad)
+        ctrl_state[2] = g_euler[2];             // yaw   (rad)
+        ctrl_state[3] = g_state[StateIdx::P];   // p (rad/s)
+        ctrl_state[4] = g_state[StateIdx::Q];   // q (rad/s)
+        ctrl_state[5] = g_state[StateIdx::R];   // r (rad/s)
+        armed = g_armed;
+        memcpy(input, g_input, sizeof(input));
+        if (!armed) att_ctrl.reset_all();
+        chMtxUnlock(&state_mtx);
+
+        float torque_cmds[3];
+        att_ctrl.update(ctrl_state, input, torque_cmds);
+        const float thrust = att_ctrl.compute_throttle(ctrl_state, input);
+
+        int32_t motor_out[4];
+        mixer.update(torque_cmds, thrust, armed, ctrl_state, motor_out);
+        motor_output_write(motor_out);
+
+        chMtxLock(&state_mtx);
+        memcpy(g_output, motor_out, sizeof(g_output));
+        chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
@@ -375,21 +393,6 @@ static THD_FUNCTION(HeartbeatThread, arg)
         /* LED: 200 ms flash every 2 s (every 10th 200 ms tick). */
         if (tick % 10 == 0) palSetLine(LINE_LED_ACTIVITY);
         if (tick % 10 == 1) palClearLine(LINE_LED_ACTIVITY);
-
-        /* Print DShot status every 2 s (every 10th tick at 5 Hz). */
-        if (tick % 10 == 0) {
-            DShotDiag d = {};
-            dshot_get_diag(&d);
-            char buf[128];
-            int n = chsnprintf(buf, sizeof(buf),
-                "$DSHOT,%lu,tc=%u/%u,cc=%u/%u,edges=%u/%u/%u/%u\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
-                (unsigned)d.dma_tc[0], (unsigned)d.dma_tc[1],
-                (unsigned)d.cc_isr[0], (unsigned)d.cc_isr[1],
-                (unsigned)d.edge_cnt[0], (unsigned)d.edge_cnt[1],
-                (unsigned)d.edge_cnt[2], (unsigned)d.edge_cnt[3]);
-            chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)buf, (size_t)n, TIME_MS2I(50));
-        }
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, TIME_MS2I(200)));
         tick++;
@@ -539,9 +542,7 @@ static void usb_cmd_dispatch(const char *line)
             chMtxUnlock(&s_usb_write_mtx);
             return;
         }
-        uint16_t dv = (pct == 0) ? 0U
-                                  : (uint16_t)(48U + (uint32_t)pct * 1999U / 100U);
-        if (dv > 2047U) dv = 2047U;
+        int32_t dv = pct * 10;  // 0–100% → 0–1000
         chMtxLock(&motor_test_mtx);
         g_motor_test_active = true;
         memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
@@ -553,7 +554,22 @@ static void usb_cmd_dispatch(const char *line)
 
     } else if (strncmp(line, "LOG,", 4) == 0) {
         const char *rest = line + 4;
-        if (strcmp(rest, "list") == 0) {
+        if (strcmp(rest, "status") == 0) {
+            static const char *const err_str[] = {
+                "not_tried", "sdcStart", "sdcConnect", "f_mount", "f_open", "ok"
+            };
+            uint8_t e = logger.last_init_err();
+            const char *es = (e <= 5) ? err_str[e] : "unknown";
+            chMtxLock(&s_usb_write_mtx);
+            if (logger.is_ready()) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,ready,file=%s\r\n", logger.current_path());
+            } else {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,not_ready,last_err=%u(%s)\r\n", (unsigned)e, es);
+            }
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "list") == 0) {
             usb_log_list();
         } else if (strncmp(rest, "get,", 4) == 0) {
             usb_log_get(rest + 4);
@@ -671,6 +687,20 @@ static void usb_cmd_dispatch(const char *line)
         chprintf((BaseSequentialStream *)&SDU1,
                  "CAN,STATUS,psr=0x%08x,ecr=0x%08x,rxf0s=0x%08x,cccr=0x%08x\r\n",
                  (unsigned)psr, (unsigned)ecr, (unsigned)rxf0s, (unsigned)cccr);
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,diag") == 0) {
+        CANDiag d = {};
+        can_get_diag(d);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "CAN,DIAG,total_rx=%lu,dispatched=%lu,"
+                 "last_sid=0x%03x,last_eid=0x%08lx,last_eff=%u,"
+                 "last_dlc=%u,last_data=%02x%02x%02x%02x%02x%02x%02x%02x\r\n",
+                 (uint32_t)d.total_rx, (uint32_t)d.dispatched,
+                 (unsigned)d.last_sid, (uint32_t)d.last_eid, (unsigned)d.last_eff,
+                 (unsigned)d.last_dlc,
+                 d.last_data[0], d.last_data[1], d.last_data[2], d.last_data[3],
+                 d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7]);
         chMtxUnlock(&s_usb_write_mtx);
     }
 }
@@ -948,31 +978,26 @@ static THD_FUNCTION(LogThread, arg)
 /* ── Thread launcher (called from main) ──────────────────────────────────── */
 void threads_start(const ThreadRates &rates)
 {
-    /*
-     * Minimal configuration: only the motor output thread and the USB debug
-     * interface.  All other threads are intentionally omitted.
-     *
-     * Why this matters for bidirectional DShot:
-     *   SPIThread runs SPI DMA transfers at 1 kHz.  Each SPI DMA completion
-     *   ISR fires at a priority above the TIM1_CC / TIM4 edge-capture IRQs,
-     *   preempting them mid-GCR-frame.  At 750 kHz GCR a single 5 µs ISR
-     *   preemption can overwrite CCR before we read it.  Removing all sources
-     *   of high-frequency ISR contention lets the edge-capture ISRs run
-     *   uninterrupted within the 1.33 µs GCR bit window.
-     *
-     * ControlThread: calls dshot_write() at 500 Hz.  Handles both the motor-
-     *   test bypass (USB MT commands) and the normal PID/mixer path.  All
-     *   shared state (g_state, g_euler, g_input) defaults to zero — safe
-     *   because with g_armed=false the mixer outputs zeros, and the motor-test
-     *   bypass bypasses the mixer entirely.
-     *
-     * USBCmdThread: MT,* (motor test), DSHOT,diag, BOOT, CAL,* commands.
-     *   Event-driven; near-zero overhead when no USB host is connected.
-     */
+    // Priority ordering (highest first):
+    //   SPIThread      +30  1 kHz IMU reads
+    //   CANThread      +28  event-driven CAN RX
+    //   StateEstThread +25  500 Hz EKF
+    //   ControlThread  +20  400 Hz PID/mixer/DShot
+    //   RadioThread    +10  50 Hz RC input
+    //   HeartbeatThread -5  LED + DShot diag
+    //   DebugThread    -10  10 Hz $TEL/$EKFL USB stream
+    //   USBCmdThread   -20  event-driven USB commands
+
+    chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
+    chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
+    chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
-    chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
+    chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif
+    chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
+
+    chThdCreateStatic(waLog, sizeof(waLog), NORMALPRIO - 15, LogThread, (void *)&rates.log);
 }

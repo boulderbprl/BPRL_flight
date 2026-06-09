@@ -3,7 +3,7 @@
 #include <cstdint>
 
 /*
- * CRSF (Crossfire / ELRS) RC input parser — USART3 (TELEM1 port), PD9 RX, AF7
+ * CRSF (Crossfire / ELRS) RC input parser — USART2 (TELEM1 port), PD6 RX / PD5 TX, AF7
  *
  * Frame: variable length ≤ 64 bytes
  *   [sync=0xC8][len][type][payload...][CRC8]
