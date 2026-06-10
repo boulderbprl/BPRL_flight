@@ -39,22 +39,9 @@ extern "C" {
 bool sdc_lld_is_card_inserted(SDCDriver *sdcp) { (void)sdcp; return true; }
 bool sdc_lld_is_write_protected(SDCDriver *sdcp) { (void)sdcp; return false; }
 
-/* ── FatFS reentrancy hooks (FF_FS_REENTRANT = 1) ───────────────────────
- * One binary semaphore per volume (FF_VOLUMES = 1, plus one extra slot).
- * USBCmdThread and LogThread both call FatFS; these serialize their access. */
-static binary_semaphore_t s_ff_bsem[FF_VOLUMES + 1];
-
-int ff_mutex_create(int vol)
-{
-    chBSemObjectInit(&s_ff_bsem[vol], false);  // starts unlocked
-    return 1;
-}
-void ff_mutex_delete(int vol) { (void)vol; }
-int  ff_mutex_take(int vol)   { return chBSemWait(&s_ff_bsem[vol]) == MSG_OK ? 1 : 0; }
-void ff_mutex_give(int vol)   { chBSemSignal(&s_ff_bsem[vol]); }
 }
 
-/* ── SDC configuration: 4-bit bus, no clock slowdown ───────────────────── */
+/* ── SDC configuration: 4-bit bus ───────────────────────────────────────── */
 static const SDCConfig sdc_cfg = {
     SDC_MODE_4BIT,
     0U
@@ -72,16 +59,24 @@ bool Logger::init()
     _sync_count = 0;
 
     if (sdcStart(&SDCD1, &sdc_cfg) != MSG_OK) {
+        _last_init_err = 1;
+        sdcStop(&SDCD1);
         return false;
     }
     if (sdcConnect(&SDCD1) != HAL_SUCCESS) {
+        _last_init_err = 2;
         sdcStop(&SDCD1);
         return false;
     }
-    if (f_mount(&s_fs, "/", 1) != FR_OK) {
-        sdcDisconnect(&SDCD1);
-        sdcStop(&SDCD1);
-        return false;
+    {
+        FRESULT fr = f_mount(&s_fs, "/", 1);
+        if (fr != FR_OK) {
+            _last_init_err = 3;
+            _last_ff_err   = (uint8_t)fr;
+            sdcDisconnect(&SDCD1);
+            sdcStop(&SDCD1);
+            return false;
+        }
     }
 
     f_mkdir("/LOGS");  // ignore error if directory already exists
@@ -90,12 +85,14 @@ bool Logger::init()
     find_next_log_index(path, sizeof(path));
 
     if (f_open(&s_file, path, FA_WRITE | FA_CREATE_NEW) != FR_OK) {
+        _last_init_err = 4;
         f_mount(nullptr, "/", 0);
         sdcDisconnect(&SDCD1);
         sdcStop(&SDCD1);
         return false;
     }
 
+    _last_init_err = 5;
     _open = true;
     strncpy(_current_path, path, sizeof(_current_path) - 1);
     write_schema_header();
@@ -192,17 +189,19 @@ size_t Logger::ring_read(void *out, size_t max_n)
     return n;
 }
 
-/* ── Schema header: one FMT record per log type ─────────────────────────── */
+/* ── Schema header: one FMT record per log type (ArduPilot standard) ────── */
 
 struct __attribute__((packed)) LogFmtHdr {
-    uint8_t  sync1;     // 0xA3
-    uint8_t  sync2;     // 0x95
-    uint8_t  fmt_id;    // LOG_MSG_FMT = 0x80
-    uint8_t  type;      // msg_id being described
-    uint16_t length;    // body size in bytes (LE)
-    char     name[4];   // short type name
-    char     labels[64];// comma-separated field names
+    uint8_t sync1;      // 0xA3
+    uint8_t sync2;      // 0x95
+    uint8_t fmt_id;     // LOG_MSG_FMT = 0x80
+    uint8_t type;       // msg_id being described
+    uint8_t length;     // total data record size INCLUDING 3-byte header = 3 + body_size
+    char    name[4];    // short type name, space-padded
+    char    format[16]; // ArduPilot format codes: Q=uint64 H=uint16 f=float i=int32 h=int16 B=uint8
+    char    labels[64]; // comma-separated field names; TimeUS must be first for UAV Log Viewer
 };
+// Total FMT record size: 89 bytes
 
 bool Logger::write_schema_header()
 {
@@ -212,8 +211,9 @@ bool Logger::write_schema_header()
         hdr.sync2  = 0x95U;
         hdr.fmt_id = LOG_MSG_FMT;
         hdr.type   = kLogDefs[i].msg_id;
-        hdr.length = static_cast<uint16_t>(kLogDefs[i].body_size);
+        hdr.length = (uint8_t)(3U + kLogDefs[i].body_size);
         strncpy(hdr.name,   kLogDefs[i].name,   sizeof(hdr.name));
+        strncpy(hdr.format, kLogDefs[i].fmt,    sizeof(hdr.format) - 1U);
         strncpy(hdr.labels, kLogDefs[i].labels, sizeof(hdr.labels) - 1U);
         ring_write(&hdr, sizeof(hdr));
     }

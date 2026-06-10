@@ -12,8 +12,9 @@
  *     RL [1]       RR [3]
  *
  * ESC channels: ch0=FR, ch1=RL, ch2=FL, ch3=RR
- * PWM range: 1000 µs (idle) … 1950 µs (full throttle)
- * Safety: all motors → PWM_IDLE when disarmed or |angle| > ~80°
+ * Output range: 0 (disarmed/hardcoded) … 1000 (100% throttle), protocol-agnostic.
+ * PWM_IDLE: armed idle spin at zero stick (base throttle). PWM_MIN: correction floor
+ * (can be below IDLE). Safety: all motors → 0 when disarmed or |angle| > ~80°
  */
 class MotorMixer {
 public:
@@ -21,16 +22,16 @@ public:
 
     void update(const float attitude_cmds[3], float thrust,
                 bool armed, const float state[],
-                int32_t out_pwm[4]) const;
+                int32_t out[4]) const;
 
     static bool should_disarm(const float state[]);
 
-    static constexpr int32_t PWM_IDLE = 1000;
-    static constexpr int32_t PWM_MIN  = 1100;
-    static constexpr int32_t PWM_MAX  = 1950;
+    static constexpr int32_t PWM_MIN  = 50;   // minimum during attitude corrections
+    static constexpr int32_t PWM_IDLE = 150;  // armed idle spin (zero stick, level)
+    static constexpr int32_t PWM_MAX  = 900;  // maximum throttle ceiling
 
 private:
-    static constexpr float ATT_SCALE = 300.0f;
-    static constexpr float YAW_SCALE = 150.0f;
+    static constexpr float ATT_SCALE = 350.0f;
+    static constexpr float YAW_SCALE = 175.0f;
     static constexpr float MAX_ANGLE = 1.396f;  // ~80°
 };

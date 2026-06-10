@@ -4,11 +4,11 @@
 #include <algorithm>
 
 AttitudeController::AttitudeController()
-    : _roll_att  (4.50f, 0.00f, 0.000f, 0.5f, 30.0f)
-    , _pitch_att (4.50f, 0.00f, 0.000f, 0.5f, 30.0f)
-    , _roll_rate (0.11f, 0.09f, 0.003f, 0.5f, 30.0f)
-    , _pitch_rate(0.11f, 0.09f, 0.003f, 0.5f, 30.0f)
-    , _yaw_rate  (0.10f, 0.02f, 0.000f, 0.5f, 30.0f)
+    : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
+    , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
+    , _roll_rate (0.065f, 0.09f, 0.002f, 0.5f, 30.0f)
+    , _pitch_rate(0.065f, 0.09f, 0.002f, 0.5f, 30.0f)
+    , _yaw_rate  (0.065f, 0.02f, 0.000f, 0.5f, 30.0f)
 {}
 
 void AttitudeController::update(const float state[], const float input[],

@@ -586,7 +586,14 @@
  * @note    The default is @p FALSE.
  */
 #if !defined(CH_DBG_ENABLE_ASSERTS)
+/* Enable assertions in debug builds so dmaStreamAlloc failures and other
+ * silent null-pointer issues produce a visible system halt instead of a
+ * silent crash → hang → IWDG reset loop. */
+#ifdef BPRL_DEBUG
+#define CH_DBG_ENABLE_ASSERTS               TRUE
+#else
 #define CH_DBG_ENABLE_ASSERTS               FALSE
+#endif
 #endif
 
 /**

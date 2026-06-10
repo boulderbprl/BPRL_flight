@@ -1,6 +1,6 @@
 /*
  * ffconf.h — FatFS configuration for BPRL flight logging.
- * Keep it minimal: sequential binary writes, no LFN, no timestamps, no re-entrancy.
+ * Keep it minimal: sequential binary writes, no LFN, no timestamps.
  * To add a new option: copy the relevant define from ext/fatfs/source/_ffconf.h.
  */
 
@@ -54,4 +54,4 @@
 #define FF_FS_LOCK          0
 #define FF_FS_REENTRANT     1       /* USBCmdThread + LogThread both use FatFS */
 #define FF_FS_TIMEOUT       1000
-#define FF_SYNC_t           int     /* index only; actual sync objects in Logger.cpp */
+#define FF_SYNC_t           void *          /* opaque handle; cast to semaphore_t * in fatfs_syscall.c */

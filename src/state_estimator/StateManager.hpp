@@ -35,7 +35,7 @@ public:
     static constexpr int NUM_LANES = 3;
 
     // IMX5 / mocap / gravity measurement noise variances — tunable.
-    static constexpr float R_QUAT      = 1e-4f;   // IMX5 quaternion component variance
+    static constexpr float R_QUAT      = 1e-3f;   // IMX5 quaternion component variance
     static constexpr float R_GRAVITY   = 0.5f;    // accel gravity-vector variance (m/s²)²
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
     static constexpr float R_MOCAP_VEL = 1e-2f;   // mocap NED velocity variance (m/s)²
@@ -60,6 +60,11 @@ public:
     float pitch()   const;
     float yaw()     const;
 
+    // Per-lane accessors — called by StateEstThread only (no mutex needed).
+    void get_lane_euler(int lane, float& roll, float& pitch, float& yaw) const;
+    void get_lane_pqr  (int lane, float& p,    float& q,    float& r)    const;
+    int  primary_lane  () const { return _primary; }
+
 private:
     EKF  _lanes[NUM_LANES];
     int  _primary;
@@ -77,6 +82,9 @@ private:
 
     // Lowpass-filtered uvw_dot output
     float _ud_filt, _vd_filt, _wd_filt;
+
+    // Per-lane bias-corrected angular rates (updated each update() call)
+    float _lane_p[NUM_LANES], _lane_q[NUM_LANES], _lane_r[NUM_LANES];
 
     int  _select_primary() const;
 };

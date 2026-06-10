@@ -23,11 +23,13 @@
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
 #include "src/usb_serial.hpp"
+#include "src/coms/CalFlash.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
 #include <cstring>
 #include <cstdio>
+#include <cmath>
 
 /* ── Shared state definitions ────────────────────────────────────────────── */
 
@@ -36,13 +38,17 @@ float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
 float   g_input[4]           = {};
 int32_t g_output[4]          = {};
+float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
 bool    g_armed              = false;
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
 
 MUTEX_DECL(can_imu_mtx);
-CANIMURaw g_can_imu = {};
+CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0 before first frame
+
+MUTEX_DECL(strainRate_mtx);
+StrainRateRaw g_strain_rate = {};
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
@@ -50,10 +56,14 @@ MocapRaw  g_mocap   = {};
 MUTEX_DECL(esc_mtx);
 ESCTelemetry g_esc_telem[4] = {};
 
+/* ── Calibration data loaded from flash at boot ──────────────────────────── */
+static CalibData g_cal = {};
+static bool      g_cal_valid = false;
+
 /* ── Motor test (always built) ───────────────────────────────────────────── */
 MUTEX_DECL(motor_test_mtx);
-bool     g_motor_test_active = false;
-uint16_t g_motor_test_cmd[4] = {};
+bool    g_motor_test_active = false;
+int32_t g_motor_test_cmd[4] = {};
 
 /* Serialises all USB CDC writes between USBCmdThread and DebugThread.
  * chprintf is NOT atomic — it puts characters one at a time, so concurrent
@@ -91,6 +101,16 @@ static uint8_t __attribute__((section(".nocache"))) s_usb_dl_buf[2048];
 /* CAN INS message rate counters — incremented by StateEstThread, read by DebugThread */
 static volatile uint32_t s_can_quat_cnt = 0;
 static volatile uint32_t s_can_rate_cnt = 0;
+
+/* Per-lane EKF state (radians) — written by StateEstThread under state_mtx,
+ * read by DebugThread under the same mutex to emit $EKFL. */
+static float s_lane_roll[3] = {};
+static float s_lane_pitch[3] = {};
+static float s_lane_yaw[3] = {};
+static float s_lane_p[3] = {};
+static float s_lane_q[3] = {};
+static float s_lane_r[3] = {};
+static int   s_primary_lane = 0;
 #endif
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -102,6 +122,10 @@ static THD_FUNCTION(SPIThread, arg)
     chRegSetThreadName("spi");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+    // Load persistent calibration biases before IMU init; zero biases if absent.
+    g_cal_valid = cal_load(g_cal);
+    if (!g_cal_valid) memset(&g_cal, 0, sizeof(g_cal));
+
     spi_drv_init();   // init all three IMUs (may sleep 100 ms each)
 
     systime_t next = chVTGetSystemTime();
@@ -109,23 +133,39 @@ static THD_FUNCTION(SPIThread, arg)
         float a[3], g[3];
 
         if (imu1.read(a, g)) {
+            // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
+            static constexpr float RS = 0.70710678f;
+            const float ra[3] = { RS*(a[1]-a[0]), RS*(a[1]+a[0]), -a[2] };
+            const float rg[3] = { RS*(g[1]-g[0]), RS*(g[1]+g[0]), -g[2] };
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[0].accel, a, sizeof(a));
-            memcpy(g_imu[0].gyro,  g, sizeof(g));
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
+            }
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu2.read(a, g)) {
+            // Instance 0 (CS=PC15): ROTATION_YAW_90 → NED z-down: [-y,+x,+z]
+            const float ra[3] = {-a[1], +a[0], +a[2]};
+            const float rg[3] = {-g[1], +g[0], +g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[1].accel, a, sizeof(a));
-            memcpy(g_imu[1].gyro,  g, sizeof(g));
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
+            }
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu3.read(a, g)) {
+            // Instance 1 (CS=PC13): ROTATION_PITCH_180_YAW_90 → NED z-down: [-y,-x,-z]
+            const float ra[3] = {-a[1], -a[0], -a[2]};
+            const float rg[3] = {-g[1], -g[0], -g[2]};
             chMtxLock(&imu_mtx);
-            memcpy(g_imu[2].accel, a, sizeof(a));
-            memcpy(g_imu[2].gyro,  g, sizeof(g));
+            for (int k = 0; k < 3; k++) {
+                g_imu[2].accel[k] = ra[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = rg[k] - g_cal.gyro_bias[2][k];
+            }
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
@@ -182,6 +222,10 @@ static THD_FUNCTION(StateEstThread, arg)
 
     state_mgr.init();
 
+    // Ticks since last IMX5 quaternion — clears valid after 100 ticks (200 ms at 500 Hz).
+    uint32_t can_stale_ticks = 0;
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 500;  // 1 s at 500 Hz — tolerates IMX5 init pauses
+
     systime_t next = chVTGetSystemTime();
     while (true) {
         // Snapshot CAN IMU and clear consumed-this-tick flags atomically.
@@ -191,6 +235,16 @@ static THD_FUNCTION(StateEstThread, arg)
         g_can_imu.has_new_quat  = false;
         g_can_imu.has_new_rates = false;
         chMtxUnlock(&can_imu_mtx);
+
+        // Timeout: if no IMX5 data (quat or rates) arrives for CAN_TIMEOUT_TICKS, mark link invalid.
+        if (can_snap.has_new_quat || can_snap.has_new_rates) {
+            can_stale_ticks = 0;
+        } else if (++can_stale_ticks > CAN_TIMEOUT_TICKS) {
+            chMtxLock(&can_imu_mtx);
+            g_can_imu.valid = false;
+            chMtxUnlock(&can_imu_mtx);
+            can_snap.valid = false;
+        }
 
         IMURaw imu_snap[3];
         chMtxLock(&imu_mtx);
@@ -215,6 +269,13 @@ static THD_FUNCTION(StateEstThread, arg)
         g_euler[0] = state_mgr.roll();         // Euler angles derived from quaternion
         g_euler[1] = state_mgr.pitch();
         g_euler[2] = state_mgr.yaw();
+#ifdef BPRL_DEBUG
+        for (int li = 0; li < StateManager::NUM_LANES; ++li) {
+            state_mgr.get_lane_euler(li, s_lane_roll[li], s_lane_pitch[li], s_lane_yaw[li]);
+            state_mgr.get_lane_pqr  (li, s_lane_p[li],   s_lane_q[li],     s_lane_r[li]);
+        }
+        s_primary_lane = state_mgr.primary_lane();
+#endif
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -223,9 +284,10 @@ static THD_FUNCTION(StateEstThread, arg)
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * ControlThread — 500 Hz  NORMALPRIO+20
+ * ControlThread — 400 Hz  NORMALPRIO+20
  * Cascade PID → MotorMixer → motor output.
  * ══════════════════════════════════════════════════════════════════════════ */
+
 static THD_FUNCTION(ControlThread, arg)
 {
     chRegSetThreadName("ctrl");
@@ -235,15 +297,15 @@ static THD_FUNCTION(ControlThread, arg)
     while (true) {
         /* ── Motor test bypass: skip PID/mixer, drive ESCs directly ──────── */
         {
-            bool     test_active;
-            uint16_t test_cmd[4];
+            bool    test_active;
+            int32_t test_cmd[4];
             chMtxLock(&motor_test_mtx);
             test_active = g_motor_test_active;
             if (test_active) memcpy(test_cmd, g_motor_test_cmd, sizeof(test_cmd));
             chMtxUnlock(&motor_test_mtx);
 
             if (test_active) {
-                dshot_write(test_cmd);
+                motor_output_write(test_cmd);
                 chMtxLock(&state_mtx);
                 memset(g_output, 0, sizeof(g_output));
                 chMtxUnlock(&state_mtx);
@@ -252,33 +314,36 @@ static THD_FUNCTION(ControlThread, arg)
             }
         }
 
-        float state[StateIdx::N], euler[3], input[4];
+        /* ── Full cascade: EKF state → PID → mixer → DShot ─────────────── */
+        float ctrl_state[6];
         bool  armed;
+        float input[4];
         chMtxLock(&state_mtx);
-        memcpy(state, g_state, sizeof(state));
-        memcpy(euler, g_euler, sizeof(euler));
-        memcpy(input, g_input, sizeof(input));
+        ctrl_state[0] = g_euler[0];             // roll  (rad)
+        ctrl_state[1] = g_euler[1];             // pitch (rad)
+        ctrl_state[2] = g_euler[2];             // yaw   (rad)
+        ctrl_state[3] = g_state[StateIdx::P];   // p (rad/s)
+        ctrl_state[4] = g_state[StateIdx::Q];   // q (rad/s)
+        ctrl_state[5] = g_state[StateIdx::R];   // r (rad/s)
         armed = g_armed;
+        memcpy(input, g_input, sizeof(input));
+        if (!armed) att_ctrl.reset_all();
         chMtxUnlock(&state_mtx);
 
-        // Build 6-element [roll, pitch, yaw, p, q, r] for the cascade controller.
-        // AttitudeController and MotorMixer keep their existing index assumptions
-        // (0=roll, 1=pitch, 2=yaw, 3=p, 4=q, 5=r) — no interface changes needed.
-        const float ctrl_state[6] = {
-            euler[0], euler[1], euler[2],
-            state[StateIdx::P], state[StateIdx::Q], state[StateIdx::R]
-        };
+        float torque_cmds[3];
+        att_ctrl.update(ctrl_state, input, torque_cmds);
+        const float thrust = att_ctrl.compute_throttle(ctrl_state, input);
 
-        float   cmds[3];
-        att_ctrl.update(ctrl_state, input, cmds);
-        float   thr = att_ctrl.compute_throttle(ctrl_state, input);
-
-        int32_t out[4];
-        mixer.update(cmds, thr, armed, ctrl_state, out);
-        motor_output_write(out);
+        int32_t motor_out[4];
+        mixer.update(torque_cmds, thrust, armed, ctrl_state, motor_out);
+        motor_output_write(motor_out);
 
         chMtxLock(&state_mtx);
-        memcpy(g_output, out, sizeof(out));
+        g_ctrl[0] = torque_cmds[0];
+        g_ctrl[1] = torque_cmds[1];
+        g_ctrl[2] = torque_cmds[2];
+        g_ctrl[3] = thrust;
+        memcpy(g_output, motor_out, sizeof(g_output));
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -313,17 +378,33 @@ static THD_FUNCTION(RadioThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * HeartbeatThread — 1 Hz  NORMALPRIO-5
- * LED heartbeat, SD log flush (future), watchdog pat (future).
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(HeartbeatThread, arg)
 {
+    (void)arg;
     chRegSetThreadName("heartbeat");
-    const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+    /* Simplified heartbeat: LED blink + DShot diagnostics over USB.
+     * IMU/EKF output removed since SPIThread and StateEstThread are not
+     * running in the motor-test configuration.
+     *
+     * Every 2 s:
+     *   $DSHOT,<ms>,tc=<tim1_dma_tc>/<tim4_dma_tc>,cc=<tim1_cc>/<tim4_cc>,
+     *           edges=<m0>/<m1>/<m2>/<m3>
+     *
+     * tc increasing → DShot DMA is firing → signal is being sent.
+     * edges > 0     → ESC is responding with GCR telemetry.
+     * tc = 0        → DShot is NOT running (check dshot_init failure).
+     */
+    uint32_t tick = 0;
     systime_t next = chVTGetSystemTime();
     while (true) {
-        palToggleLine(LINE_LED_ACTIVITY);
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
+        /* LED: 200 ms flash every 2 s (every 10th 200 ms tick). */
+        if (tick % 10 == 0) palSetLine(LINE_LED_ACTIVITY);
+        if (tick % 10 == 1) palClearLine(LINE_LED_ACTIVITY);
+
+        next = chThdSleepUntilWindowed(next, chTimeAddX(next, TIME_MS2I(200)));
+        tick++;
     }
 }
 
@@ -428,6 +509,9 @@ static void usb_log_erase(void)
     chMtxUnlock(&s_usb_write_mtx);
 }
 
+/* Staging buffer for CAL,set commands; written to flash by CAL,commit. */
+static CalibData s_cal_stage = {};
+
 static void usb_cmd_dispatch(const char *line)
 {
     if (strcmp(line, "BOOT") == 0) {
@@ -467,9 +551,7 @@ static void usb_cmd_dispatch(const char *line)
             chMtxUnlock(&s_usb_write_mtx);
             return;
         }
-        uint16_t dv = (pct == 0) ? 0U
-                                  : (uint16_t)(48U + (uint32_t)pct * 1999U / 100U);
-        if (dv > 2047U) dv = 2047U;
+        int32_t dv = pct * 10;  // 0–100% → 0–1000
         chMtxLock(&motor_test_mtx);
         g_motor_test_active = true;
         memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
@@ -481,7 +563,27 @@ static void usb_cmd_dispatch(const char *line)
 
     } else if (strncmp(line, "LOG,", 4) == 0) {
         const char *rest = line + 4;
-        if (strcmp(rest, "list") == 0) {
+        if (strcmp(rest, "status") == 0) {
+            static const char *const err_str[] = {
+                "not_tried", "sdcStart", "sdcConnect", "f_mount", "f_open", "ok"
+            };
+            uint8_t e  = logger.last_init_err();
+            uint8_t ff = logger.last_ff_err();
+            const char *es = (e <= 5) ? err_str[e] : "unknown";
+            chMtxLock(&s_usb_write_mtx);
+            if (logger.is_ready()) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,ready,file=%s\r\n", logger.current_path());
+            } else if (ff != 0) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,not_ready,last_err=%u(%s),ff=%u\r\n",
+                         (unsigned)e, es, (unsigned)ff);
+            } else {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "LOG,STATUS,not_ready,last_err=%u(%s)\r\n", (unsigned)e, es);
+            }
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "list") == 0) {
             usb_log_list();
         } else if (strncmp(rest, "get,", 4) == 0) {
             usb_log_get(rest + 4);
@@ -492,6 +594,169 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+    } else if (strncmp(line, "CAL,", 4) == 0) {
+        const char *rest = line + 4;
+        if (strncmp(rest, "set,", 4) == 0) {
+            // CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>
+            int   idx = -1;
+            float gx = 0, gy = 0, gz = 0, ax = 0, ay = 0, az = 0;
+            if (sscanf(rest + 4, "%d,%f,%f,%f,%f,%f,%f",
+                       &idx, &gx, &gy, &gz, &ax, &ay, &az) == 7
+                && idx >= 0 && idx <= 2)
+            {
+                s_cal_stage.gyro_bias[idx][0] = gx;
+                s_cal_stage.gyro_bias[idx][1] = gy;
+                s_cal_stage.gyro_bias[idx][2] = gz;
+                s_cal_stage.accel_bias[idx][0] = ax;
+                s_cal_stage.accel_bias[idx][1] = ay;
+                s_cal_stage.accel_bias[idx][2] = az;
+                chMtxLock(&s_usb_write_mtx);
+                chprintf((BaseSequentialStream *)&SDU1, "CAL,SET,%d,OK\r\n", idx);
+                chMtxUnlock(&s_usb_write_mtx);
+            } else {
+                chMtxLock(&s_usb_write_mtx);
+                chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,bad_args\r\n");
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        } else if (strcmp(rest, "commit") == 0) {
+            bool ok = cal_save(s_cal_stage);
+            if (ok) {
+                // Apply immediately so current session benefits without reboot
+                g_cal = s_cal_stage;
+                g_cal_valid = true;
+            }
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1,
+                     ok ? "CAL,OK\r\n" : "CAL,ERR,write_failed\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "clear") == 0) {
+            cal_clear();
+            memset(&g_cal, 0, sizeof(g_cal));
+            g_cal_valid = false;
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "CAL,OK\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        } else if (strcmp(rest, "query") == 0) {
+            CalibData stored = {};
+            bool valid = cal_load(stored);
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1,
+                "CAL,DATA,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,"
+                "%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f,%d\r\n",
+                (double)stored.gyro_bias[0][0], (double)stored.gyro_bias[0][1],
+                (double)stored.gyro_bias[0][2], (double)stored.gyro_bias[1][0],
+                (double)stored.gyro_bias[1][1], (double)stored.gyro_bias[1][2],
+                (double)stored.gyro_bias[2][0], (double)stored.gyro_bias[2][1],
+                (double)stored.gyro_bias[2][2],
+                (double)stored.accel_bias[0][0], (double)stored.accel_bias[0][1],
+                (double)stored.accel_bias[0][2], (double)stored.accel_bias[1][0],
+                (double)stored.accel_bias[1][1], (double)stored.accel_bias[1][2],
+                (double)stored.accel_bias[2][0], (double)stored.accel_bias[2][1],
+                (double)stored.accel_bias[2][2], (int)valid);
+            chMtxUnlock(&s_usb_write_mtx);
+        } else {
+            chMtxLock(&s_usb_write_mtx);
+            chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,unknown_cmd\r\n");
+            chMtxUnlock(&s_usb_write_mtx);
+        }
+    } else if (strcmp(line, "DSHOT,diag") == 0) {
+        DShotDiag d = {};
+        dshot_get_diag(&d);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "DSHOT,DIAG,dma_tc=%u/%u,cc_isr=%u/%u,"
+            "edges=%u/%u/%u/%u,"
+            "e0=%u,%u,%u,%u,%u,"
+            "e1=%u,%u,%u,%u,%u,"
+            "e2=%u,%u,%u,%u,%u,"
+            "e3=%u,%u,%u,%u,%u\r\n",
+            (unsigned)d.dma_tc[0], (unsigned)d.dma_tc[1],
+            (unsigned)d.cc_isr[0], (unsigned)d.cc_isr[1],
+            (unsigned)d.edge_cnt[0], (unsigned)d.edge_cnt[1],
+            (unsigned)d.edge_cnt[2], (unsigned)d.edge_cnt[3],
+            (unsigned)d.edges[0][0], (unsigned)d.edges[0][1],
+            (unsigned)d.edges[0][2], (unsigned)d.edges[0][3],
+            (unsigned)d.edges[0][4],
+            (unsigned)d.edges[1][0], (unsigned)d.edges[1][1],
+            (unsigned)d.edges[1][2], (unsigned)d.edges[1][3],
+            (unsigned)d.edges[1][4],
+            (unsigned)d.edges[2][0], (unsigned)d.edges[2][1],
+            (unsigned)d.edges[2][2], (unsigned)d.edges[2][3],
+            (unsigned)d.edges[2][4],
+            (unsigned)d.edges[3][0], (unsigned)d.edges[3][1],
+            (unsigned)d.edges[3][2], (unsigned)d.edges[3][3],
+            (unsigned)d.edges[3][4]);
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,status") == 0) {
+        // Read FDCAN1 diagnostic registers directly (no driver API needed).
+        // PSR: protocol status (ACT, LEC, EP, EW, BO).
+        // ECR: error counters (TEC[7:0], REC[14:8], RP[15]).
+        // RXF0S: RxFIFO0 fill level (F0FL[6:0]) and overflow flag (RF0L[25]).
+        const uint32_t psr   = FDCAN1->PSR;
+        const uint32_t ecr   = FDCAN1->ECR;
+        const uint32_t rxf0s = FDCAN1->RXF0S;
+        const uint32_t cccr  = FDCAN1->CCCR;
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "CAN,STATUS,psr=0x%08x,ecr=0x%08x,rxf0s=0x%08x,cccr=0x%08x\r\n",
+                 (unsigned)psr, (unsigned)ecr, (unsigned)rxf0s, (unsigned)cccr);
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,diag") == 0) {
+        CANDiag d = {};
+        can_get_diag(d);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "CAN,DIAG,total_rx=%lu,dispatched=%lu,"
+                 "last_sid=0x%03x,last_eid=0x%08lx,last_eff=%u,"
+                 "last_dlc=%u,last_data=%02x%02x%02x%02x%02x%02x%02x%02x\r\n",
+                 (uint32_t)d.total_rx, (uint32_t)d.dispatched,
+                 (unsigned)d.last_sid, (uint32_t)d.last_eid, (unsigned)d.last_eff,
+                 (unsigned)d.last_dlc,
+                 d.last_data[0], d.last_data[1], d.last_data[2], d.last_data[3],
+                 d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7]);
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,scan,start") == 0) {
+        can_scan_start();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,SCAN,started\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,scan,stop") == 0) {
+        can_scan_stop();
+        CANScanEntry entries[CAN_SCAN_MAX];
+        int n = can_scan_get(entries, CAN_SCAN_MAX);
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < n; i++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "CAN,SCAN,id=%s0x%03lx,count=%lu\r\n",
+                     entries[i].is_ext ? "EXT:" : "",
+                     (uint32_t)entries[i].id,
+                     (uint32_t)entries[i].count);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,SCAN,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "CAN,regdump") == 0) {
+        CANRegEntry regs[12];
+        int n = can_read_regs(regs, 12);
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < n; i++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "CAN,REG,%s=0x%08lx\r\n",
+                     regs[i].name, (uint32_t)regs[i].value);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "CAN,REG,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_RATE,read") == 0) {
+        chMtxLock(&strainRate_mtx);
+        StrainRateRaw snap = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "STRAIN_RATE,%d,%d,%d,%d,%u\r\n",
+                 (int)snap.val[0], (int)snap.val[1],
+                 (int)snap.val[2], (int)snap.val[3],
+                 (unsigned)snap.valid);
+        chMtxUnlock(&s_usb_write_mtx);
     }
 }
 
@@ -557,6 +822,9 @@ static THD_FUNCTION(DebugThread, arg)
         /* ── Snapshot flight state ──────────────────────────────────────── */
         float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw;
         float p, q, r;
+        float lane_roll[3], lane_pitch[3], lane_yaw[3];
+        float lane_p[3], lane_q[3], lane_r[3];
+        int   primary_lane;
         bool  armed;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
@@ -570,27 +838,67 @@ static THD_FUNCTION(DebugThread, arg)
         rc_pitch = g_input[InputIdx::PITCH_TGT];
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
+        for (int li = 0; li < 3; ++li) {
+            lane_roll[li]  = s_lane_roll[li];
+            lane_pitch[li] = s_lane_pitch[li];
+            lane_yaw[li]   = s_lane_yaw[li];
+            lane_p[li]     = s_lane_p[li];
+            lane_q[li]     = s_lane_q[li];
+            lane_r[li]     = s_lane_r[li];
+        }
+        primary_lane = s_primary_lane;
         chMtxUnlock(&state_mtx);
 
-        /* ── Snapshot IMU validity ──────────────────────────────────────── */
-        bool imu_v[3];
+        /* ── Snapshot full IMU data ─────────────────────────────────────── */
+        float imu_ax[3], imu_ay[3], imu_az[3];
+        float imu_gx[3], imu_gy[3], imu_gz[3];
+        bool  imu_v[3];
         chMtxLock(&imu_mtx);
-        imu_v[0] = g_imu[0].valid;
-        imu_v[1] = g_imu[1].valid;
-        imu_v[2] = g_imu[2].valid;
+        for (int _i = 0; _i < 3; _i++) {
+            imu_ax[_i] = g_imu[_i].accel[0];
+            imu_ay[_i] = g_imu[_i].accel[1];
+            imu_az[_i] = g_imu[_i].accel[2];
+            imu_gx[_i] = g_imu[_i].gyro[0];
+            imu_gy[_i] = g_imu[_i].gyro[1];
+            imu_gz[_i] = g_imu[_i].gyro[2];
+            imu_v[_i]  = g_imu[_i].valid;
+        }
         chMtxUnlock(&imu_mtx);
 
+        float can_p_snap, can_q_snap, can_r_snap;
+        float can_qw, can_qx, can_qy, can_qz;
         bool can_v;
         chMtxLock(&can_imu_mtx);
-        can_v = g_can_imu.valid;
+        can_v      = g_can_imu.valid;
+        can_p_snap = g_can_imu.p;
+        can_q_snap = g_can_imu.q;
+        can_r_snap = g_can_imu.r;
+        can_qw     = g_can_imu.q0;
+        can_qx     = g_can_imu.q1;
+        can_qy     = g_can_imu.q2;
+        can_qz     = g_can_imu.q3;
         chMtxUnlock(&can_imu_mtx);
+
+        // Quaternion → ZYX Euler (deg) for the CAN IMX5 lane in $EKFL.
+        // Always computed from the stored quaternion so the display shows the
+        // last known attitude instead of zeroing out during brief dropouts.
+        // can_v = false just means the data is stale, not that q0-q3 are gone.
+        float roll_r  = atan2f(2.0f*(can_qw*can_qx + can_qy*can_qz),
+                               1.0f - 2.0f*(can_qx*can_qx + can_qy*can_qy));
+        float pitch_r = asinf(fmaxf(-1.0f, fminf(1.0f,
+                               2.0f*(can_qw*can_qy - can_qz*can_qx))));
+        float yaw_r   = atan2f(2.0f*(can_qw*can_qz + can_qx*can_qy),
+                               1.0f - 2.0f*(can_qy*can_qy + can_qz*can_qz));
+        float can_roll_deg  = roll_r  * 57.2958f;
+        float can_pitch_deg = pitch_r * 57.2958f;
+        float can_yaw_deg   = yaw_r   * 57.2958f;
 
         /* ── Snapshot ESC telemetry ─────────────────────────────────────── */
         ESCTelemetry telem[4];
         dshot_get_telemetry(telem);
         uint32_t rpm[4];
         for (int i = 0; i < 4; i++) {
-            rpm[i] = telem[i].valid ? telem[i].erpm / 14U : 0U;
+            rpm[i] = telem[i].valid ? telem[i].erpm / 7U : 0U;
         }
 
         /* ── Emit $TEL line over USB ────────────────────────────────────── */
@@ -630,14 +938,82 @@ static THD_FUNCTION(DebugThread, arg)
             }
         }
 
+        /* ── Emit $EKFL per-lane line over USB ─────────────────────────── */
+        /* Format:
+         *   $EKFL,<ms>,<primary>,
+         *         <roll0°>,<pitch0°>,<yaw0°>,<p0>,<q0>,<r0>,
+         *         <roll1°>,<pitch1°>,<yaw1°>,<p1>,<q1>,<r1>,
+         *         <roll2°>,<pitch2°>,<yaw2°>,<p2>,<q2>,<r2>,
+         *         0,0,0,0,0,0          ← IMX5 INS (placeholder)
+         */
+        {
+            static char ekfl_buf[256];
+            MemoryStream ekfl_ms;
+            msObjectInit(&ekfl_ms, (uint8_t *)ekfl_buf, sizeof(ekfl_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&ekfl_ms,
+                "$EKFL,%lu,%d,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
+                "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()), primary_lane,
+                (double)(lane_roll[0]*57.2958f), (double)(lane_pitch[0]*57.2958f),
+                (double)(lane_yaw[0]*57.2958f),
+                (double)lane_p[0], (double)lane_q[0], (double)lane_r[0],
+                (double)(lane_roll[1]*57.2958f), (double)(lane_pitch[1]*57.2958f),
+                (double)(lane_yaw[1]*57.2958f),
+                (double)lane_p[1], (double)lane_q[1], (double)lane_r[1],
+                (double)(lane_roll[2]*57.2958f), (double)(lane_pitch[2]*57.2958f),
+                (double)(lane_yaw[2]*57.2958f),
+                (double)lane_p[2], (double)lane_q[2], (double)lane_r[2],
+                (double)can_roll_deg, (double)can_pitch_deg, (double)can_yaw_deg,
+                (double)can_p_snap, (double)can_q_snap, (double)can_r_snap);
+            size_t elen = ekfl_ms.eos;
+            if (elen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)ekfl_buf, elen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
+        /* ── Emit $IMU line over USB (raw sensor + CAN IMU rates) ─────── */
+        /* Format: $IMU,<ms>,<ax0>,<ay0>,<az0>,<gx0>,<gy0>,<gz0>,<v0>, ...×3,
+         *               <can_p>,<can_q>,<can_r>,<can_v>                       */
+        {
+            static char imu_buf[300];
+            MemoryStream imu_ms;
+            msObjectInit(&imu_ms, (uint8_t *)imu_buf, sizeof(imu_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&imu_ms,
+                "$IMU,%lu,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
+                "%.5f,%.5f,%.5f,%d\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                (double)imu_ax[0], (double)imu_ay[0], (double)imu_az[0],
+                (double)imu_gx[0], (double)imu_gy[0], (double)imu_gz[0], (int)imu_v[0],
+                (double)imu_ax[1], (double)imu_ay[1], (double)imu_az[1],
+                (double)imu_gx[1], (double)imu_gy[1], (double)imu_gz[1], (int)imu_v[1],
+                (double)imu_ax[2], (double)imu_ay[2], (double)imu_az[2],
+                (double)imu_gx[2], (double)imu_gy[2], (double)imu_gz[2], (int)imu_v[2],
+                (double)can_p_snap, (double)can_q_snap, (double)can_r_snap, (int)can_v);
+            size_t ilen = imu_ms.eos;
+            if (ilen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)imu_buf, ilen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
 #endif // BPRL_DEBUG
 
 /* ══════════════════════════════════════════════════════════════════════════
- * LogThread — 100 Hz IMU / 50 Hz state  NORMALPRIO-15
- * Snapshots g_imu[] and g_state[], buffers to ring, flushes to SD card.
+ * LogThread — 50 Hz  NORMALPRIO-15
+ * Logs 6 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN.
+ * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(LogThread, arg)
@@ -645,91 +1021,149 @@ static THD_FUNCTION(LogThread, arg)
     chRegSetThreadName("log");
     const LogRates *rates = static_cast<const LogRates *>(arg);
 
-    /* state_div: log state every Nth IMU tick (e.g. 2 for 50 Hz when IMU = 100 Hz) */
-    const uint32_t state_div = (rates->state > 0) ?
-                               (uint32_t)(rates->imu / rates->state) : 1U;
-
-    /* Retry until SD card is inserted and mounted. */
     while (!logger.init()) {
         chThdSleepMilliseconds(5000);
     }
 
     systime_t next = chVTGetSystemTime();
-    uint32_t  tick = 0U;
 
     while (true) {
-        const uint32_t t_ms = TIME_I2MS(chVTGetSystemTime());
+        /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
+        const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
-        /* ── IMU snapshot (every tick → 100 Hz) ───────────────────────── */
+        /* ── State + controller snapshot (one mutex hold) ─────────────── */
+        float euler[3], state[StateIdx::N], inp[4], ctrl[4];
+        bool  armed;
+        chMtxLock(&state_mtx);
+        memcpy(euler, g_euler,  sizeof(euler));
+        memcpy(state, g_state,  sizeof(state));
+        memcpy(inp,   g_input,  sizeof(inp));
+        memcpy(ctrl,  g_ctrl,   sizeof(ctrl));
+        armed = g_armed;
+        chMtxUnlock(&state_mtx);
+
+        /* ── Strain rate snapshot ─────────────────────────────────────── */
+        StrainRateRaw strain = {};
+        chMtxLock(&strainRate_mtx);
+        strain = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+
+        /* ── RPM snapshot (dshot_get_telemetry is thread-safe) ───────── */
+        ESCTelemetry telem[4] = {};
+        dshot_get_telemetry(telem);
+
+        /* ── ATT — angular states ─────────────────────────────────────── */
         {
-            LogMsgIMU msg = {};
-            msg.time_ms = t_ms;
-
-            chMtxLock(&imu_mtx);
-            msg.ax0 = g_imu[0].accel[0]; msg.ay0 = g_imu[0].accel[1]; msg.az0 = g_imu[0].accel[2];
-            msg.gx0 = g_imu[0].gyro[0];  msg.gy0 = g_imu[0].gyro[1];  msg.gz0 = g_imu[0].gyro[2];
-            msg.valid0 = (uint8_t)g_imu[0].valid;
-            msg.ax1 = g_imu[1].accel[0]; msg.ay1 = g_imu[1].accel[1]; msg.az1 = g_imu[1].accel[2];
-            msg.gx1 = g_imu[1].gyro[0];  msg.gy1 = g_imu[1].gyro[1];  msg.gz1 = g_imu[1].gyro[2];
-            msg.valid1 = (uint8_t)g_imu[1].valid;
-            msg.ax2 = g_imu[2].accel[0]; msg.ay2 = g_imu[2].accel[1]; msg.az2 = g_imu[2].accel[2];
-            msg.gx2 = g_imu[2].gyro[0];  msg.gy2 = g_imu[2].gyro[1];  msg.gz2 = g_imu[2].gyro[2];
-            msg.valid2 = (uint8_t)g_imu[2].valid;
-            chMtxUnlock(&imu_mtx);
-
-            chMtxLock(&can_imu_mtx);
-            msg.qw      = g_can_imu.q0; msg.qx = g_can_imu.q1;
-            msg.qy      = g_can_imu.q2; msg.qz = g_can_imu.q3;
-            msg.can_p   = g_can_imu.p;  msg.can_q = g_can_imu.q; msg.can_r = g_can_imu.r;
-            msg.can_valid = (uint8_t)g_can_imu.valid;
-            chMtxUnlock(&can_imu_mtx);
-
-            logger.write(LOG_MSG_IMU, msg);
+            LogMsgATT msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.roll    = euler[0];
+            msg.pitch   = euler[1];
+            msg.yaw     = euler[2];
+            msg.p       = state[StateIdx::P];
+            msg.q       = state[StateIdx::Q];
+            msg.r       = state[StateIdx::R];
+            msg.p_dot   = state[StateIdx::P_DOT];
+            msg.q_dot   = state[StateIdx::Q_DOT];
+            msg.r_dot   = state[StateIdx::R_DOT];
+            logger.write(LOG_MSG_ATT, msg);
         }
 
-        /* ── State snapshot (every state_div ticks → 50 Hz) ───────────── */
-        if (state_div == 0U || tick % state_div == 0U) {
-            LogMsgState msg = {};
-            msg.time_ms = t_ms;
-
-            chMtxLock(&state_mtx);
-            msg.roll    = g_euler[0];
-            msg.pitch   = g_euler[1];
-            msg.yaw     = g_euler[2];
-            msg.p       = g_state[StateIdx::P];
-            msg.q       = g_state[StateIdx::Q];
-            msg.r       = g_state[StateIdx::R];
-            msg.z_pos   = g_state[StateIdx::Z_POS];
-            msg.z_vel   = g_state[StateIdx::W];
-            msg.z_accel = g_state[StateIdx::W_DOT];
-            msg.thr     = g_input[InputIdx::THRUST];
-            msg.armed   = (uint8_t)g_armed;
-            chMtxUnlock(&state_mtx);
-
-            logger.write(LOG_MSG_STATE, msg);
+        /* ── LIN — linear states ──────────────────────────────────────── */
+        {
+            LogMsgLIN msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.x       = state[StateIdx::X];
+            msg.y       = state[StateIdx::Y];
+            msg.z       = state[StateIdx::Z_POS];
+            msg.u       = state[StateIdx::U];
+            msg.v       = state[StateIdx::V];
+            msg.w       = state[StateIdx::W];
+            msg.u_dot   = state[StateIdx::U_DOT];
+            msg.v_dot   = state[StateIdx::V_DOT];
+            msg.w_dot   = state[StateIdx::W_DOT];
+            logger.write(LOG_MSG_LIN, msg);
         }
 
-        /* ── Flush ring buffer to SD card ─────────────────────────────── */
+        /* ── RCIN — RC stick inputs ───────────────────────────────────── */
+        {
+            LogMsgRCIN msg = {};
+            msg.time_us   = t_us;
+            msg.rate_hz   = 50U;
+            msg.roll_stk  = inp[InputIdx::ROLL_TGT];
+            msg.pitch_stk = inp[InputIdx::PITCH_TGT];
+            msg.yaw_stk   = inp[InputIdx::YAW_RATE];
+            msg.thr_stk   = inp[InputIdx::THRUST];
+            msg.armed     = (uint8_t)armed;
+            logger.write(LOG_MSG_RCIN, msg);
+        }
+
+        /* ── OUTP — controller outputs entering MotorMixer ───────────── */
+        {
+            LogMsgOUTP msg = {};
+            msg.time_us  = t_us;
+            msg.rate_hz  = 50U;
+            msg.roll_tq  = ctrl[0];
+            msg.pitch_tq = ctrl[1];
+            msg.yaw_tq   = ctrl[2];
+            msg.throttle = ctrl[3];
+            logger.write(LOG_MSG_OUTP, msg);
+        }
+
+        /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
+        {
+            LogMsgRPMS msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.rpm0 = telem[0].valid ? (int32_t)(telem[0].erpm / 7U) : 0;
+            msg.rpm1 = telem[1].valid ? (int32_t)(telem[1].erpm / 7U) : 0;
+            msg.rpm2 = telem[2].valid ? (int32_t)(telem[2].erpm / 7U) : 0;
+            msg.rpm3 = telem[3].valid ? (int32_t)(telem[3].erpm / 7U) : 0;
+            logger.write(LOG_MSG_RPMS, msg);
+        }
+
+        /* ── STRN — strain rate sensor ────────────────────────────────── */
+        {
+            LogMsgSTRN msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.s0      = strain.val[0];
+            msg.s1      = strain.val[1];
+            msg.s2      = strain.val[2];
+            msg.s3      = strain.val[3];
+            msg.valid   = (uint8_t)strain.valid;
+            logger.write(LOG_MSG_STRN, msg);
+        }
+
         logger.flush();
-
-        tick++;
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->imu));
+        next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->period));
     }
 }
 
 /* ── Thread launcher (called from main) ──────────────────────────────────── */
 void threads_start(const ThreadRates &rates)
 {
-    chThdCreateStatic(waSPI,      sizeof(waSPI),      NORMALPRIO + 30, SPIThread,      (void *)&rates.spi);
-    chThdCreateStatic(waCAN,      sizeof(waCAN),      NORMALPRIO + 28, CANThread,      nullptr);
-    chThdCreateStatic(waStateEst, sizeof(waStateEst), NORMALPRIO + 25, StateEstThread, (void *)&rates.est);
-    chThdCreateStatic(waI2C,      sizeof(waI2C),      NORMALPRIO + 22, I2CThread,      (void *)&rates.i2c);
-    chThdCreateStatic(waControl,  sizeof(waControl),  NORMALPRIO + 20, ControlThread,  (void *)&rates.control);
-    chThdCreateStatic(waRadio,    sizeof(waRadio),    NORMALPRIO + 10, RadioThread,    (void *)&rates.radio);
+    // Priority ordering (highest first):
+    //   SPIThread      +30  1 kHz IMU reads
+    //   CANThread      +28  event-driven CAN RX
+    //   StateEstThread +25  500 Hz EKF
+    //   ControlThread  +20  400 Hz PID/mixer/DShot
+    //   RadioThread    +10  50 Hz RC input
+    //   HeartbeatThread -5  LED + DShot diag
+    //   DebugThread    -10  10 Hz $TEL/$EKFL USB stream
+    //   USBCmdThread   -20  event-driven USB commands
+
+    chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
+    chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
+    chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
+    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
+    chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
-    chThdCreateStatic(waLog,      sizeof(waLog),      NORMALPRIO - 15, LogThread,      (void *)&rates.log);
-    chThdCreateStatic(waUSBCmd,   sizeof(waUSBCmd),   NORMALPRIO - 20, USBCmdThread,   nullptr);
 #ifdef BPRL_DEBUG
-    chThdCreateStatic(waDebug,    sizeof(waDebug),    NORMALPRIO - 10, DebugThread,    (void *)&rates.debug);
+    chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif
+    chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
+
+    chThdCreateStatic(waLog, sizeof(waLog), NORMALPRIO - 15, LogThread, (void *)&rates.log);
 }
