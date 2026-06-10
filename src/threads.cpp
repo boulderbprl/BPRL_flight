@@ -46,6 +46,9 @@ IMURaw g_imu[3] = {};
 MUTEX_DECL(can_imu_mtx);
 CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0 before first frame
 
+MUTEX_DECL(strainRate_mtx);
+StrainRateRaw g_strain_rate = {};
+
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
 
@@ -737,6 +740,17 @@ static void usb_cmd_dispatch(const char *line)
                      regs[i].name, (uint32_t)regs[i].value);
         }
         chprintf((BaseSequentialStream *)&SDU1, "CAN,REG,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_RATE,read") == 0) {
+        chMtxLock(&strainRate_mtx);
+        StrainRateRaw snap = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "STRAIN_RATE,%d,%d,%d,%d,%u\r\n",
+                 (int)snap.val[0], (int)snap.val[1],
+                 (int)snap.val[2], (int)snap.val[3],
+                 (unsigned)snap.valid);
         chMtxUnlock(&s_usb_write_mtx);
     }
 }

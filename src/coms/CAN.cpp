@@ -149,6 +149,20 @@ static void imx5_can_cb(const CANRxFrame &f, void *ctx)
     chMtxUnlock(&can_imu_mtx);
 }
 
+// ── Strain rate sensor callback — CAN ID 0x69, 4 packed int16 values ────────
+
+static void strain_rate_can_cb(const CANRxFrame &f, void *ctx)
+{
+    (void)ctx;
+    chMtxLock(&strainRate_mtx);
+    g_strain_rate.val[0] = (int16_t)((uint16_t)f.data8[0] | ((uint16_t)f.data8[1] << 8));
+    g_strain_rate.val[1] = (int16_t)((uint16_t)f.data8[2] | ((uint16_t)f.data8[3] << 8));
+    g_strain_rate.val[2] = (int16_t)((uint16_t)f.data8[4] | ((uint16_t)f.data8[5] << 8));
+    g_strain_rate.val[3] = (int16_t)((uint16_t)f.data8[6] | ((uint16_t)f.data8[7] << 8));
+    g_strain_rate.valid  = true;
+    chMtxUnlock(&strainRate_mtx);
+}
+
 int can_read_regs(CANRegEntry *out, int max)
 {
     if (!out || max < 1) return 0;
@@ -181,4 +195,5 @@ void can_drv_init(void)
     bprl_can_register(0x02, imx5_can_cb, nullptr);
     bprl_can_register(0x03, imx5_can_cb, nullptr);
     bprl_can_register(0x04, imx5_can_cb, nullptr);
+    bprl_can_register(0x69, strain_rate_can_cb, nullptr);
 }

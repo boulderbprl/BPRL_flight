@@ -4,13 +4,12 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 
 ---
 
-## TODO: 
-Add IMU calibration sequence and offsets to flash memory.
-Add telemtery radio support for mocap/ground station support.
-Add position hold controller.
-Add Thrust model and RPM feedback from Dshot ESC. 
-Add UI for debug tool.
-Add voltage feedback from the analog input on Power1 port. using CubePilot Power Brick Mini
+## TODO
+
+- Add position hold controller.
+- Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
+- Complete arming logic (dedicated RC switch channel).
+- IMX5 yaw magnetometer / heading reference integration.
 
 
 ---
@@ -49,9 +48,9 @@ BPRL_flight/
 │   ├── coms/                 Peripheral drivers
 │   │   ├── SPI.hpp/.cpp      SPI bus init, ICM-20948/20602 instantiation
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver, IMX5 callback, device table
-│   │   ├── I2C.hpp/.cpp      I2C device table (TODO — strain future)
-│   │   ├── PWM.hpp/.cpp      Motor PWM output (TODO — TIM1 future)
-│   │   ├── Radio.hpp/.cpp    RC radio input (TODO — ICU/SBUS future)
+│   │   ├── I2C.hpp/.cpp      I2C device table (stub — planned for strain gauges)
+│   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
+│   │   ├── Radio.hpp/.cpp    CRSF receiver input
 │   │   ├── ICM20948.hpp/.cpp InvenSense ICM-20948 9-DOF driver
 │   │   └── ICM20602.hpp/.cpp InvenSense ICM-20602 6-DOF driver
 │   │
@@ -90,9 +89,9 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
-| I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices ( TODO:strain) |
-| ControlThread | NORMALPRIO+20 | 500 Hz | Cascade PID → MotorMixer → PWM out |
+| StateEstThread | NORMALPRIO+25 | 400 Hz | Fuse sensors → g_state[] |
+| I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices (TODO: strain) |
+| ControlThread | NORMALPRIO+20 | 400 Hz | Cascade PID → MotorMixer → motor output |
 | RadioThread | NORMALPRIO+10 | 50 Hz | Read RC input → g_input[] |
 | HouseThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
 | LogThread | NORMALPRIO-15 | 100/50 Hz | Snapshot sensors + state → SD card |
@@ -107,7 +106,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[4]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets) |
-| `g_output[4]` | `state_mtx` | Motor PWM values [µs] |
+| `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
@@ -137,7 +136,7 @@ RC input
 
 **Throttle shaping** (`compute_throttle`): applies an exponential curve around mid-throttle and an angle boost to hold altitude during maneuvers.
 
-**MotorMixer** converts `[roll_cmd, pitch_cmd, yaw_cmd, thrust]` to four motor PWM values using an X-frame mixing matrix. All motors are set to `PWM_IDLE` (1000 µs) when disarmed or when |roll| or |pitch| exceeds ~80°.
+**MotorMixer** converts `[roll_cmd, pitch_cmd, yaw_cmd, thrust]` to four normalized motor commands (0–1000) using an X-frame mixing matrix. All motors are set to 0 when disarmed or when |roll| or |pitch| exceeds ~80°. `motor_output_write()` in `src/coms/PWM.hpp` translates these values to DShot or PWM pulses depending on the `MOTOR_PROTOCOL` compile-time define.
 
 Motor channel mapping (top view):
 
@@ -162,12 +161,6 @@ Gains live in `src/controllers/AttitudeController.cpp`:
 | Yaw rate | 0.10 | 0.02 | 0 | 0.5 |
 
 ### TODOs
-
-- **Motor output wiring** — `motor_output_init()` and `motor_output_write()` in `src/coms/PWM.cpp` are TODOs. Needs TIM1 PWM configuration (FMU CH1-4) in `halconf.h` and `mcuconf.h`. To switch to DShot, only `motor_output_write()` needs to change; everything upstream produces microsecond PWM values.
-
-- **Radio input wiring** — `radio_input_update()` in `src/coms/Radio.cpp` is a TODO. 
-  - **PWM capture:** enable `HAL_USE_ICU`, configure TIM8 input capture on `LINE_RC_INPUT`
-  - **SBUS:** configure USART6 at 100000 baud 8E2 inverted, decode 25-byte frame, set RadioThread period to `TIME_MS2I(14)` in `main.cpp`
 
 - **Arming logic** — `radio_armed()` returns `false` unconditionally. Needs a dedicated switch channel decoded from the radio.
 
@@ -519,7 +512,7 @@ make
 make BOARD=CubeBlueH7
 make BOARD=CubeOrangePlus
 
-# Enable debug UART (USART3 @ 115200 on Telem1 — adds 10 Hz print thread)
+# Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
 make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
 
 # Clean build directory
@@ -542,67 +535,34 @@ make flash-stlink BOARD=CubeBlueH7
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
-### Debug UART
+### Debug USB
 
-With `-DBPRL_DEBUG`, `DebugThread` prints one status line per 100 ms over **USART3** (PD8 TX / PD9 RX, 115200 baud 8N1). On the Cube this is the **Telem1** connector. Example output:
+With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **USB CDC** port (`/dev/ttyACM0`):
 
-```
-armed=0 r=0.00 p=0.01 y=-0.02 thr=0.00 m=[1000,1000,1000,1000]
-```
+| Prefix | Content |
+|---|---|
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz |
+| `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
+| `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 
-Remove `-DBPRL_DEBUG` before flight — the print thread adds ~1 KB of stack and non-trivial scheduling jitter at 10 Hz.
+Without `-DBPRL_DEBUG` the USB port still accepts commands from the ground tools — only the continuous stream is suppressed. Remove `-DBPRL_DEBUG` before flight to eliminate scheduling jitter from the print thread.
 
 ---
 
 ## 7. Comms Drivers
 
-All drivers live in `src/coms/`. Register devices in `main.cpp` before calling `threads_start()`.
+All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) for full protocol details.
 
-### SPI — `SPI.hpp/.cpp`
+### Channel summary
 
-Two SPI buses drive all three on-board IMUs. Each IMU has its own chip-select pin.
-
-| Bus | Peripheral | CS pin | Device |
+| Channel | Driver | Device(s) | Status |
 |---|---|---|---|
-| SPI1 | SPID1 | PC2 | ICM-20948 (imu1, primary) |
-| SPI4 | SPID4 | PE4 | ICM-20948 (imu2, external) |
-| SPI4 | SPID4 | PC13 | ICM-20602 (imu3) |
-
-`spi_drv_init()` initialises all three devices and must be called from inside `SPIThread` because the ICM power-on reset sequences use `chThdSleepMilliseconds`. `imu2` and `imu3` share SPI4 and use `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
-
-### FDCAN — `CAN.hpp/.cpp`
-
-FDCAN1 at **500 kbps** using HSE (24 MHz) as the clock source. Standard 11-bit IDs only.
-
-A table of up to 8 ID→callback pairs is maintained. `CANThread` blocks on `canReceiveTimeout` and calls `can_dispatch()` immediately on frame arrival, routing each frame to its registered handler in O(n) time.
-
-**Currently supported device:** Inertial Sense IMX5 — four frame IDs pre-registered by `can_drv_init()`. See `CAN.hpp` for the byte-level protocol.
-
-**Adding a CAN device:**
-```cpp
-// in main.cpp before threads_start():
-bprl_can_register(0x10, my_callback, nullptr);
-```
-
-### I2C — `I2C.hpp/.cpp`
-
-**Status: stub.** The registration table and `i2c_poll_all()` dispatch loop are implemented, but the I2C peripheral is not started.
-
-**TODO:** Enable `HAL_USE_I2C TRUE` in `cfg/halconf.h`, configure `I2CD1` in `cfg/mcuconf.h`, call `i2cStart()` inside `i2c_drv_init()`. Planned devices: strain sensors
-
-### PWM — `PWM.hpp/.cpp`
-
-**Status: stub.** The interface accepts four PWM values in microseconds (1000–1950 µs) but does not drive any timer.
-
-**TODO:** Enable `HAL_USE_PWM TRUE` in `cfg/halconf.h`, configure TIM1 CH1-4 for FMU outputs. To switch to DShot, only `motor_output_write()` needs changing — the MotorMixer and ControlThread produce protocol-agnostic microsecond values.
-
-### Radio — `Radio.hpp/.cpp`
-
-**Status: stub.** All getters (`radio_thr()`, `radio_roll()`, etc.) return safe defaults (0.0 / false).
-
-**TODO — choose radio:**
-- **PWM capture:** Enable `HAL_USE_ICU`, configure TIM8 on `LINE_RC_INPUT`.
-- **SBUS:** Configure USART6 at 100000 baud, 8E2, inverted RX line; decode the 25-byte SBUS frame in `radio_input_update()`. Change `kRates.radio` in `main.cpp` to `TIME_MS2I(14)`.
+| SPI1 | `SPI.hpp/.cpp` | ICM-20948 (primary IMU) | Working |
+| SPI4 | `SPI.hpp/.cpp` | ICM-20948 (external IMU), ICM-20602 (backup IMU) | Working |
+| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69) | Working |
+| TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
+| UART | `Radio.hpp/.cpp` | CRSF receiver | Working |
+| I2C1 | `I2C.hpp/.cpp` | (planned: strain gauge amplifiers) | Stub |
 
 ---
 
@@ -640,7 +600,7 @@ Both ICM drivers use 32-byte aligned DMA buffers and apply `cacheBufferFlush` be
 
 ### Inertial Sense IMX5 (FDCAN1)
 
-External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 at 500 kbps.
+External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 at 1 Mbit/s.
 
 **Frame protocol (standard 11-bit IDs):**
 
