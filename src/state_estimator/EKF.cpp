@@ -8,7 +8,7 @@
  * ══════════════════════════════════════════════════════════════════════════ */
 
 EKF::EKF()
-    : _imu_idx(0), _initialized(false), _innov_norm(0.0f)
+    : _imu_idx(0), _initialized(false), _innov_norm(0.0f), _vibe_filt(0.0f)
 {
     memset(_x, 0, sizeof(_x));
     memset(_P, 0, sizeof(_P));
@@ -23,6 +23,7 @@ void EKF::init(int imu_index)
     _imu_idx     = imu_index;
     _initialized = false;
     _innov_norm  = 0.0f;
+    _vibe_filt   = 0.0f;
 
     memset(_x, 0, sizeof(_x));
     memset(_P, 0, sizeof(_P));
@@ -69,7 +70,7 @@ void EKF::predict(float dt, const float accel[3], const float gyro[3])
     quat_to_rot_body2ned(_get_quat(), R);
 
     // ── Gravity vector in body frame: g_body = R_b2n^T * [0, 0, g] ───────
-    // R_ned2body = R_b2n^T, so g_body[i] = R[j][i] * g_ned[j] = R[2][i] * g
+    // NED z-down: g_NED = [0,0,+g]. g_body[i] = R_b2n[2][i] * g
     float g_body[3];
     g_body[0] = R[2][0] * GRAVITY;
     g_body[1] = R[2][1] * GRAVITY;
@@ -80,10 +81,10 @@ void EKF::predict(float dt, const float accel[3], const float gyro[3])
     float omega_x_v[3];
     cross3(gyro_corr, vel, omega_x_v);
 
-    // ── Gravity-corrected, Coriolis-corrected body acceleration ───────────
+    // NED z-down: sensor reads -g at hover, so a_true = accel + g_body - ω×v
     float a_true[3];
     for (int i = 0; i < 3; ++i)
-        a_true[i] = accel_corr[i] - g_body[i] - omega_x_v[i];
+        a_true[i] = accel_corr[i] + g_body[i] - omega_x_v[i];
 
     // ── Propagate position: X += R_b2n * v_body * dt ─────────────────────
     for (int i = 0; i < 3; ++i)
@@ -227,36 +228,81 @@ void EKF::update_gravity(const float accel[3], float R_var)
 {
     if (!_initialized) return;
 
-    // Gate: only correct attitude when vehicle is near-hover (|a| ~ g)
+    // ── Hard outer gate: reject clearly bad IMU samples (e.g. >3g) ────────
     float norm = sqrtf(accel[0]*accel[0] + accel[1]*accel[1] + accel[2]*accel[2]);
-    if (fabsf(norm - GRAVITY) > GRAV_GATE_MS2) return;
+    if (norm > GRAV_HARD_GATE || norm < 0.1f) return;
 
-    // Predicted gravity in body frame from current quaternion
-    float R[3][3];
-    quat_to_rot_body2ned(_get_quat(), R);
-    const float g_pred[3] = { R[2][0]*GRAVITY, R[2][1]*GRAVITY, R[2][2]*GRAVITY };
+    // ── Vibration filter: IIR estimate of (|a|-g)² ────────────────────────
+    // Mirrors ArduPilot's velDotNEDfilt = velDotNED*α + filt*(1-α).
+    // Time constant τ ≈ 1/GRAV_VIBE_ALPHA steps = 50 updates = 0.1 s at 500 Hz.
+    float dev = norm - GRAVITY;
+    _vibe_filt = GRAV_VIBE_ALPHA * (dev * dev) + (1.0f - GRAV_VIBE_ALPHA) * _vibe_filt;
 
-    // Innovation: raw accel minus predicted (g_body + accel_bias)
+    // ── Adaptive measurement noise: R_eff = R_base + R_VIBE * vibe_rms² ───
+    // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
+    // Under heavy vibration _vibe_filt grows and the update is trusted less,
+    // but is NOT blocked outright — only the chi-sq gate can fully reject it.
+    float R_eff = R_var + GRAV_R_VIBE * _vibe_filt;
+
+    // ── Build H and innovations ────────────────────────────────────────────
+    float R_rot[3][3];
+    quat_to_rot_body2ned(_get_quat(), R_rot);
+    // NED z-down: predicted sensor reading is -g_body (sensor reads -g at hover)
+    const float g_pred[3] = { -R_rot[2][0]*GRAVITY, -R_rot[2][1]*GRAVITY, -R_rot[2][2]*GRAVITY };
+
     const float innov[3] = {
         accel[0] - g_pred[0] - _x[iBax],
         accel[1] - g_pred[1] - _x[iBay],
         accel[2] - g_pred[2] - _x[iBaz]
     };
 
-    // H: 3×N — ∂g_body/∂q block + identity at accel bias columns
     float H[3][N] = {};
-    const float g = GRAVITY;
+    const float g  = GRAVITY;
     const float qw = _x[iQ0], qx = _x[iQ1], qy = _x[iQ2], qz = _x[iQ3];
 
-    H[0][iQ0] = -2*qy*g;  H[0][iQ1] =  2*qz*g;  H[0][iQ2] = -2*qw*g;  H[0][iQ3] =  2*qx*g;
-    H[1][iQ0] =  2*qx*g;  H[1][iQ1] =  2*qw*g;  H[1][iQ2] =  2*qz*g;  H[1][iQ3] =  2*qy*g;
-    H[2][iQ0] =  0.0f;    H[2][iQ1] = -4*qx*g;  H[2][iQ2] = -4*qy*g;  H[2][iQ3] =  0.0f;
+    // ∂(-g_body)/∂q = -∂g_body/∂q  (3×4 block, negated for z-down)
+    H[0][iQ0] =  2*qy*g;  H[0][iQ1] = -2*qz*g;  H[0][iQ2] =  2*qw*g;  H[0][iQ3] = -2*qx*g;
+    H[1][iQ0] = -2*qx*g;  H[1][iQ1] = -2*qw*g;  H[1][iQ2] = -2*qz*g;  H[1][iQ3] = -2*qy*g;
+    H[2][iQ0] =  0.0f;    H[2][iQ1] =  4*qx*g;  H[2][iQ2] =  4*qy*g;  H[2][iQ3] =  0.0f;
 
+    // ∂/∂accel_bias  (identity block)
     H[0][iBax] = 1.0f;
     H[1][iBay] = 1.0f;
     H[2][iBaz] = 1.0f;
 
-    const float R_diag[3] = { R_var, R_var, R_var };
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // Mirrors ArduPilot's velTestRatio pattern:
+    //   test_ratio = sum(innov²) / (sum(S_ii) * gate²)  < 1.0
+    // S_ii = H[row] * P * H[row]^T + R_eff  (diagonal of innovation covariance).
+    // H is sparse (nonzeros at {iQ0..iQ3, iBax+row}) so only 5×5 inner products
+    // are needed per row — O(75) ops total, negligible cost.
+    {
+        float innov_sq_sum = 0.0f;
+        float S_sum        = 0.0f;
+        const int nz_q[4]  = { iQ0, iQ1, iQ2, iQ3 };
+
+        for (int row = 0; row < 3; ++row) {
+            int nz[5];
+            nz[0]=iQ0; nz[1]=iQ1; nz[2]=iQ2; nz[3]=iQ3; nz[4]=iBax+row;
+
+            float S_ii = R_eff;
+            for (int a = 0; a < 5; ++a) {
+                float ph = 0.0f;
+                for (int b = 0; b < 5; ++b)
+                    ph += _P[nz[a]][nz[b]] * H[row][nz[b]];
+                S_ii += H[row][nz[a]] * ph;
+            }
+
+            innov_sq_sum += innov[row] * innov[row];
+            S_sum        += S_ii;
+        }
+
+        // gate²: with GRAV_CHI2_GATE=5 this is a 5σ joint gate
+        const float gate_sq = GRAV_CHI2_GATE * GRAV_CHI2_GATE;
+        if (S_sum < 1e-10f || innov_sq_sum > S_sum * gate_sq) return;
+    }
+
+    const float R_diag[3] = { R_eff, R_eff, R_eff };
     _update(3, H, R_diag, innov);
     _normalize_quat();
 }
@@ -299,57 +345,63 @@ void EKF::update_ned_vel(const float vel_ned[3], float R_var)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * Generic measurement update: m ≤ 6 measurements
+ * Generic measurement update: m ≤ 6 measurements.
  *
- * Computes: S = H*P*H^T + R  (m×m)
- *           K = P*H^T * S^-1 (N×m)
- *           x += K * innov
- *           P  = (I - K*H) * P
+ * Algorithm (matching ArduPilot EKF3 FinishFusion structure):
+ *   1. K  = P*H^T * (H*P*H^T + R)^-1
+ *   2. x += K * innov
+ *   3. Joseph form:  P = (I-KH)*P*(I-KH)^T + K*R*K^T
+ *      Numerically positive-definite by construction — eliminates the
+ *      covariance collapse seen under the previous (I-KH)*P form.
+ *   4. Symmetrize:   P[i][j] = P[j][i] = 0.5*(P[i][j]+P[j][i])
+ *      Mirrors ArduPilot FinishFusion triangle-averaging.
+ *   5. Clamp diagonal (ConstrainVariances equivalent).
+ *
+ * Scratch memory: _wA and _wB (N×N EKF member arrays, not stack-allocated)
+ * are reused here — they are only written by predict(), which is never
+ * called re-entrantly with _update().
+ *   _wA ← IKH = I - K*H
+ *   _wB ← IKH * P   (= (I-KH)*P, before the right multiply)
  * ══════════════════════════════════════════════════════════════════════════ */
 
 void EKF::_update(int m, const float H[][N], const float R_diag[], const float innov[])
 {
     const int M_MAX = 6;
 
-    // ── S = H*P*H^T + R  (m×m on stack) ──────────────────────────────────
-    float PHt[N][M_MAX] = {};   // P*H^T,  N×m
-    float S   [M_MAX][M_MAX] = {};  // m×m
-
-    for (int j = 0; j < m; ++j)          // column of H^T = row of H
+    // ── PHt = P * H^T  (N×m, on stack — 384 bytes) ───────────────────────
+    float PHt[N][M_MAX] = {};
+    for (int j = 0; j < m; ++j)
         for (int i = 0; i < N; ++i)
             for (int k = 0; k < N; ++k)
-                PHt[i][j] += _P[i][k] * H[j][k];  // P * H^T
+                PHt[i][j] += _P[i][k] * H[j][k];
 
+    // ── S = H*PHt + diag(R)  (m×m, on stack) ─────────────────────────────
+    float S[M_MAX][M_MAX] = {};
     for (int i = 0; i < m; ++i)
         for (int j = 0; j < m; ++j) {
-            for (int k = 0; k < N; ++k)
-                S[i][j] += H[i][k] * PHt[k][j];
+            for (int k = 0; k < N; ++k) S[i][j] += H[i][k] * PHt[k][j];
             if (i == j) S[i][j] += R_diag[i];
         }
 
-    // ── S^-1 via Gauss-Jordan on augmented [S | I] ───────────────────────
+    // ── S^-1 via Gauss-Jordan (pivoted) ───────────────────────────────────
     float Sinv[M_MAX][M_MAX] = {};
-    // Copy S into working buffer and set Sinv = I
-    float Sw[M_MAX][M_MAX];
+    float Sw  [M_MAX][M_MAX];
     for (int i = 0; i < m; ++i) {
         for (int j = 0; j < m; ++j) Sw[i][j] = S[i][j];
         Sinv[i][i] = 1.0f;
     }
-    // Forward elimination
     for (int col = 0; col < m; ++col) {
-        // Pivot: find max row
         int piv = col;
         for (int row = col + 1; row < m; ++row)
             if (fabsf(Sw[row][col]) > fabsf(Sw[piv][col])) piv = row;
-        // Swap rows
         for (int j = 0; j < m; ++j) {
-            float t = Sw[col][j]; Sw[col][j] = Sw[piv][j]; Sw[piv][j] = t;
-            t = Sinv[col][j]; Sinv[col][j] = Sinv[piv][j]; Sinv[piv][j] = t;
+            float t = Sw[col][j];   Sw[col][j]   = Sw[piv][j];   Sw[piv][j]   = t;
+                  t = Sinv[col][j]; Sinv[col][j] = Sinv[piv][j]; Sinv[piv][j] = t;
         }
         float diag = Sw[col][col];
         if (fabsf(diag) < 1e-12f) return;  // singular — skip update
-        float inv_diag = 1.0f / diag;
-        for (int j = 0; j < m; ++j) { Sw[col][j] *= inv_diag; Sinv[col][j] *= inv_diag; }
+        float inv_d = 1.0f / diag;
+        for (int j = 0; j < m; ++j) { Sw[col][j] *= inv_d; Sinv[col][j] *= inv_d; }
         for (int row = 0; row < m; ++row) {
             if (row == col) continue;
             float fac = Sw[row][col];
@@ -360,7 +412,7 @@ void EKF::_update(int m, const float H[][N], const float R_diag[], const float i
         }
     }
 
-    // ── K = P*H^T * S^-1  (N×m) ──────────────────────────────────────────
+    // ── K = PHt * S^-1  (N×m) ─────────────────────────────────────────────
     float K[N][M_MAX] = {};
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < m; ++j)
@@ -372,25 +424,52 @@ void EKF::_update(int m, const float H[][N], const float R_diag[], const float i
         for (int j = 0; j < m; ++j)
             _x[i] += K[i][j] * innov[j];
 
-    // ── P = (I - K*H) * P ─────────────────────────────────────────────────
-    // Compute KH (N×N), then P = P - KH*P
-    float KH[N][N] = {};
+    // ── Joseph form: P = (I-KH) * P * (I-KH)^T  +  K * diag(R) * K^T ────
+    // _wA = IKH = I - K*H
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < N; ++j) {
+            _wA[i][j] = (i == j) ? 1.0f : 0.0f;
+            for (int k = 0; k < m; ++k)
+                _wA[i][j] -= K[i][k] * H[k][j];
+        }
+
+    // _wB = IKH * P  (so final product is _wB * IKH^T without a temp array)
+    mat_mul<N>(_wA, _P, _wB);
+
+    // _P = _wB * IKH^T  =  _wB[i][k] * _wA[j][k]
+    memset(_P, 0, sizeof(_P));
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < N; ++j)
-            for (int k = 0; k < m; ++k)
-                KH[i][j] += K[i][k] * H[k][j];
-
-    // Temporary copy of P for the subtraction
-    float Ptmp[N][N];
-    memcpy(Ptmp, _P, sizeof(_P));
-    memset(_P, 0, sizeof(_P));
-    for (int i = 0; i < N; ++i) {
-        for (int j = 0; j < N; ++j) {
-            float s = 0.0f;
             for (int k = 0; k < N; ++k)
-                s += KH[i][k] * Ptmp[k][j];
-            _P[i][j] = Ptmp[i][j] - s;
+                _P[i][j] += _wB[i][k] * _wA[j][k];
+
+    // _P += K * diag(R) * K^T  (positive-definite term that regularises P)
+    for (int k = 0; k < m; ++k)
+        for (int i = 0; i < N; ++i)
+            for (int j = 0; j < N; ++j)
+                _P[i][j] += K[i][k] * R_diag[k] * K[j][k];
+
+    // ── Symmetrize: P = 0.5*(P + P^T) ────────────────────────────────────
+    // Mirrors ArduPilot FinishFusion: "P must end up symmetric, so average
+    // the upper and lower differences, then store in both positions."
+    for (int i = 0; i < N; ++i)
+        for (int j = 0; j < i; ++j) {
+            float avg  = 0.5f * (_P[i][j] + _P[j][i]);
+            _P[i][j]   = avg;
+            _P[j][i]   = avg;
         }
+
+    // ── ConstrainVariances: clamp diagonal ────────────────────────────────
+    // Mirrors ArduPilot's ConstrainVariances() floor/ceiling per state group.
+    for (int i = iQ0;  i <= iQ3;  ++i)
+        if (_P[i][i] < P_MIN_QUAT) _P[i][i] = P_MIN_QUAT;
+    for (int i = iBax; i <= iBaz; ++i) {
+        if (_P[i][i] < P_MIN_BIAS_A) _P[i][i] = P_MIN_BIAS_A;
+        if (_P[i][i] > P_MAX_BIAS_A) _P[i][i] = P_MAX_BIAS_A;
+    }
+    for (int i = iBgx; i <= iBgz; ++i) {
+        if (_P[i][i] < P_MIN_BIAS_G) _P[i][i] = P_MIN_BIAS_G;
+        if (_P[i][i] > P_MAX_BIAS_G) _P[i][i] = P_MAX_BIAS_G;
     }
 }
 

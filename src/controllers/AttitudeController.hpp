@@ -30,5 +30,5 @@ private:
     PID _yaw_rate;
 
     static constexpr float YAW_GAIN = 1.5f;
-    static constexpr float THR_MID  = 0.45f;
+    static constexpr float THR_MID  = 0.4f;
 };

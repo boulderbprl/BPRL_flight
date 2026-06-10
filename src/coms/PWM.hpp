@@ -3,15 +3,22 @@
 #include <cstdint>
 
 /*
- * Motor PWM output — FMU CH1-4 via TIM1.
+ * Motor output — FMU CH1-4.
  *
- * TODO: enable HAL_USE_PWM in halconf.h, configure TIM1 in mcuconf.h,
- *       then fill in motor_output_init() and motor_output_write().
+ * motor_output_write() accepts a 0–1000 normalized throttle per motor:
+ *   0        → disarmed (DShot 0 / PWM 1000 µs)
+ *   1–1000   → 0.1%–100% throttle
  *
- * To switch to DShot: replace the body of motor_output_write() only.
- * ControlThread and MotorMixer are unaffected.
- *
- * PWM range: 1000 µs (idle / disarmed) … 1950 µs (full throttle).
+ * Protocol is selected at compile time via MOTOR_PROTOCOL:
+ *   MOTOR_PROTO_DSHOT (default): DShot600 bidirectional
+ *   MOTOR_PROTO_PWM:             Standard servo PWM via TIM1
  */
+#define MOTOR_PROTO_DSHOT  0
+#define MOTOR_PROTO_PWM    1
+
+#ifndef MOTOR_PROTOCOL
+#define MOTOR_PROTOCOL MOTOR_PROTO_DSHOT
+#endif
+
 void motor_output_init(void);
-void motor_output_write(const int32_t pwm_us[4]);
+void motor_output_write(const int32_t val[4]);  // val: 0=disarm, 1–1000=throttle ×0.1%

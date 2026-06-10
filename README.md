@@ -4,13 +4,12 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 
 ---
 
-## TODO: 
-Add IMU calibration sequence and offsets to flash memory.
-Add telemtery radio support for mocap/ground station support.
-Add position hold controller.
-Add Thrust model and RPM feedback from Dshot ESC. 
-Add UI for debug tool.
-Add voltage feedback from the analog input on Power1 port. using CubePilot Power Brick Mini
+## TODO
+
+- Add position hold controller.
+- Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
+- Complete arming logic (dedicated RC switch channel).
+- IMX5 yaw magnetometer / heading reference integration.
 
 
 ---
@@ -49,9 +48,9 @@ BPRL_flight/
 │   ├── coms/                 Peripheral drivers
 │   │   ├── SPI.hpp/.cpp      SPI bus init, ICM-20948/20602 instantiation
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver, IMX5 callback, device table
-│   │   ├── I2C.hpp/.cpp      I2C device table (TODO — strain future)
-│   │   ├── PWM.hpp/.cpp      Motor PWM output (TODO — TIM1 future)
-│   │   ├── Radio.hpp/.cpp    RC radio input (TODO — ICU/SBUS future)
+│   │   ├── I2C.hpp/.cpp      I2C device table (stub — planned for strain gauges)
+│   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
+│   │   ├── Radio.hpp/.cpp    CRSF receiver input
 │   │   ├── ICM20948.hpp/.cpp InvenSense ICM-20948 9-DOF driver
 │   │   └── ICM20602.hpp/.cpp InvenSense ICM-20602 6-DOF driver
 │   │
@@ -90,12 +89,12 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
-| I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices ( TODO:strain) |
-| ControlThread | NORMALPRIO+20 | 500 Hz | Cascade PID → MotorMixer → PWM out |
+| StateEstThread | NORMALPRIO+25 | 400 Hz | Fuse sensors → g_state[] |
+| I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices (TODO: strain) |
+| ControlThread | NORMALPRIO+20 | 400 Hz | Cascade PID → MotorMixer → motor output |
 | RadioThread | NORMALPRIO+10 | 50 Hz | Read RC input → g_input[] |
 | HouseThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
-| LogThread | NORMALPRIO-15 | 100/50 Hz | Snapshot sensors + state → SD card |
+| LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (6 message types per tick) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | UART status print (BPRL_DEBUG only) |
 
 ### Shared state
@@ -107,7 +106,8 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[4]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets) |
-| `g_output[4]` | `state_mtx` | Motor PWM values [µs] |
+| `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
+| `g_ctrl[4]` | `state_mtx` | PID torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
@@ -137,7 +137,7 @@ RC input
 
 **Throttle shaping** (`compute_throttle`): applies an exponential curve around mid-throttle and an angle boost to hold altitude during maneuvers.
 
-**MotorMixer** converts `[roll_cmd, pitch_cmd, yaw_cmd, thrust]` to four motor PWM values using an X-frame mixing matrix. All motors are set to `PWM_IDLE` (1000 µs) when disarmed or when |roll| or |pitch| exceeds ~80°.
+**MotorMixer** converts `[roll_cmd, pitch_cmd, yaw_cmd, thrust]` to four normalized motor commands (0–1000) using an X-frame mixing matrix. All motors are set to 0 when disarmed or when |roll| or |pitch| exceeds ~80°. `motor_output_write()` in `src/coms/PWM.hpp` translates these values to DShot or PWM pulses depending on the `MOTOR_PROTOCOL` compile-time define.
 
 Motor channel mapping (top view):
 
@@ -162,12 +162,6 @@ Gains live in `src/controllers/AttitudeController.cpp`:
 | Yaw rate | 0.10 | 0.02 | 0 | 0.5 |
 
 ### TODOs
-
-- **Motor output wiring** — `motor_output_init()` and `motor_output_write()` in `src/coms/PWM.cpp` are TODOs. Needs TIM1 PWM configuration (FMU CH1-4) in `halconf.h` and `mcuconf.h`. To switch to DShot, only `motor_output_write()` needs to change; everything upstream produces microsecond PWM values.
-
-- **Radio input wiring** — `radio_input_update()` in `src/coms/Radio.cpp` is a TODO. 
-  - **PWM capture:** enable `HAL_USE_ICU`, configure TIM8 input capture on `LINE_RC_INPUT`
-  - **SBUS:** configure USART6 at 100000 baud 8E2 inverted, decode 25-byte frame, set RadioThread period to `TIME_MS2I(14)` in `main.cpp`
 
 - **Arming logic** — `radio_armed()` returns `false` unconditionally. Needs a dedicated switch channel decoded from the radio.
 
@@ -339,163 +333,97 @@ Each unique `Dim` value used in the firmware produces a separate compiled instan
 
 ## 5. SD Card Logging
 
-Follows the logging standard in Ardupilot
+Binary log format is compatible with the [ArduPilot DataFlash standard](https://ardupilot.org/dev/docs/logmessages.html). Log files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org) for interactive plotting.
 
 ### How it works
 
-`LogThread` snapshots sensor and state data each tick, serialises it into a 32 KB in-RAM ring buffer, and drains that buffer to the SD card via FatFS at low priority. The ring buffer absorbs SD write stalls without ever blocking flight-critical threads.
+`LogThread` runs at 50 Hz. Each tick it snapshots all shared state under their respective mutexes, builds six packed records, and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
 
 **Log file location:** `/LOGS/LOG0001.BIN`, `LOG0002.BIN`, … auto-incremented on each boot.
 
-### Adding a new log set
+### Logged message types (50 Hz each)
 
-This is a four-step process. No changes outside the three files listed below are ever needed.
+| Name | ID | Fields |
+|---|---|---|
+| `ATT` | 0x03 | TimeUS, Rate, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
+| `LIN` | 0x04 | TimeUS, Rate, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
+| `RCIN` | 0x05 | TimeUS, Rate, RollStk, PitchStk, YawStk, ThrStk (normalized), Armed |
+| `OUTP` | 0x06 | TimeUS, Rate, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
+| `RPMS` | 0x07 | TimeUS, Rate, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
+| `STRN` | 0x08 | TimeUS, Rate, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
 
----
+TimeUS is a uint64 microsecond timestamp. Rate is the log rate in Hz (always 50).
 
-**Step 1 — Define the message struct in `src/logging/LogMessages.hpp`**
+### Decoding log files
+
+Use `tools/logs.py` — no firmware source needed:
+
+```bash
+# Decode a downloaded .bin file to CSV (one file per message type)
+python3 tools/logs.py logs decode LOG0042.BIN
+
+# Download latest completed log and decode immediately
+python3 tools/logs.py logs download --decode
+```
+
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`.
+
+Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all six message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
+
+### Adding a new log message type
+
+Three files, four steps:
+
+**Step 1 — Define the struct in `src/logging/LogMessages.hpp`**
 
 ```cpp
-constexpr uint8_t LOG_MSG_BARO = 0x03U;   // pick the next unused ID
+constexpr uint8_t LOG_MSG_BARO = 0x09U;   // next unused ID
 
 struct __attribute__((packed)) LogMsgBaro {
-    uint32_t time_ms;       // always first
+    uint64_t time_us;    // always first — required by UAV Log Viewer
+    uint16_t rate_hz;    // always second
     float    pressure_pa;
     float    temp_c;
     float    altitude_m;
 };
 ```
 
-Rules:
-- Always use `__attribute__((packed))`.
-- Always start with `uint32_t time_ms`.
-- Use only fixed-size types (`float`, `int32_t`, `uint8_t`, etc.) — no pointers, no padding.
-
----
+Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first, `rate_hz` second.
 
 **Step 2 — Add a row to `kLogDefs[]` in the same file**
 
 ```cpp
-constexpr LogDef kLogDefs[] = {
-    { LOG_MSG_IMU,   "IMU ", "TimeMS,...", sizeof(LogMsgIMU)   },
-    { LOG_MSG_STATE, "STAT", "TimeMS,...", sizeof(LogMsgState) },
-    // new entry example:
-    { LOG_MSG_strain,  "STRN", "TimeMS,rAccel,pAccel,zAccel", sizeof(LogMsgStrain) },
-};
+{ LOG_MSG_BARO, "BARO", "QHfff", "TimeUS,Rate,Pressure,Temp,Alt", sizeof(LogMsgBaro) },
 ```
 
-- `name` must be exactly 4 characters (space-pad if shorter).
-- `labels` is a comma-separated list of field names in the same order as the struct members. Used by the decoder script to produce column headers.
-
----
+Format codes: `Q`=uint64, `H`=uint16, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad).
 
 **Step 3 — Snapshot and write in `LogThread` (`src/threads.cpp`)**
 
-Inside the `while(true)` loop, at the rate you want:
-
 ```cpp
-{
-    LogMsgStrain msg = {};
-    msg.time_ms  = t_ms;
-    msg.rAccel   = roll_acceleration();
-    msg.pAccel   = pitch_acceleration();
-    msg.zAccel   = zAxis_acceleration();
-    logger.write(LOG_MSG_strain, msg);
-}
+{ LogMsgBaro msg = {}; msg.time_us = t_us; msg.rate_hz = 50U;
+  msg.pressure_pa = baro_pressure(); msg.temp_c = baro_temp(); msg.altitude_m = baro_alt();
+  logger.write(LOG_MSG_BARO, msg); }
 ```
 
-Use the same `tick % state_div` divisor pattern as the state log if you want a rate slower than the IMU log rate.
+**Step 4 — No rate change needed.** All messages share the 50 Hz `LogThread` period (`TIME_MS2I(20)` in `main.cpp`). If you need a different rate, add a divisor counter in `LogThread`.
 
----
+### Binary format reference
 
-**Step 4 — Set the log rate in `main.cpp`**
-
-If you want an independent rate, add a field to `LogRates` in `src/threads.hpp`:
-
-```cpp
-struct LogRates {
-    sysinterval_t imu;     // 100 Hz
-    sysinterval_t state;   // 50 Hz
-    sysinterval_t strain;  // add: 25 Hz
-};
-```
-
-Then initialise it in the sequencer block in `main.cpp`:
-
-```cpp
-/* .log = */ { TIME_US2I(10000),   // IMU:   100 Hz
-               TIME_US2I(20000),   // state:  50 Hz
-               TIME_MS2I(40) },    // strain:   25 Hz
-```
-
-And compute the divisor at LogThread startup just as `state_div` is computed.
-
----
-
-### Decoding log files
-
-A minimal Python script to parse the binary format (claude generated and untested):
-
-```python
-import struct, sys
-
-FMT_HDR_SIZE = 74   # 1+1+1+1+2+4+64
-
-with open(sys.argv[1], "rb") as f:
-    data = f.read()
-
-# Step 1: read FMT schema records from the file header
-schema = {}   # msg_id -> (name, body_size, [field_names])
-i = 0
-while i + FMT_HDR_SIZE <= len(data):
-    if data[i] == 0xA3 and data[i+1] == 0x95 and data[i+2] == 0x80:
-        type_id = data[i+3]
-        length  = struct.unpack_from("<H", data, i+4)[0]
-        name    = data[i+6:i+10].decode("ascii").strip()
-        labels  = data[i+10:i+74].decode("ascii").rstrip("\x00")
-        schema[type_id] = (name, length, labels.split(","))
-        i += FMT_HDR_SIZE
-    else:
-        break   # FMT header section ended
-
-# Step 2: decode data records
-records = {k: [] for k in schema}
-while i + 3 <= len(data):
-    if data[i] != 0xA3 or data[i+1] != 0x95:
-        i += 1
-        continue
-    msg_id = data[i+2]
-    if msg_id not in schema:
-        i += 1
-        continue
-    name, length, fields = schema[msg_id]
-    body = data[i+3 : i+3+length]
-    # Each field is 4 bytes (float or uint32) except uint8 trailing flags.
-    # Adjust the format string to match your specific struct layout.
-    records[msg_id].append(body)
-    i += 3 + length
-
-# Example: print IMU record count
-for msg_id, (name, _, fields) in schema.items():
-    print(f"{name}: {len(records[msg_id])} records  fields={fields}")
-```
-
-### Backend Details 
-
-**Record format — every record in the file:**
+**Data record** (every record after the header):
 ```
 [0xA3][0x95][msg_id][...packed struct body...]
 ```
 
-**File header — written once at file open, one FMT record per log type:**
+**FMT record** (one per message type, written at file open, 89 bytes):
 ```
-[0xA3][0x95][0x80][type_id][body_size_u16_LE][name_4b][labels_64b]
+[0xA3][0x95][0x80][type_u8][length_u8][name_4b][format_16b][labels_64b]
 ```
-This makes files self-describing: a decoder can read the schema from the file itself without access to the firmware source.
+`length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate (for current log set):** ~13 KB/s (100 Hz IMU at ~113 bytes/record + 50 Hz state at ~51 bytes/record). The 32 KB ring buffer provides ~2.5 s of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × 208 B/tick = ~10.4 KB/s. The 32 KB ring buffer holds ~3 s of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
 
-**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` configures the MPU to mark that region non-cacheable at boot, ensuring the SDMMC IDMA always reads coherent data.
+**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
 **SD card retry:** If no card is present at boot, `logger.init()` retries every 5 seconds. The rest of the firmware is unaffected.
 
@@ -519,7 +447,7 @@ make
 make BOARD=CubeBlueH7
 make BOARD=CubeOrangePlus
 
-# Enable debug UART (USART3 @ 115200 on Telem1 — adds 10 Hz print thread)
+# Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
 make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
 
 # Clean build directory
@@ -542,67 +470,34 @@ make flash-stlink BOARD=CubeBlueH7
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
-### Debug UART
+### Debug USB
 
-With `-DBPRL_DEBUG`, `DebugThread` prints one status line per 100 ms over **USART3** (PD8 TX / PD9 RX, 115200 baud 8N1). On the Cube this is the **Telem1** connector. Example output:
+With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **USB CDC** port (`/dev/ttyACM0`):
 
-```
-armed=0 r=0.00 p=0.01 y=-0.02 thr=0.00 m=[1000,1000,1000,1000]
-```
+| Prefix | Content |
+|---|---|
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz |
+| `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
+| `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 
-Remove `-DBPRL_DEBUG` before flight — the print thread adds ~1 KB of stack and non-trivial scheduling jitter at 10 Hz.
+Without `-DBPRL_DEBUG` the USB port still accepts commands from the ground tools — only the continuous stream is suppressed. Remove `-DBPRL_DEBUG` before flight to eliminate scheduling jitter from the print thread.
 
 ---
 
 ## 7. Comms Drivers
 
-All drivers live in `src/coms/`. Register devices in `main.cpp` before calling `threads_start()`.
+All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) for full protocol details.
 
-### SPI — `SPI.hpp/.cpp`
+### Channel summary
 
-Two SPI buses drive all three on-board IMUs. Each IMU has its own chip-select pin.
-
-| Bus | Peripheral | CS pin | Device |
+| Channel | Driver | Device(s) | Status |
 |---|---|---|---|
-| SPI1 | SPID1 | PC2 | ICM-20948 (imu1, primary) |
-| SPI4 | SPID4 | PE4 | ICM-20948 (imu2, external) |
-| SPI4 | SPID4 | PC13 | ICM-20602 (imu3) |
-
-`spi_drv_init()` initialises all three devices and must be called from inside `SPIThread` because the ICM power-on reset sequences use `chThdSleepMilliseconds`. `imu2` and `imu3` share SPI4 and use `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
-
-### FDCAN — `CAN.hpp/.cpp`
-
-FDCAN1 at **500 kbps** using HSE (24 MHz) as the clock source. Standard 11-bit IDs only.
-
-A table of up to 8 ID→callback pairs is maintained. `CANThread` blocks on `canReceiveTimeout` and calls `can_dispatch()` immediately on frame arrival, routing each frame to its registered handler in O(n) time.
-
-**Currently supported device:** Inertial Sense IMX5 — four frame IDs pre-registered by `can_drv_init()`. See `CAN.hpp` for the byte-level protocol.
-
-**Adding a CAN device:**
-```cpp
-// in main.cpp before threads_start():
-bprl_can_register(0x10, my_callback, nullptr);
-```
-
-### I2C — `I2C.hpp/.cpp`
-
-**Status: stub.** The registration table and `i2c_poll_all()` dispatch loop are implemented, but the I2C peripheral is not started.
-
-**TODO:** Enable `HAL_USE_I2C TRUE` in `cfg/halconf.h`, configure `I2CD1` in `cfg/mcuconf.h`, call `i2cStart()` inside `i2c_drv_init()`. Planned devices: strain sensors
-
-### PWM — `PWM.hpp/.cpp`
-
-**Status: stub.** The interface accepts four PWM values in microseconds (1000–1950 µs) but does not drive any timer.
-
-**TODO:** Enable `HAL_USE_PWM TRUE` in `cfg/halconf.h`, configure TIM1 CH1-4 for FMU outputs. To switch to DShot, only `motor_output_write()` needs changing — the MotorMixer and ControlThread produce protocol-agnostic microsecond values.
-
-### Radio — `Radio.hpp/.cpp`
-
-**Status: stub.** All getters (`radio_thr()`, `radio_roll()`, etc.) return safe defaults (0.0 / false).
-
-**TODO — choose radio:**
-- **PWM capture:** Enable `HAL_USE_ICU`, configure TIM8 on `LINE_RC_INPUT`.
-- **SBUS:** Configure USART6 at 100000 baud, 8E2, inverted RX line; decode the 25-byte SBUS frame in `radio_input_update()`. Change `kRates.radio` in `main.cpp` to `TIME_MS2I(14)`.
+| SPI1 | `SPI.hpp/.cpp` | ICM-20948 (primary IMU) | Working |
+| SPI4 | `SPI.hpp/.cpp` | ICM-20948 (external IMU), ICM-20602 (backup IMU) | Working |
+| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69) | Working |
+| TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
+| UART | `Radio.hpp/.cpp` | CRSF receiver | Working |
+| I2C1 | `I2C.hpp/.cpp` | (planned: strain gauge amplifiers) | Stub |
 
 ---
 
@@ -640,7 +535,7 @@ Both ICM drivers use 32-byte aligned DMA buffers and apply `cacheBufferFlush` be
 
 ### Inertial Sense IMX5 (FDCAN1)
 
-External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 at 500 kbps.
+External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 at 1 Mbit/s.
 
 **Frame protocol (standard 11-bit IDs):**
 

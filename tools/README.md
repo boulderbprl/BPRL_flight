@@ -1,13 +1,6 @@
 # BPRL Tools
 
-Ground-station utilities for the BPRL flight controller.
-
-| Script | Purpose | Build required |
-|---|---|---|
-| [flash_upload.py](#flash_uploadpy) | Flash firmware to the Cube over USB | — |
-| [bprl.py](#bprlpy) | Motor test, telemetry, SD log access | any (telemetry: DEBUG) |
-
----
+Ground-station utilities for the BPRL flight controller. Connect via USB CDC (`/dev/ttyACMx`, VID:PID `0483:5740`). All scripts auto-detect the port.
 
 ## Dependencies
 
@@ -15,322 +8,205 @@ Ground-station utilities for the BPRL flight controller.
 pip install pyserial rich
 ```
 
-`pyserial` is required by both scripts. `rich` is required only by `bprl.py`.
+---
+
+## Script overview
+
+| Script | Subcommands | DEBUG build? |
+|---|---|---|
+| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare` | Required |
+| `motor_test.py` | `motor-test` | No |
+| `calibrate.py` | `calibrate` | Required |
+| `can_tools.py` | `can-status`, `can-scan` | No |
+| `strain_rate.py` | `strain-rate` | No |
+| `dshot_tools.py` | `dshot-diag` | No |
+| `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
+| `flash_upload.py` | *(positional firmware path)* | — |
+
+All scripts accept `--port /dev/ttyACMx` and `--baud N` global options.
+
+---
+
+## telemetry.py
+
+> Requires `-DBPRL_DEBUG` firmware build.
+
+Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
+
+| Subcommand | Description |
+|---|---|
+| `telemetry` | Live attitude/rate/RPM/IMU/CAN dashboard |
+| `ekf-status` | Per-lane EKF roll/pitch/yaw/p/q/r table (all three onboard lanes + IMX5) |
+| `imu-compare` | Side-by-side raw accel and gyro from all three onboard IMUs |
+
+```bash
+python3 tools/telemetry.py telemetry
+python3 tools/telemetry.py ekf-status
+python3 tools/telemetry.py imu-compare
+```
+
+---
+
+## motor_test.py
+
+> Works on any firmware build. Remove props before use.
+
+Interactive motor test with live RPM feedback from bidirectional DShot GCR telemetry.
+
+```bash
+python3 tools/motor_test.py motor-test
+```
+
+Commands at the `>` prompt:
+
+| Command | Effect |
+|---|---|
+| `motor <0-3> <0-100>` | Spin one motor at the given throttle %. |
+| `stop` | Stop all motors. |
+| `quit` | Stop all motors and exit. |
+
+Motor layout (top view): `FL[2]  FR[0]` / `RL[1]  RR[3]`
+
+---
+
+## calibrate.py
+
+> Requires `-DBPRL_DEBUG` firmware build (needs the `$IMU` stream).
+
+Collects static IMU data, computes gyro and accelerometer biases, and writes them to flash.
+
+```bash
+python3 tools/calibrate.py calibrate [--duration 30]
+```
+
+Place the drone level on a flat surface before running. The script collects `--duration` seconds of `$IMU` samples (default 30 s), prints the computed biases, and asks for confirmation before writing to flash via `CAL,set` and `CAL,commit`.
+
+---
+
+## can_tools.py
+
+> Works on any firmware build.
+
+| Subcommand | Description |
+|---|---|
+| `can-status` | Read FDCAN1 PSR / ECR / RXF0S registers and decode error flags |
+| `can-scan [--duration N]` | Record all CAN IDs seen for N seconds, display Hz breakdown |
+
+```bash
+python3 tools/can_tools.py can-status
+python3 tools/can_tools.py can-scan --duration 2
+```
+
+`can-scan` marks each ID as registered (in the device table) or unknown. Unknown IDs appearing at high rate indicate a device that needs `bprl_can_register()`.
+
+---
+
+## strain_rate.py
+
+> Works on any firmware build. In development.
+
+Live display of the strain-rate sensor (CAN ID 0x69): 4 signed int16 values representing strain rate on each arm.
+
+```bash
+python3 tools/strain_rate.py strain-rate
+```
+
+Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively sending CAN frames.
+
+---
+
+## dshot_tools.py
+
+> Works on any firmware build.
+
+One-shot snapshot of bidirectional DShot telemetry state: DMA TC counts, input-capture ISR counts, and raw edge timestamps for each motor.
+
+```bash
+python3 tools/dshot_tools.py dshot-diag
+```
+
+Useful for diagnosing DShot issues: no DMA fires → DMA init problem; DMA fires but no ISR → NVIC/DIER problem; ISR fires but no edges → ESC not responding or wiring issue.
+
+---
+
+## logs.py
+
+> Works on any firmware build. SD card must be inserted.
+
+| Subcommand | Description |
+|---|---|
+| `logs list` | List log files on SD card with sizes |
+| `logs download [FILE]` | Download a log file (default: latest completed) |
+| `logs download FILE --decode` | Download and immediately decode to CSV |
+| `logs decode FILE.bin` | Offline: decode a binary log to CSV files |
+| `logs erase` | Erase all completed log files |
+| `log-status` | Query SD card logger status (ready / error code) |
+
+```bash
+python3 tools/logs.py logs list
+python3 tools/logs.py logs download
+python3 tools/logs.py logs download LOG0042.BIN
+python3 tools/logs.py logs decode LOG0042.BIN
+python3 tools/logs.py logs erase
+python3 tools/logs.py log-status
+```
+
+`logs decode` is offline — no serial port needed. It reads the ArduPilot DataFlash schema from the file header (FMT records) and writes one CSV per message type:
+
+| CSV file | Rate | Contents |
+|---|---|---|
+| `<stem>_att.csv` | 50 Hz | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
+| `<stem>_lin.csv` | 50 Hz | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
+| `<stem>_rcin.csv` | 50 Hz | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), Armed |
+| `<stem>_outp.csv` | 50 Hz | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
+| `<stem>_rpms.csv` | 50 Hz | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
+| `<stem>_strn.csv` | 50 Hz | TimeUS, S0–S3 (int16 strain-rate), Valid |
+
+The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 
 ---
 
 ## flash_upload.py
 
-Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using the PX4/ArduPilot ChibiOS bootloader protocol over USB.
-
-### How it works
-
-The uploader speaks to the ChibiOS bootloader that lives in protected flash. When you connect the Cube over USB it appears as `/dev/ttyACMx`. If the board is already running flight firmware the script sends a MAVLink `COMMAND_LONG` reboot-to-bootloader command automatically — you do not need to hold a button or power-cycle.
-
-Sequence: **detect port → send reboot request if needed → erase flash → program in 252-byte chunks → CRC-32 verify → reboot into firmware**.
-
-### Usage
-
-**Recommended: use the Makefile targets from the project root.**
+Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using the ChibiOS bootloader protocol over USB.
 
 ```bash
-# Build and flash CubeBlue H7 (auto-detects /dev/ttyACM*)
+# Recommended: use Makefile targets
 make flash BOARD=CubeBlueH7
-
-# Specify port explicitly
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
-
-# CubeOrange+
 make flash BOARD=CubeOrangePlus PORT=/dev/ttyACM0
 
-# Debug build (enables USB telemetry + extra output)
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
-```
-
-**Or call the script directly:**
-
-```bash
+# Or directly
 python3 tools/flash_upload.py build/BPRL.bin
 python3 tools/flash_upload.py --port /dev/ttyACM0 build/BPRL.bin
-python3 tools/flash_upload.py --port /dev/ttyACM0 --baud 115200 build/BPRL.bin
 ```
 
-### Options
-
-| Flag | Default | Description |
-|---|---|---|
-| `firmware` | *(required)* | Path to the `.bin` file, e.g. `build/BPRL.bin` |
-| `--port` | auto-detect | Serial port. Searches `/dev/serial/by-id/usb-*Cube*` then `/dev/ttyACM*` |
-| `--baud` | 115200 | Bootloader baud rate (rarely needs changing) |
-
-### Port detection order
-
-When `--port` is omitted the script scans in this order and uses the first match:
-
-1. `/dev/serial/by-id/usb-*Hex*`
-2. `/dev/serial/by-id/usb-*Cube*`
-3. `/dev/serial/by-id/usb-*ArduPilot*`
-4. `/dev/ttyACM*` (fallback)
-
-### Troubleshooting
-
-**"Waiting for board…" hangs indefinitely**
-
-- Unplug and re-plug the USB cable. The script retries as soon as it sees the port appear.
-- On Linux, check whether ModemManager is interfering:
-  ```bash
-  sudo systemctl stop ModemManager
-  ```
-  The script will warn you if ModemManager is installed.
-- Confirm the port exists: `ls /dev/ttyACM*`
-
-**"firmware exceeds flash" error**
-
-The `.bin` is larger than the 2 MB application flash. This should not happen in a normal build — check `build/BPRL.map` for unexpectedly large sections.
-
-**Upload succeeds but board does not boot**
-
-Verify the correct `BOARD=` was passed. Flashing a CubeBlue H7 build onto a CubeOrange+ (or vice-versa) will produce a board that boots but immediately faults because the clock and peripheral register layouts differ.
-
-**ST-Link alternative**
-
-If the USB bootloader is broken or unavailable:
-```bash
-make flash-stlink BOARD=CubeBlueH7
-```
-This uses OpenOCD with an ST-Link probe connected to the debug connector.
+If the board is already running firmware, the script sends a reboot-to-bootloader command automatically. Sequence: detect port → reboot if needed → erase → program in 252-byte chunks → CRC-32 verify → reboot.
 
 ---
 
-## bprl.py
-
-A unified ground tool for interacting with the flight controller over USB CDC (`/dev/ttyACMx`, VID:PID `0483:5740`). It auto-detects the port.
-
-> **Motor test and log commands work on any firmware build.**
-> The `telemetry` subcommand requires a debug build (`-DBPRL_DEBUG`).
+## Quick reference
 
 ```bash
-python3 tools/bprl.py [--port /dev/ttyACMx] <subcommand>
-```
-
-### Global options
-
-| Flag | Default | Description |
-|---|---|---|
-| `--port` | auto-detect | Override the serial port |
-| `--baud` | 115200 | Baud rate (CDC ignores this, but pyserial requires it) |
-
----
-
-### `telemetry` — Live sensor dashboard
-
-> Requires a firmware built with `-DBPRL_DEBUG`.
-
-```bash
-python3 tools/bprl.py telemetry
-```
-
-Connects to the drone and displays a live dashboard updating at ~10 Hz. The firmware streams a `$TEL` CSV line each tick; this command parses those lines and renders them in the terminal.
-
-**What is displayed:**
-
-| Panel | Fields |
-|---|---|
-| Attitude | Roll, Pitch, Yaw in degrees |
-| Body rates | P, Q, R in rad/s (from EKF state) |
-| RC inputs | Throttle [0–1], Roll/Pitch/Yaw targets [−1–1] |
-| IMU status | Valid/absent flag for each of the 3 on-board IMUs |
-| CAN INS (IMX5) | Connected flag + measured quaternion rate (expected 200 Hz) and body-rate message rate (expected 100 Hz) |
-| Motor RPM | Mechanical RPM for each motor (eRPM ÷ 14 pole pairs); green ● = valid GCR frame received |
-
-**Reading the IMU status panel:**
-
-- `ICM-20948 pri` — primary SPI1 IMU (always expected valid when soldered)
-- `ICM-20948 ext` — external SPI4 IMU
-- `ICM-20602` — backup SPI4 IMU
-- `CAN INS (IMX5)` — external Inertial Sense IMX5 over FDCAN1. The Hz values show measured incoming frame rates. If `quat=0 Hz` the IMX5 is not sending; the EKF falls back to on-board gyro/accel only.
-
-Press `Ctrl-C` to exit.
-
----
-
-### `motor-test` — Interactive motor test
-
-> Works on any firmware build. Props must be removed first.
-
-```bash
-python3 tools/bprl.py motor-test
-```
-
-Sends motor test commands to the firmware and displays live RPM feedback. While motor test is active the firmware's ControlThread bypasses the PID controller and drives the ESC directly at the commanded DShot value.
-
-**Motor layout (top view):**
-
-```
-    FL [2]       FR [0]
-         \       /
-         [  body  ]
-         /       \
-    RL [1]       RR [3]
-```
-
-**Commands at the `>` prompt:**
-
-| Command | Effect |
-|---|---|
-| `motor <0-3> <0-100>` | Spin one motor at the given throttle %. All others are stopped. |
-| `stop` or `s` | Stop all motors and exit test mode. |
-| `quit` or `q` | Stop all motors and exit the script. |
-
-**Examples:**
-
-```
-> motor 0 15      # spin FR motor at 15% throttle
-> motor 2 25      # spin FL motor at 25% throttle
-> stop            # stop all
-```
-
-**Safety rules enforced by the firmware:**
-
-- The drone must be **disarmed** (arm switch in disarm position). If armed, the command is rejected with `MT,ERR,armed`.
-- Only one motor runs at a time. Each `motor` command zeroes the other three ESC outputs first.
-- `quit` sends a `MT,stop` command before exiting so motors always stop even if the terminal is closed abruptly.
-
-**RPM display:**
-
-RPM values come from the bidirectional DShot GCR telemetry built into `src/coms/DShot.cpp`. The ESCs return electrical RPM; the display converts to mechanical RPM using 14 pole pairs. A `●` means at least one valid GCR frame has been decoded for that motor since it started spinning. `○` means no valid frame yet (motor may be spinning but telemetry not decoded — check ESC BLHeli_32 bidirectional DShot setting).
-
-> If no `$TEL` lines are arriving (non-DEBUG build) the RPM column shows `---`. Motor test still works — you just can't see RPM live without a DEBUG build.
-
----
-
-### `logs list` — List SD card log files
-
-> Works on any firmware build. SD card must be inserted.
-
-```bash
-python3 tools/bprl.py logs list
-```
-
-Requests a directory listing of `/LOGS/` on the SD card and prints a table with filename and size. The highest-numbered file is the currently-open log (being written now); all others are completed.
-
-**Example output:**
-
-```
-         SD Card Log Files
-┌─────────────┬────────────────────┐
-│ Filename    │ Size               │
-├─────────────┼────────────────────┤
-│ LOG0001.BIN │   1.2 MB  (1,258,496 B) │
-│ LOG0042.BIN │   4.7 MB  (4,927,488 B) │
-└─────────────┴────────────────────┘
-  Latest: LOG0042.BIN
-```
-
----
-
-### `logs download` — Download a log file
-
-> Works on any firmware build.
-
-```bash
-# Download the latest completed log (second-to-highest-numbered file)
-python3 tools/bprl.py logs download
-
-# Download a specific file
-python3 tools/bprl.py logs download LOG0001.BIN
-```
-
-Saves the file to the current directory with a progress bar. Transfer speed depends on USB CDC throughput (typically 200–400 KB/s for full-speed USB).
-
-**Protocol detail:** The firmware sends `LOG,SIZE,<bytes>` then immediately streams raw binary. The script preserves any bytes already read past the size line so no data is lost at the start of the binary stream.
-
-The default (no filename given) downloads the **second-to-latest** log file, i.e., the most recent completed flight. The highest-numbered file is still being written and may be incomplete; use `logs download LOG<NNNN>.BIN` to explicitly request it if needed.
-
----
-
-### `logs erase` — Erase completed log files
-
-> Works on any firmware build.
-
-```bash
-python3 tools/bprl.py logs erase
-```
-
-Asks for confirmation, then deletes all log files in `/LOGS/` **except the currently-open one** (the firmware's active log for this boot). Useful before a flight to clear old data and free SD card space.
-
-```
-Erase all completed log files from SD card? [y/N]: y
-Erased 41 file(s).
-```
-
----
-
-### `logs decode` — Decode a binary log to CSV
-
-> Offline — no drone or serial port needed.
-
-```bash
-python3 tools/bprl.py logs decode LOG0042.BIN
-```
-
-Parses the binary log format (`[0xA3][0x95][msg_id][packed struct]` records) and writes two CSV files alongside the source file:
-
-| Output file | Contents | Rate |
-|---|---|---|
-| `LOG0042_imu.csv` | Raw accel/gyro from 3 on-board IMUs + CAN IMU quaternion and body rates | 100 Hz |
-| `LOG0042_state.csv` | Fused flight state: roll, pitch, yaw, p/q/r, Z position/velocity/accel, throttle, arm status | 50 Hz |
-
-**IMU CSV columns:**
-
-```
-TimeMS, AX0,AY0,AZ0,GX0,GY0,GZ0,V0,  ← ICM-20948 primary  (m/s², rad/s, valid)
-        AX1,AY1,AZ1,GX1,GY1,GZ1,V1,  ← ICM-20948 external
-        AX2,AY2,AZ2,GX2,GY2,GZ2,V2,  ← ICM-20602
-        QW,QX,QY,QZ,CanP,CanQ,CanR,CV ← IMX5 CAN INS (quaternion + body rates)
-```
-
-**State CSV columns:**
-
-```
-TimeMS, Roll, Pitch, Yaw,   ← rad (EKF output via StateManager)
-        P, Q, R,            ← rad/s
-        ZPos, ZVel, ZAcc,   ← m, m/s, m/s² (NED down axis)
-        Thr,                ← [0, 1]
-        Armed               ← 0 or 1
-```
-
-Time is in milliseconds since boot (`chVTGetSystemTime` converted to ms).
-
----
-
-## Quick-reference card
-
-```bash
-# Flash firmware
+# Flash
 make flash BOARD=CubeBlueH7
 
-# Flash debug build (enables $TEL telemetry stream)
+# Debug build + flash
 make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeBlueH7
 
-# Live telemetry dashboard (debug build required)
-python3 tools/bprl.py telemetry
+# Telemetry (debug build required)
+python3 tools/telemetry.py telemetry
 
-# Test FL motor at 20% throttle then stop
-python3 tools/bprl.py motor-test
-> motor 2 20
-> stop
+# Motor test
+python3 tools/motor_test.py motor-test
 
-# See what logs are on the SD card
-python3 tools/bprl.py logs list
+# Logs
+python3 tools/logs.py logs list
+python3 tools/logs.py logs download
+python3 tools/logs.py logs decode LOG0042.BIN
 
-# Download latest completed flight log
-python3 tools/bprl.py logs download
+# CAN diagnostics
+python3 tools/can_tools.py can-scan --duration 2
 
-# Decode it to CSV
-python3 tools/bprl.py logs decode LOG0042.BIN
-
-# Erase old logs before a flight
-python3 tools/bprl.py logs erase
+# IMU calibration (debug build required)
+python3 tools/calibrate.py calibrate
 ```

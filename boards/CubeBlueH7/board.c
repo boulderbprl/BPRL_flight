@@ -12,6 +12,26 @@
 
 void boardInit(void)
 {
+    /*
+     * ── AUX output power enable (MUST come first) ─────────────────────
+     *
+     * PA8 = nVDD_5V_PERIPH_EN (active LOW).
+     *   Powers the level-shifter ICs on AUX 1-6 output path.
+     *   PCB pull-up → reset default HIGH = rail OFF = no signal to motors.
+     *
+     * PB4 = PWM_VOLT_SEL (HIGH = 3.3 V mode).
+     *   Releases the level-shifter output-enable.
+     *
+     * ArduPilot hwdef/CubeOrange/hwdef.inc:
+     *   PA8 nVDD_5V_PERIPH_EN OUTPUT LOW
+     *   PB4 PWM_VOLT_SEL      OUTPUT HIGH
+     */
+    palSetPadMode(GPIOA, 8U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
+    palClearLine(LINE_PERIPH_5V_EN);   /* LOW = 5 V peripheral rail ON */
+
+    palSetPadMode(GPIOB, 4U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
+    palSetLine(LINE_PWM_VOLT_SEL);     /* HIGH = 3.3 V PWM output level */
+
     /* ── Sensor 3.3V rail ───────────────────────────────────────────────── */
     palSetPadMode(GPIOE, 3U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
     palSetLine(LINE_SENSOR_PWR_EN);
@@ -57,9 +77,9 @@ void boardInit(void)
     palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOA, 12U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── FDCAN1 (PH13=TX, PH14=RX) → AF9 ──────────────────────────────── */
-    palSetPadMode(GPIOH, 13U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
-    palSetPadMode(GPIOH, 14U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
+    /* ── FDCAN1 (PD1=TX, PD0=RX) → AF9 ────────────────────────────────── */
+    palSetPadMode(GPIOD, 1U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOD, 0U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
 
     /* ── SDMMC1 — microSD card → AF12 ──────────────────────────────────
      * D0=PC8, D1=PC9, D2=PC10, D3=PC11, CK=PC12, CMD=PD2
