@@ -5,6 +5,7 @@ BPRL CAN Tools — CAN bus status and ID scanner.
 Works on any firmware build.
 
 Usage:
+    python3 tools/can_tools.py                         # default: CAN status
     python3 tools/can_tools.py can-status              # FDCAN1 protocol status and error counters
     python3 tools/can_tools.py can-scan [--duration N] # scan all CAN IDs and show Hz breakdown
 
@@ -174,7 +175,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL CAN tools — bus status and ID scanner")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("can-status", help="Read FDCAN1 protocol status and error counters")
 
@@ -183,8 +184,10 @@ def main():
                         help="Scan window in seconds (default: 1)")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "can-status"
 
+    ser = open_port(args.port, args.baud)
     try:
         if args.command == "can-status":
             cmd_can_status(ser, args)

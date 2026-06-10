@@ -35,7 +35,7 @@ public:
     static constexpr int NUM_LANES = 3;
 
     // IMX5 / mocap / gravity measurement noise variances — tunable.
-    static constexpr float R_QUAT      = 1e-4f;   // IMX5 quaternion component variance
+    static constexpr float R_QUAT      = 1e-3f;   // IMX5 quaternion component variance
     static constexpr float R_GRAVITY   = 0.5f;    // accel gravity-vector variance (m/s²)²
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
     static constexpr float R_MOCAP_VEL = 1e-2f;   // mocap NED velocity variance (m/s)²

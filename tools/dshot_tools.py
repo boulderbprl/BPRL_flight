@@ -5,6 +5,7 @@ BPRL DShot Diagnostic — bidirectional DShot telemetry snapshot.
 Works on any firmware build.
 
 Usage:
+    python3 tools/dshot_tools.py                      # default: DShot diagnostic snapshot
     python3 tools/dshot_tools.py dshot-diag
 
 Options:
@@ -90,12 +91,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL DShot diagnostic — bidirectional telemetry snapshot")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
     sub.add_parser("dshot-diag",
                    help="One-shot DShot bidirectional telemetry snapshot (edge counts, timing)")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "dshot-diag"
+
+    ser = open_port(args.port, args.baud)
     try:
         cmd_dshot_diag(ser, args)
     finally:

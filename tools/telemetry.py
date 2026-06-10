@@ -5,6 +5,7 @@ BPRL Telemetry — live sensor dashboard, EKF lane status, IMU comparison.
 Requires a firmware built with -DBPRL_DEBUG.
 
 Usage:
+    python3 tools/telemetry.py                        # default: live attitude dashboard
     python3 tools/telemetry.py telemetry              # attitude / rates / RPM / IMU dashboard
     python3 tools/telemetry.py ekf-status             # per-lane EKF roll/pitch/yaw table
     python3 tools/telemetry.py imu-compare            # side-by-side IMU accel+gyro with deltas
@@ -383,15 +384,17 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL telemetry tools — requires -DBPRL_DEBUG firmware build")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("telemetry",   help="Live attitude / rates / IMU / RPM dashboard")
     sub.add_parser("ekf-status",  help="Per-lane EKF roll/pitch/yaw/p/q/r table")
     sub.add_parser("imu-compare", help="Side-by-side IMU accel+gyro comparison with deltas")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "telemetry"
 
+    ser = open_port(args.port, args.baud)
     try:
         if args.command == "telemetry":
             cmd_telemetry(ser, args)

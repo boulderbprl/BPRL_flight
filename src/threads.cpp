@@ -38,6 +38,7 @@ float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
 float   g_input[4]           = {};
 int32_t g_output[4]          = {};
+float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
 bool    g_armed              = false;
 
 MUTEX_DECL(imu_mtx);
@@ -338,6 +339,10 @@ static THD_FUNCTION(ControlThread, arg)
         motor_output_write(motor_out);
 
         chMtxLock(&state_mtx);
+        g_ctrl[0] = torque_cmds[0];
+        g_ctrl[1] = torque_cmds[1];
+        g_ctrl[2] = torque_cmds[2];
+        g_ctrl[3] = thrust;
         memcpy(g_output, motor_out, sizeof(g_output));
         chMtxUnlock(&state_mtx);
 
@@ -1006,8 +1011,9 @@ static THD_FUNCTION(DebugThread, arg)
 #endif // BPRL_DEBUG
 
 /* ══════════════════════════════════════════════════════════════════════════
- * LogThread — 100 Hz IMU / 50 Hz state  NORMALPRIO-15
- * Snapshots g_imu[] and g_state[], buffers to ring, flushes to SD card.
+ * LogThread — 50 Hz  NORMALPRIO-15
+ * Logs 6 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN.
+ * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(LogThread, arg)
@@ -1015,75 +1021,123 @@ static THD_FUNCTION(LogThread, arg)
     chRegSetThreadName("log");
     const LogRates *rates = static_cast<const LogRates *>(arg);
 
-    /* state_div: log state every Nth IMU tick (e.g. 2 for 50 Hz when IMU = 100 Hz) */
-    const uint32_t state_div = (rates->state > 0) ?
-                               (uint32_t)(rates->imu / rates->state) : 1U;
-
-    /* Retry until SD card is inserted and mounted. */
     while (!logger.init()) {
         chThdSleepMilliseconds(5000);
     }
 
     systime_t next = chVTGetSystemTime();
-    uint32_t  tick = 0U;
 
     while (true) {
-        const uint32_t t_ms = TIME_I2MS(chVTGetSystemTime());
+        /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
+        const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
-        /* ── IMU snapshot (every tick → 100 Hz) ───────────────────────── */
+        /* ── State + controller snapshot (one mutex hold) ─────────────── */
+        float euler[3], state[StateIdx::N], inp[4], ctrl[4];
+        bool  armed;
+        chMtxLock(&state_mtx);
+        memcpy(euler, g_euler,  sizeof(euler));
+        memcpy(state, g_state,  sizeof(state));
+        memcpy(inp,   g_input,  sizeof(inp));
+        memcpy(ctrl,  g_ctrl,   sizeof(ctrl));
+        armed = g_armed;
+        chMtxUnlock(&state_mtx);
+
+        /* ── Strain rate snapshot ─────────────────────────────────────── */
+        StrainRateRaw strain = {};
+        chMtxLock(&strainRate_mtx);
+        strain = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+
+        /* ── RPM snapshot (dshot_get_telemetry is thread-safe) ───────── */
+        ESCTelemetry telem[4] = {};
+        dshot_get_telemetry(telem);
+
+        /* ── ATT — angular states ─────────────────────────────────────── */
         {
-            LogMsgIMU msg = {};
-            msg.time_ms = t_ms;
-
-            chMtxLock(&imu_mtx);
-            msg.ax0 = g_imu[0].accel[0]; msg.ay0 = g_imu[0].accel[1]; msg.az0 = g_imu[0].accel[2];
-            msg.gx0 = g_imu[0].gyro[0];  msg.gy0 = g_imu[0].gyro[1];  msg.gz0 = g_imu[0].gyro[2];
-            msg.valid0 = (uint8_t)g_imu[0].valid;
-            msg.ax1 = g_imu[1].accel[0]; msg.ay1 = g_imu[1].accel[1]; msg.az1 = g_imu[1].accel[2];
-            msg.gx1 = g_imu[1].gyro[0];  msg.gy1 = g_imu[1].gyro[1];  msg.gz1 = g_imu[1].gyro[2];
-            msg.valid1 = (uint8_t)g_imu[1].valid;
-            msg.ax2 = g_imu[2].accel[0]; msg.ay2 = g_imu[2].accel[1]; msg.az2 = g_imu[2].accel[2];
-            msg.gx2 = g_imu[2].gyro[0];  msg.gy2 = g_imu[2].gyro[1];  msg.gz2 = g_imu[2].gyro[2];
-            msg.valid2 = (uint8_t)g_imu[2].valid;
-            chMtxUnlock(&imu_mtx);
-
-            chMtxLock(&can_imu_mtx);
-            msg.qw      = g_can_imu.q0; msg.qx = g_can_imu.q1;
-            msg.qy      = g_can_imu.q2; msg.qz = g_can_imu.q3;
-            msg.can_p   = g_can_imu.p;  msg.can_q = g_can_imu.q; msg.can_r = g_can_imu.r;
-            msg.can_valid = (uint8_t)g_can_imu.valid;
-            chMtxUnlock(&can_imu_mtx);
-
-            logger.write(LOG_MSG_IMU, msg);
+            LogMsgATT msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.roll    = euler[0];
+            msg.pitch   = euler[1];
+            msg.yaw     = euler[2];
+            msg.p       = state[StateIdx::P];
+            msg.q       = state[StateIdx::Q];
+            msg.r       = state[StateIdx::R];
+            msg.p_dot   = state[StateIdx::P_DOT];
+            msg.q_dot   = state[StateIdx::Q_DOT];
+            msg.r_dot   = state[StateIdx::R_DOT];
+            logger.write(LOG_MSG_ATT, msg);
         }
 
-        /* ── State snapshot (every state_div ticks → 50 Hz) ───────────── */
-        if (state_div == 0U || tick % state_div == 0U) {
-            LogMsgState msg = {};
-            msg.time_ms = t_ms;
-
-            chMtxLock(&state_mtx);
-            msg.roll    = g_euler[0];
-            msg.pitch   = g_euler[1];
-            msg.yaw     = g_euler[2];
-            msg.p       = g_state[StateIdx::P];
-            msg.q       = g_state[StateIdx::Q];
-            msg.r       = g_state[StateIdx::R];
-            msg.z_pos   = g_state[StateIdx::Z_POS];
-            msg.z_vel   = g_state[StateIdx::W];
-            msg.z_accel = g_state[StateIdx::W_DOT];
-            msg.thr     = g_input[InputIdx::THRUST];
-            msg.armed   = (uint8_t)g_armed;
-            chMtxUnlock(&state_mtx);
-
-            logger.write(LOG_MSG_STATE, msg);
+        /* ── LIN — linear states ──────────────────────────────────────── */
+        {
+            LogMsgLIN msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.x       = state[StateIdx::X];
+            msg.y       = state[StateIdx::Y];
+            msg.z       = state[StateIdx::Z_POS];
+            msg.u       = state[StateIdx::U];
+            msg.v       = state[StateIdx::V];
+            msg.w       = state[StateIdx::W];
+            msg.u_dot   = state[StateIdx::U_DOT];
+            msg.v_dot   = state[StateIdx::V_DOT];
+            msg.w_dot   = state[StateIdx::W_DOT];
+            logger.write(LOG_MSG_LIN, msg);
         }
 
-        /* ── Flush ring buffer to SD card ─────────────────────────────── */
+        /* ── RCIN — RC stick inputs ───────────────────────────────────── */
+        {
+            LogMsgRCIN msg = {};
+            msg.time_us   = t_us;
+            msg.rate_hz   = 50U;
+            msg.roll_stk  = inp[InputIdx::ROLL_TGT];
+            msg.pitch_stk = inp[InputIdx::PITCH_TGT];
+            msg.yaw_stk   = inp[InputIdx::YAW_RATE];
+            msg.thr_stk   = inp[InputIdx::THRUST];
+            msg.armed     = (uint8_t)armed;
+            logger.write(LOG_MSG_RCIN, msg);
+        }
+
+        /* ── OUTP — controller outputs entering MotorMixer ───────────── */
+        {
+            LogMsgOUTP msg = {};
+            msg.time_us  = t_us;
+            msg.rate_hz  = 50U;
+            msg.roll_tq  = ctrl[0];
+            msg.pitch_tq = ctrl[1];
+            msg.yaw_tq   = ctrl[2];
+            msg.throttle = ctrl[3];
+            logger.write(LOG_MSG_OUTP, msg);
+        }
+
+        /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
+        {
+            LogMsgRPMS msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.rpm0 = telem[0].valid ? (int32_t)(telem[0].erpm / 7U) : 0;
+            msg.rpm1 = telem[1].valid ? (int32_t)(telem[1].erpm / 7U) : 0;
+            msg.rpm2 = telem[2].valid ? (int32_t)(telem[2].erpm / 7U) : 0;
+            msg.rpm3 = telem[3].valid ? (int32_t)(telem[3].erpm / 7U) : 0;
+            logger.write(LOG_MSG_RPMS, msg);
+        }
+
+        /* ── STRN — strain rate sensor ────────────────────────────────── */
+        {
+            LogMsgSTRN msg = {};
+            msg.time_us = t_us;
+            msg.rate_hz = 50U;
+            msg.s0      = strain.val[0];
+            msg.s1      = strain.val[1];
+            msg.s2      = strain.val[2];
+            msg.s3      = strain.val[3];
+            msg.valid   = (uint8_t)strain.valid;
+            logger.write(LOG_MSG_STRN, msg);
+        }
+
         logger.flush();
-
-        tick++;
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->imu));
+        next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->period));
     }
 }
 

@@ -5,6 +5,7 @@ BPRL Motor Test — spin individual motors and view RPM feedback.
 Works on any firmware build. Remove props before use.
 
 Usage:
+    python3 tools/motor_test.py                       # default: motor test
     python3 tools/motor_test.py motor-test
 
 Options:
@@ -160,11 +161,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL motor test — spin motors individually and view RPM")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
     sub.add_parser("motor-test", help="Interactive motor test with RPM feedback")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "motor-test"
+
+    ser = open_port(args.port, args.baud)
     try:
         cmd_motor_test(ser, args)
     finally:

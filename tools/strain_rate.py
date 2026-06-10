@@ -8,6 +8,7 @@ one value per arm. In development.
 Works on any firmware build.
 
 Usage:
+    python3 tools/strain_rate.py                      # default: live strain-rate display
     python3 tools/strain_rate.py strain-rate
 
 Options:
@@ -90,12 +91,15 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL strain rate monitor — live display from CAN ID 0x69")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
     sub.add_parser("strain-rate",
                    help="Live strain-rate sensor monitor (CAN 0x69, in development)")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "strain-rate"
+
+    ser = open_port(args.port, args.baud)
     try:
         cmd_strain_rate(ser, args)
     finally:

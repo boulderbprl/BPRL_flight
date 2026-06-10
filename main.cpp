@@ -94,7 +94,7 @@ int main(void)
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),
-        /* .log     = */ { TIME_US2I(10000), TIME_US2I(20000) },
+        /* .log     = */ { TIME_MS2I(20) },   // 50 Hz
     };
 
     motor_output_init();

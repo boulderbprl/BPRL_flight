@@ -94,7 +94,7 @@ BPRL_flight/
 | ControlThread | NORMALPRIO+20 | 400 Hz | Cascade PID → MotorMixer → motor output |
 | RadioThread | NORMALPRIO+10 | 50 Hz | Read RC input → g_input[] |
 | HouseThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
-| LogThread | NORMALPRIO-15 | 100/50 Hz | Snapshot sensors + state → SD card |
+| LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (6 message types per tick) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | UART status print (BPRL_DEBUG only) |
 
 ### Shared state
@@ -107,6 +107,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[4]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets) |
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
+| `g_ctrl[4]` | `state_mtx` | PID torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
@@ -332,163 +333,97 @@ Each unique `Dim` value used in the firmware produces a separate compiled instan
 
 ## 5. SD Card Logging
 
-Follows the logging standard in Ardupilot
+Binary log format is compatible with the [ArduPilot DataFlash standard](https://ardupilot.org/dev/docs/logmessages.html). Log files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org) for interactive plotting.
 
 ### How it works
 
-`LogThread` snapshots sensor and state data each tick, serialises it into a 32 KB in-RAM ring buffer, and drains that buffer to the SD card via FatFS at low priority. The ring buffer absorbs SD write stalls without ever blocking flight-critical threads.
+`LogThread` runs at 50 Hz. Each tick it snapshots all shared state under their respective mutexes, builds six packed records, and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
 
 **Log file location:** `/LOGS/LOG0001.BIN`, `LOG0002.BIN`, … auto-incremented on each boot.
 
-### Adding a new log set
+### Logged message types (50 Hz each)
 
-This is a four-step process. No changes outside the three files listed below are ever needed.
+| Name | ID | Fields |
+|---|---|---|
+| `ATT` | 0x03 | TimeUS, Rate, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
+| `LIN` | 0x04 | TimeUS, Rate, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
+| `RCIN` | 0x05 | TimeUS, Rate, RollStk, PitchStk, YawStk, ThrStk (normalized), Armed |
+| `OUTP` | 0x06 | TimeUS, Rate, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
+| `RPMS` | 0x07 | TimeUS, Rate, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
+| `STRN` | 0x08 | TimeUS, Rate, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
 
----
+TimeUS is a uint64 microsecond timestamp. Rate is the log rate in Hz (always 50).
 
-**Step 1 — Define the message struct in `src/logging/LogMessages.hpp`**
+### Decoding log files
+
+Use `tools/logs.py` — no firmware source needed:
+
+```bash
+# Decode a downloaded .bin file to CSV (one file per message type)
+python3 tools/logs.py logs decode LOG0042.BIN
+
+# Download latest completed log and decode immediately
+python3 tools/logs.py logs download --decode
+```
+
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`.
+
+Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all six message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
+
+### Adding a new log message type
+
+Three files, four steps:
+
+**Step 1 — Define the struct in `src/logging/LogMessages.hpp`**
 
 ```cpp
-constexpr uint8_t LOG_MSG_BARO = 0x03U;   // pick the next unused ID
+constexpr uint8_t LOG_MSG_BARO = 0x09U;   // next unused ID
 
 struct __attribute__((packed)) LogMsgBaro {
-    uint32_t time_ms;       // always first
+    uint64_t time_us;    // always first — required by UAV Log Viewer
+    uint16_t rate_hz;    // always second
     float    pressure_pa;
     float    temp_c;
     float    altitude_m;
 };
 ```
 
-Rules:
-- Always use `__attribute__((packed))`.
-- Always start with `uint32_t time_ms`.
-- Use only fixed-size types (`float`, `int32_t`, `uint8_t`, etc.) — no pointers, no padding.
-
----
+Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first, `rate_hz` second.
 
 **Step 2 — Add a row to `kLogDefs[]` in the same file**
 
 ```cpp
-constexpr LogDef kLogDefs[] = {
-    { LOG_MSG_IMU,   "IMU ", "TimeMS,...", sizeof(LogMsgIMU)   },
-    { LOG_MSG_STATE, "STAT", "TimeMS,...", sizeof(LogMsgState) },
-    // new entry example:
-    { LOG_MSG_strain,  "STRN", "TimeMS,rAccel,pAccel,zAccel", sizeof(LogMsgStrain) },
-};
+{ LOG_MSG_BARO, "BARO", "QHfff", "TimeUS,Rate,Pressure,Temp,Alt", sizeof(LogMsgBaro) },
 ```
 
-- `name` must be exactly 4 characters (space-pad if shorter).
-- `labels` is a comma-separated list of field names in the same order as the struct members. Used by the decoder script to produce column headers.
-
----
+Format codes: `Q`=uint64, `H`=uint16, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad).
 
 **Step 3 — Snapshot and write in `LogThread` (`src/threads.cpp`)**
 
-Inside the `while(true)` loop, at the rate you want:
-
 ```cpp
-{
-    LogMsgStrain msg = {};
-    msg.time_ms  = t_ms;
-    msg.rAccel   = roll_acceleration();
-    msg.pAccel   = pitch_acceleration();
-    msg.zAccel   = zAxis_acceleration();
-    logger.write(LOG_MSG_strain, msg);
-}
+{ LogMsgBaro msg = {}; msg.time_us = t_us; msg.rate_hz = 50U;
+  msg.pressure_pa = baro_pressure(); msg.temp_c = baro_temp(); msg.altitude_m = baro_alt();
+  logger.write(LOG_MSG_BARO, msg); }
 ```
 
-Use the same `tick % state_div` divisor pattern as the state log if you want a rate slower than the IMU log rate.
+**Step 4 — No rate change needed.** All messages share the 50 Hz `LogThread` period (`TIME_MS2I(20)` in `main.cpp`). If you need a different rate, add a divisor counter in `LogThread`.
 
----
+### Binary format reference
 
-**Step 4 — Set the log rate in `main.cpp`**
-
-If you want an independent rate, add a field to `LogRates` in `src/threads.hpp`:
-
-```cpp
-struct LogRates {
-    sysinterval_t imu;     // 100 Hz
-    sysinterval_t state;   // 50 Hz
-    sysinterval_t strain;  // add: 25 Hz
-};
-```
-
-Then initialise it in the sequencer block in `main.cpp`:
-
-```cpp
-/* .log = */ { TIME_US2I(10000),   // IMU:   100 Hz
-               TIME_US2I(20000),   // state:  50 Hz
-               TIME_MS2I(40) },    // strain:   25 Hz
-```
-
-And compute the divisor at LogThread startup just as `state_div` is computed.
-
----
-
-### Decoding log files
-
-A minimal Python script to parse the binary format (claude generated and untested):
-
-```python
-import struct, sys
-
-FMT_HDR_SIZE = 74   # 1+1+1+1+2+4+64
-
-with open(sys.argv[1], "rb") as f:
-    data = f.read()
-
-# Step 1: read FMT schema records from the file header
-schema = {}   # msg_id -> (name, body_size, [field_names])
-i = 0
-while i + FMT_HDR_SIZE <= len(data):
-    if data[i] == 0xA3 and data[i+1] == 0x95 and data[i+2] == 0x80:
-        type_id = data[i+3]
-        length  = struct.unpack_from("<H", data, i+4)[0]
-        name    = data[i+6:i+10].decode("ascii").strip()
-        labels  = data[i+10:i+74].decode("ascii").rstrip("\x00")
-        schema[type_id] = (name, length, labels.split(","))
-        i += FMT_HDR_SIZE
-    else:
-        break   # FMT header section ended
-
-# Step 2: decode data records
-records = {k: [] for k in schema}
-while i + 3 <= len(data):
-    if data[i] != 0xA3 or data[i+1] != 0x95:
-        i += 1
-        continue
-    msg_id = data[i+2]
-    if msg_id not in schema:
-        i += 1
-        continue
-    name, length, fields = schema[msg_id]
-    body = data[i+3 : i+3+length]
-    # Each field is 4 bytes (float or uint32) except uint8 trailing flags.
-    # Adjust the format string to match your specific struct layout.
-    records[msg_id].append(body)
-    i += 3 + length
-
-# Example: print IMU record count
-for msg_id, (name, _, fields) in schema.items():
-    print(f"{name}: {len(records[msg_id])} records  fields={fields}")
-```
-
-### Backend Details 
-
-**Record format — every record in the file:**
+**Data record** (every record after the header):
 ```
 [0xA3][0x95][msg_id][...packed struct body...]
 ```
 
-**File header — written once at file open, one FMT record per log type:**
+**FMT record** (one per message type, written at file open, 89 bytes):
 ```
-[0xA3][0x95][0x80][type_id][body_size_u16_LE][name_4b][labels_64b]
+[0xA3][0x95][0x80][type_u8][length_u8][name_4b][format_16b][labels_64b]
 ```
-This makes files self-describing: a decoder can read the schema from the file itself without access to the firmware source.
+`length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate (for current log set):** ~13 KB/s (100 Hz IMU at ~113 bytes/record + 50 Hz state at ~51 bytes/record). The 32 KB ring buffer provides ~2.5 s of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × 208 B/tick = ~10.4 KB/s. The 32 KB ring buffer holds ~3 s of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
 
-**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` configures the MPU to mark that region non-cacheable at boot, ensuring the SDMMC IDMA always reads coherent data.
+**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
 **SD card retry:** If no card is present at boot, `logger.init()` retries every 5 seconds. The rest of the firmware is unaffected.
 

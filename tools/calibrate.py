@@ -6,6 +6,7 @@ Requires a firmware built with -DBPRL_DEBUG.
 The $IMU telemetry stream (emitted by DebugThread) is needed for data collection.
 
 Usage:
+    python3 tools/calibrate.py                        # default: calibrate (30 s collection)
     python3 tools/calibrate.py calibrate [--duration N]
 
 Options:
@@ -157,7 +158,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL IMU calibration — requires -DBPRL_DEBUG firmware build")
     add_port_args(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+    sub = parser.add_subparsers(dest="command")
 
     cal_p = sub.add_parser("calibrate",
                             help="Collect IMU static bias and write to flash (DEBUG build required)")
@@ -165,7 +166,11 @@ def main():
                        help="Collection time in seconds (default: 30)")
 
     args = parser.parse_args()
-    ser  = open_port(args.port, args.baud)
+    if args.command is None:
+        args.command = "calibrate"
+        args.duration = 30
+
+    ser = open_port(args.port, args.baud)
     try:
         cmd_calibrate(ser, args)
     finally:

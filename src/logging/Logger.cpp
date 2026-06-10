@@ -189,17 +189,19 @@ size_t Logger::ring_read(void *out, size_t max_n)
     return n;
 }
 
-/* ── Schema header: one FMT record per log type ─────────────────────────── */
+/* ── Schema header: one FMT record per log type (ArduPilot standard) ────── */
 
 struct __attribute__((packed)) LogFmtHdr {
-    uint8_t  sync1;     // 0xA3
-    uint8_t  sync2;     // 0x95
-    uint8_t  fmt_id;    // LOG_MSG_FMT = 0x80
-    uint8_t  type;      // msg_id being described
-    uint16_t length;    // body size in bytes (LE)
-    char     name[4];   // short type name
-    char     labels[64];// comma-separated field names
+    uint8_t sync1;      // 0xA3
+    uint8_t sync2;      // 0x95
+    uint8_t fmt_id;     // LOG_MSG_FMT = 0x80
+    uint8_t type;       // msg_id being described
+    uint8_t length;     // total data record size INCLUDING 3-byte header = 3 + body_size
+    char    name[4];    // short type name, space-padded
+    char    format[16]; // ArduPilot format codes: Q=uint64 H=uint16 f=float i=int32 h=int16 B=uint8
+    char    labels[64]; // comma-separated field names; TimeUS must be first for UAV Log Viewer
 };
+// Total FMT record size: 89 bytes
 
 bool Logger::write_schema_header()
 {
@@ -209,8 +211,9 @@ bool Logger::write_schema_header()
         hdr.sync2  = 0x95U;
         hdr.fmt_id = LOG_MSG_FMT;
         hdr.type   = kLogDefs[i].msg_id;
-        hdr.length = static_cast<uint16_t>(kLogDefs[i].body_size);
+        hdr.length = (uint8_t)(3U + kLogDefs[i].body_size);
         strncpy(hdr.name,   kLogDefs[i].name,   sizeof(hdr.name));
+        strncpy(hdr.format, kLogDefs[i].fmt,    sizeof(hdr.format) - 1U);
         strncpy(hdr.labels, kLogDefs[i].labels, sizeof(hdr.labels) - 1U);
         ring_write(&hdr, sizeof(hdr));
     }

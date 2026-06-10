@@ -138,7 +138,7 @@ Useful for diagnosing DShot issues: no DMA fires → DMA init problem; DMA fires
 | `logs list` | List log files on SD card with sizes |
 | `logs download [FILE]` | Download a log file (default: latest completed) |
 | `logs download FILE --decode` | Download and immediately decode to CSV |
-| `logs decode FILE.bin` | Offline: decode a binary log to two CSVs |
+| `logs decode FILE.bin` | Offline: decode a binary log to CSV files |
 | `logs erase` | Erase all completed log files |
 | `log-status` | Query SD card logger status (ready / error code) |
 
@@ -151,7 +151,18 @@ python3 tools/logs.py logs erase
 python3 tools/logs.py log-status
 ```
 
-`logs decode` is offline — no serial port needed. It writes `<stem>_imu.csv` (100 Hz, 3×IMU + CAN INS) and `<stem>_state.csv` (50 Hz, roll/pitch/yaw/p/q/r/ZPos/ZVel/ZAcc/Thr/Armed).
+`logs decode` is offline — no serial port needed. It reads the ArduPilot DataFlash schema from the file header (FMT records) and writes one CSV per message type:
+
+| CSV file | Rate | Contents |
+|---|---|---|
+| `<stem>_att.csv` | 50 Hz | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
+| `<stem>_lin.csv` | 50 Hz | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
+| `<stem>_rcin.csv` | 50 Hz | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), Armed |
+| `<stem>_outp.csv` | 50 Hz | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
+| `<stem>_rpms.csv` | 50 Hz | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
+| `<stem>_strn.csv` | 50 Hz | TimeUS, S0–S3 (int16 strain-rate), Valid |
+
+The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 
 ---
 

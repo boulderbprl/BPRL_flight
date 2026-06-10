@@ -46,6 +46,7 @@ extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
 extern float   g_input[4];           // InputIdx::*  (thrust, roll/pitch/yaw targets)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
+extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs entering MotorMixer
 extern bool    g_armed;
 
 extern mutex_t imu_mtx;
@@ -76,8 +77,7 @@ extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
  * All rates live in main.cpp.  Change them there to retune loop timing.    */
 
 struct LogRates {
-    sysinterval_t imu;    // IMU snapshot rate  (100 Hz → TIME_US2I(10000))
-    sysinterval_t state;  // State snapshot rate  (50 Hz → TIME_US2I(20000))
+    sysinterval_t period;  // 50 Hz → TIME_MS2I(20)
 };
 
 struct ThreadRates {
