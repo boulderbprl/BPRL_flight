@@ -94,7 +94,7 @@ void boardInit(void)
     palSetPadMode(GPIOD, 1U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 0U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
 
-    /* ── SDMMC1 — microSD card → AF12 ──────────────────────────────────
+/* ── SDMMC1 — microSD card → AF12 ──────────────────────────────────
      * D0=PC8, D1=PC9, D2=PC10, D3=PC11, CK=PC12, CMD=PD2
      * Data lines need pull-ups per SD spec.                             */
     palSetPadMode(GPIOC,  8U, PAL_MODE_ALTERNATE(12) | PAL_STM32_OSPEED_HIGHEST | PAL_STM32_PUPDR_PULLUP);

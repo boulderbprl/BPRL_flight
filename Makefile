@@ -147,6 +147,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \
          src/coms/I2C.cpp \
+         src/sensors/StrainRate.cpp \
          src/coms/PWM.cpp \
          src/coms/DShot.cpp \
          src/coms/Radio.cpp \

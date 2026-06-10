@@ -280,10 +280,10 @@
  * I2C driver system settings.
  */
 #define STM32_I2C_USE_I2C1                  FALSE
-#define STM32_I2C_USE_I2C2                  FALSE
+#define STM32_I2C_USE_I2C2                  TRUE
 #define STM32_I2C_USE_I2C3                  FALSE
 #define STM32_I2C_USE_I2C4                  FALSE
-#define STM32_I2C_BUSY_TIMEOUT              50
+#define STM32_I2C_BUSY_TIMEOUT              5
 #define STM32_I2C_I2C1_RX_DMA_STREAM        STM32_DMA_STREAM_ID_ANY
 #define STM32_I2C_I2C1_TX_DMA_STREAM        STM32_DMA_STREAM_ID_ANY
 #define STM32_I2C_I2C2_RX_DMA_STREAM        STM32_DMA_STREAM_ID_ANY
@@ -300,7 +300,9 @@
 #define STM32_I2C_I2C2_DMA_PRIORITY         3
 #define STM32_I2C_I2C3_DMA_PRIORITY         3
 #define STM32_I2C_I2C4_DMA_PRIORITY         3
-#define STM32_I2C_DMA_ERROR_HOOK(i2cp)      osalSysHalt("DMA failure")
+/* Non-fatal: let the 5 ms software timeout expire and allow i2c_drv_reset()
+ * to recover cleanly rather than halting the system and firing the IWDG. */
+#define STM32_I2C_DMA_ERROR_HOOK(i2cp)      { (void)(i2cp); }
 
 /*
  * ICU driver system settings.

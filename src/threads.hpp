@@ -3,6 +3,7 @@
 #include "hal.h"
 #include "src/FlightState.hpp"
 #include "src/coms/DShot.hpp"   // ESCTelemetry
+#include "src/sensors/StrainRate.hpp"
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -25,11 +26,6 @@ struct CANIMURaw {
     bool  has_new_rates;     // set by CAN callback; cleared after StateEstThread consumes it
 
     bool  valid;             // true while IMX5 frames are arriving
-};
-
-struct StrainRateRaw {
-    int16_t val[4];  // 4 signed int16 strain-rate values, one per arm (CAN ID 0x69)
-    bool    valid;   // true once at least one frame has arrived
 };
 
 struct MocapRaw {
@@ -55,8 +51,6 @@ extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
 extern mutex_t   can_imu_mtx;
 extern CANIMURaw g_can_imu;
 
-extern mutex_t        strainRate_mtx;
-extern StrainRateRaw  g_strain_rate;
 
 extern mutex_t  mocap_mtx;
 extern MocapRaw g_mocap;

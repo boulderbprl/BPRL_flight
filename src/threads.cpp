@@ -757,6 +757,27 @@ static void usb_cmd_dispatch(const char *line)
                  (int)snap.val[2], (int)snap.val[3],
                  (unsigned)snap.valid);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "I2C,scan") == 0) {
+        // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
+        // NAKs return immediately (~22 µs at 400 kHz), so the full scan is <3 ms.
+        uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
+        uint8_t dummy[1];
+        i2cAcquireBus(&I2CD2);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (i2cMasterReceive(&I2CD2, addr, dummy, 1) == MSG_OK) {
+                acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
+            }
+        }
+        i2cReleaseBus(&I2CD2);
+        chMtxLock(&s_usb_write_mtx);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (acked[addr >> 3] & (1U << (addr & 7U))) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
+            }
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
     }
 }
 
@@ -1156,6 +1177,7 @@ void threads_start(const ThreadRates &rates)
 
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 22, I2CThread,       (void *)&rates.i2c);
     chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);

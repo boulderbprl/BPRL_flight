@@ -2,8 +2,8 @@
 """
 BPRL Strain Rate Monitor — live display of strain-rate sensor data.
 
-Reads 4 signed int16 values from the strain rate sensor at CAN ID 0x69,
-one value per arm. In development.
+Reads 4 signed int16 values from the strain rate sensor (I2C 0x11 or CAN 0x69,
+selected at firmware compile time), one value per arm.
 
 Works on any firmware build.
 
@@ -68,7 +68,7 @@ def cmd_strain_rate(ser, _args):
         body = Table.grid()
         body.add_row(tbl)
         return Panel(body,
-                     title=f"Strain Rate Sensor (CAN 0x69)  {v_tag}",
+                     title=f"Strain Rate Sensor  {v_tag}",
                      border_style="cyan")
 
     console.print("[dim]Polling STRAIN_RATE,read at ~5 Hz — Ctrl-C to exit[/dim]")
@@ -89,11 +89,11 @@ def cmd_strain_rate(ser, _args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="BPRL strain rate monitor — live display from CAN ID 0x69")
+        description="BPRL strain rate monitor — live display via STRAIN_RATE,read USB command")
     add_port_args(parser)
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("strain-rate",
-                   help="Live strain-rate sensor monitor (CAN 0x69, in development)")
+                   help="Live strain-rate sensor monitor")
 
     args = parser.parse_args()
     if args.command is None:
