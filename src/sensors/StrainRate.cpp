@@ -31,7 +31,7 @@ static void strain_rate_i2c_poll(void *ctx)
 {
     (void)ctx;
     uint8_t buf[8];
-    msg_t status = i2cMasterReceiveTimeout(&I2CD2, 0x11, buf, sizeof(buf), TIME_MS2I(5));
+    msg_t status = i2cMasterReceiveTimeout(&I2CD2, 0x11, buf, sizeof(buf), TIME_US2I(1500));
 
     if (status != MSG_OK) {
         if (status == MSG_TIMEOUT) i2c_drv_reset();

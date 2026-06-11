@@ -91,7 +91,7 @@ int main(void)
     static const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
         /* .est     = */ TIME_US2I(2000),
-        /* .i2c     = */ TIME_MS2I(10),
+        /* .i2c     = */ TIME_US2I(2000),  // 500 Hz — matches Teensy ADC sample rate
         /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
