@@ -5,16 +5,14 @@
 #include "Unmixer.hpp"
 
 enum class FlightMode  { STABILIZE, INDI };
-enum class FlightPhase { DISARMED, IDLE, ACTIVE };
+enum class FlightPhase { DISARMED, ACTIVE };
 
 /*
  * FlightStateMachine — selects and drives the active attitude controller.
  *
- * Called at 400 Hz from ControlThread.  Manages three phases:
+ * Called at 400 Hz from ControlThread.  Manages two phases:
  *   DISARMED: arm switch low → motors off, all controllers reset.
- *   IDLE:     armed, throttle at floor → motors spin at PWM_IDLE, controllers
- *             reset each tick so integrators are clean for takeoff.
- *   ACTIVE:   throttle above threshold → full controller running.
+ *   ACTIVE:   armed → full controller running; zero throttle idles props.
  *
  * Flight mode is selected from input[InputIdx::FLIGHT_MODE]:
  *   < 0  → STABILIZE (SLC PID cascade)
@@ -51,6 +49,4 @@ private:
     INDI    _indi;
     Unmixer _unmixer;
 
-    // Throttle must exceed this to transition IDLE → ACTIVE.
-    static constexpr float ACTIVE_THR_THRESH = 0.05f;
 };

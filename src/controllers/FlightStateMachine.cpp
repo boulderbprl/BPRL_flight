@@ -39,24 +39,7 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
     }
 
     if (_phase == FlightPhase::DISARMED) {
-        _phase = FlightPhase::IDLE;
-    }
-
-    const float thr = input[InputIdx::THRUST];
-    if (_phase == FlightPhase::IDLE && thr > ACTIVE_THR_THRESH) {
         _phase = FlightPhase::ACTIVE;
-    }
-    if (_phase == FlightPhase::ACTIVE && thr <= ACTIVE_THR_THRESH) {
-        _phase = FlightPhase::IDLE;
-        reset_all();
-    }
-
-    // ── IDLE: keep controllers clean, zero torques (mixer outputs PWM_IDLE) ─
-    if (_phase == FlightPhase::IDLE) {
-        reset_all();
-        out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
-        thrust_out = 0.0f;
-        return;
     }
 
     // ── ACTIVE: run selected controller ──────────────────────────────────
