@@ -2,7 +2,7 @@
 #include "PID.hpp"
 
 /*
- * Cascade attitude controller — ported from FreeRTOS/Tiva controllers.c.
+ * Cascade attitude controller (SLC PID) — outer attitude loop + inner rate loop.
  *
  * Outer loop: attitude error [rad]  → angular rate target [rad/s]
  * Inner loop: rate error [rad/s]    → normalised torque output [-1, 1]
@@ -14,9 +14,9 @@
  *   input[1..3]  roll_tgt, pitch_tgt, yaw_rate_tgt [-1, 1]
  *   out_cmds[3]  normalised torque [roll, pitch, yaw] in [-1, 1]
  */
-class AttitudeController {
+class SLCPID {
 public:
-    AttitudeController();
+    SLCPID();
 
     void  update(const float state[], const float input[], float out_cmds[3]);
     float compute_throttle(const float state[], const float input[]) const;

@@ -1,9 +1,9 @@
-#include "AttitudeController.hpp"
+#include "SLCPID.hpp"
 #include "src/math/math.hpp"
 #include <cmath>
 #include <algorithm>
 
-AttitudeController::AttitudeController()
+SLCPID::SLCPID()
     : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
     , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
     , _roll_rate (0.065f, 0.09f, 0.002f, 0.5f, 30.0f)
@@ -11,8 +11,8 @@ AttitudeController::AttitudeController()
     , _yaw_rate  (0.065f, 0.02f, 0.000f, 0.5f, 30.0f)
 {}
 
-void AttitudeController::update(const float state[], const float input[],
-                                float out_cmds[3])
+void SLCPID::update(const float state[], const float input[],
+                    float out_cmds[3])
 {
     const float roll_rate_tgt  = _roll_att.update(input[1] - state[0]);
     const float pitch_rate_tgt = _pitch_att.update(input[2] - state[1]);
@@ -22,8 +22,8 @@ void AttitudeController::update(const float state[], const float input[],
     out_cmds[2] = _yaw_rate.update(YAW_GAIN * input[3] - state[5]);
 }
 
-float AttitudeController::compute_throttle(const float state[],
-                                           const float input[]) const
+float SLCPID::compute_throttle(const float state[],
+                               const float input[]) const
 {
     const float thr_in  = input[0];
     const float expo    = -(THR_MID - 0.5f) / 0.375f;
@@ -33,7 +33,7 @@ float AttitudeController::compute_throttle(const float state[],
     return constrain_float(thr_exp * boost, 0.0f, 1.0f);
 }
 
-void AttitudeController::reset_all()
+void SLCPID::reset_all()
 {
     _roll_att.reset();  _pitch_att.reset();
     _roll_rate.reset(); _pitch_rate.reset();

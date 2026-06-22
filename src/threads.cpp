@@ -17,7 +17,7 @@
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
 #include "src/coms/Radio.hpp"
-#include "src/controllers/AttitudeController.hpp"
+#include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/MotorMixer.hpp"
 #include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
@@ -36,7 +36,7 @@
 MUTEX_DECL(state_mtx);
 float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
-float   g_input[4]           = {};
+float   g_input[5]           = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
 bool    g_armed              = false;
@@ -74,7 +74,7 @@ int32_t g_motor_test_cmd[4] = {};
 static MUTEX_DECL(s_usb_write_mtx);
 
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
-static AttitudeController att_ctrl;
+static FlightStateMachine flight_sm;
 static MotorMixer         mixer;
 
 /* ── State estimator (StateEstThread only) ───────────────────────────────── */
@@ -314,28 +314,32 @@ static THD_FUNCTION(ControlThread, arg)
             }
         }
 
-        /* ── Full cascade: EKF state → PID → mixer → DShot ─────────────── */
-        float ctrl_state[6];
+        /* ── Full cascade: EKF state → FlightStateMachine → mixer → DShot ─ */
+        float ctrl_full[StateIdx::N];
+        float euler[3];
+        float input[InputIdx::N_INPUTS];
         bool  armed;
-        float input[4];
         chMtxLock(&state_mtx);
-        ctrl_state[0] = g_euler[0];             // roll  (rad)
-        ctrl_state[1] = g_euler[1];             // pitch (rad)
-        ctrl_state[2] = g_euler[2];             // yaw   (rad)
-        ctrl_state[3] = g_state[StateIdx::P];   // p (rad/s)
-        ctrl_state[4] = g_state[StateIdx::Q];   // q (rad/s)
-        ctrl_state[5] = g_state[StateIdx::R];   // r (rad/s)
+        memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
+        memcpy(euler,     g_euler,  sizeof(euler));
+        memcpy(input,     g_input,  sizeof(input));
         armed = g_armed;
-        memcpy(input, g_input, sizeof(input));
-        if (!armed) att_ctrl.reset_all();
         chMtxUnlock(&state_mtx);
 
-        float torque_cmds[3];
-        att_ctrl.update(ctrl_state, input, torque_cmds);
-        const float thrust = att_ctrl.compute_throttle(ctrl_state, input);
+        ESCTelemetry sm_telem[4];
+        dshot_get_telemetry(sm_telem);
+        uint32_t rpm[4];
+        for (int i = 0; i < 4; i++)
+            rpm[i] = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
 
+        float torque_cmds[3];
+        float thrust;
+        flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
+
+        // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
+        const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
-        mixer.update(torque_cmds, thrust, armed, ctrl_state, motor_out);
+        mixer.update(torque_cmds, thrust, armed, safety_state, motor_out);
         motor_output_write(motor_out);
 
         chMtxLock(&state_mtx);
@@ -364,12 +368,12 @@ static THD_FUNCTION(RadioThread, arg)
         radio_input_update();
 
         chMtxLock(&state_mtx);
-        g_input[InputIdx::THRUST]    = radio_thr();
-        g_input[InputIdx::ROLL_TGT]  = radio_roll();
-        g_input[InputIdx::PITCH_TGT] = radio_pitch();
-        g_input[InputIdx::YAW_RATE]  = radio_yaw();
+        g_input[InputIdx::THRUST]      = radio_thr();
+        g_input[InputIdx::ROLL_TGT]    = radio_roll();
+        g_input[InputIdx::PITCH_TGT]   = radio_pitch();
+        g_input[InputIdx::YAW_RATE]    = radio_yaw();
+        g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
         g_armed = radio_armed();
-        if (!g_armed) { att_ctrl.reset_all(); }
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));

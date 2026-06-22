@@ -139,7 +139,10 @@ CPPSRC = $(ALLCPPSRC) \
          src/state_estimator/EKF.cpp \
          src/state_estimator/StateManager.cpp \
          src/controllers/PID.cpp \
-         src/controllers/AttitudeController.cpp \
+         src/controllers/SLCPID.cpp \
+         src/controllers/Unmixer.cpp \
+         src/controllers/INDI.cpp \
+         src/controllers/FlightStateMachine.cpp \
          src/controllers/MotorMixer.cpp \
          src/coms/IMUs/ICM42688.cpp \
          src/coms/IMUs/ICM45686.cpp \

@@ -58,8 +58,10 @@ namespace StateIdx {
 }
 
 namespace InputIdx {
-    constexpr int THRUST    = 0; // throttle [0, 1]
-    constexpr int ROLL_TGT  = 1; // roll  setpoint [-1, 1]
-    constexpr int PITCH_TGT = 2; // pitch setpoint [-1, 1]
-    constexpr int YAW_RATE  = 3; // yaw rate demand [-1, 1]
+    constexpr int THRUST      = 0; // throttle [0, 1]
+    constexpr int ROLL_TGT    = 1; // roll  setpoint [-1, 1]
+    constexpr int PITCH_TGT   = 2; // pitch setpoint [-1, 1]
+    constexpr int YAW_RATE    = 3; // yaw rate demand [-1, 1]
+    constexpr int FLIGHT_MODE = 4; // flight mode switch [-1,1]; <0=STABILIZE, ≥0=INDI
+    constexpr int N_INPUTS    = 5;
 }
