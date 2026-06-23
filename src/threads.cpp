@@ -1162,6 +1162,15 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         logger.flush();
+
+        /* If a write error killed the logger, attempt a clean restart.
+         * 2-second cooldown prevents hammering a truly dead card. */
+        if (!logger.is_ready()) {
+            logger.close();
+            chThdSleepMilliseconds(2000);
+            logger.init();  // internally retries sdcConnect/f_mount up to 5×
+        }
+
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->period));
     }
 }

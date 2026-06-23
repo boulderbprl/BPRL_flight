@@ -6,9 +6,9 @@
 SLCPID::SLCPID()
     : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
     , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 30.0f)
-    , _roll_rate (0.065f, 0.09f, 0.002f, 0.5f, 30.0f)
-    , _pitch_rate(0.065f, 0.09f, 0.002f, 0.5f, 30.0f)
-    , _yaw_rate  (0.065f, 0.02f, 0.000f, 0.5f, 30.0f)
+    , _roll_rate (0.09f, 0.075f, 0.001f, 0.5f, 30.0f)
+    , _pitch_rate(0.13f, 0.1f, 0.002f, 0.5f, 30.0f)
+    , _yaw_rate  (0.18f, 0.018f, 0.000f, 0.5f, 30.0f)
 {}
 
 void SLCPID::update(const float state[], const float input[],

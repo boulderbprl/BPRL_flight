@@ -52,8 +52,13 @@
  */
 #define STM32_NOCACHE_ENABLE                TRUE
 #define STM32_NOCACHE_MPU_REGION            MPU_REGION_6
-#define STM32_NOCACHE_RBAR                  0x30040000U  /* SRAM3 — FatFS DMA bufs */
-#define STM32_NOCACHE_RASR                  MPU_RASR_SIZE_32K
+/* Move the non-cacheable DMA region from SRAM3 to the last 8 KB of AXI SRAM.
+ * SDMMC1 IDMA (on AHB2) can only reliably reach AXI SRAM (0x24000000), not
+ * SRAM3 (0x30040000), on STM32H743.  ArduPilot's bouncebuffer always redirects
+ * SDMMC DMA to AXI SRAM for the same reason.  Placing .nocache here ensures
+ * __nocache_sd1_buf, s_fs.win and s_flush_buf all live in AXI SRAM. */
+#define STM32_NOCACHE_RBAR                  0x2407C000U  /* last 16 KB of AXI SRAM */
+#define STM32_NOCACHE_RASR                  MPU_RASR_SIZE_16K
 
 /*
  * PWR system settings.
@@ -365,6 +370,11 @@
 #define STM32_SDC_SDMMC_READ_TIMEOUT        10000
 #define STM32_SDC_SDMMC_CLOCK_DELAY         10
 #define STM32_SDC_SDMMC_PWRSAV              TRUE
+/* PLL1_Q = 50 MHz exactly matches the HS target (50 MHz), causing sdc_lld_clkdiv
+ * to return CLKDIV=0 (bypass mode).  Bypass bypasses the divider circuit and
+ * produces a noisier clock that many cards reject.  Capping at 25 MHz ensures
+ * CLKDIV=1 is always used (proper divided path) and keeps us in DS mode. */
+#define STM32_SDC_MAX_CLOCK                 25000000
 
 /*
  * SERIAL driver system settings.

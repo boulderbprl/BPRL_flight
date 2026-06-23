@@ -43,7 +43,7 @@ public:
 
 private:
     static constexpr size_t   BUF_SIZE      = 32768U;  // ring buffer (AXI SRAM)
-    static constexpr uint32_t SYNC_INTERVAL = 100U;    // f_sync every N flushes
+    static constexpr uint32_t SYNC_INTERVAL = 5U;      // f_sync every N flushes (~100 ms at 50 Hz)
 
     /* Ring buffer — in normal cached AXI SRAM, never DMA'd directly. */
     uint8_t  _buf[BUF_SIZE];
