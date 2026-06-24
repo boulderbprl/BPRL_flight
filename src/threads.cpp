@@ -765,12 +765,13 @@ static void usb_cmd_dispatch(const char *line)
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "I2C,scan") == 0) {
         // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
-        // NAKs return immediately (~22 µs at 400 kHz), so the full scan is <3 ms.
+        // Use a 2 ms timeout per probe so a stuck device can't hang the scan
+        // forever and starve the I2CThread of bus access.
         uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
         uint8_t dummy[1];
         i2cAcquireBus(&I2CD2);
         for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-            if (i2cMasterReceive(&I2CD2, addr, dummy, 1) == MSG_OK) {
+            if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
                 acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
             }
         }

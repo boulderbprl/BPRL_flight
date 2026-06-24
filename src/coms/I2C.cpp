@@ -11,6 +11,39 @@ static const I2CConfig i2c_cfg = {
     .cr2     = 0,
 };
 
+/*
+ * Clock SCL up to 9 times as a plain GPIO to unstick any slave that was left
+ * holding SDA low mid-byte (e.g. after a reset during a live transaction).
+ * Without this the I2C peripheral sees SDA=0 on startup, sets BUSY, and SCL
+ * never toggles — exactly the "clock never changes" symptom on a logic analyser.
+ */
+static void i2c_bus_recover(void)
+{
+    palSetPadMode(GPIOB, 10U, PAL_MODE_OUTPUT_OPENDRAIN | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOB, 11U, PAL_MODE_INPUT            | PAL_STM32_PUPDR_PULLUP);
+    palSetPad(GPIOB, 10U);  // SCL starts high
+
+    for (int i = 0; i < 9; i++) {
+        palClearPad(GPIOB, 10U);
+        chThdSleepMicroseconds(10);
+        palSetPad(GPIOB, 10U);
+        chThdSleepMicroseconds(10);
+        if (palReadPad(GPIOB, 11U))   // slave released SDA — bus is free
+            break;
+    }
+
+    // Issue a STOP so any slave in a transaction returns to idle.
+    palSetPadMode(GPIOB, 11U, PAL_MODE_OUTPUT_OPENDRAIN | PAL_STM32_PUPDR_PULLUP);
+    palClearPad(GPIOB, 10U);   // SCL low
+    chThdSleepMicroseconds(10);
+    palClearPad(GPIOB, 11U);   // SDA low (while SCL low is safe — not a START)
+    chThdSleepMicroseconds(10);
+    palSetPad(GPIOB, 10U);     // SCL high
+    chThdSleepMicroseconds(10);
+    palSetPad(GPIOB, 11U);     // SDA high while SCL high = STOP condition
+    chThdSleepMicroseconds(10);
+}
+
 struct I2CDevice {
     uint8_t     addr;
     I2CCallback poll;
@@ -35,8 +68,7 @@ void i2c_poll_all(void)
 
 void i2c_drv_init(void)
 {
-    // Configure pins immediately before i2cStart() to avoid the STM32H7 errata
-    // where early AF4 configuration can cause a spurious START and set BUSY.
+    i2c_bus_recover();
     palSetPadMode(GPIOB, 10U,
                   PAL_MODE_ALTERNATE(4U) | PAL_STM32_OTYPE_OPENDRAIN |
                   PAL_STM32_OSPEED_MID2  | PAL_STM32_PUPDR_PULLUP);
@@ -49,5 +81,12 @@ void i2c_drv_init(void)
 void i2c_drv_reset(void)
 {
     i2cStop(&I2CD2);
+    i2c_bus_recover();
+    palSetPadMode(GPIOB, 10U,
+                  PAL_MODE_ALTERNATE(4U) | PAL_STM32_OTYPE_OPENDRAIN |
+                  PAL_STM32_OSPEED_MID2  | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOB, 11U,
+                  PAL_MODE_ALTERNATE(4U) | PAL_STM32_OTYPE_OPENDRAIN |
+                  PAL_STM32_OSPEED_MID2  | PAL_STM32_PUPDR_PULLUP);
     i2cStart(&I2CD2, &i2c_cfg);
 }
