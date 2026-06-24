@@ -2,7 +2,7 @@
 
 #define I2C_SLAVE_ADDR  0x11
 #define SAMPLE_INTERVAL_US  2000
-#define OFFSET 1494
+#define OFFSET 400
 
 elapsedMicros sampleTimer;
 
@@ -16,8 +16,8 @@ void setup() {
   Serial.begin(1000000);
   analogReadResolution(12);
 
-  Wire.setSDA(17);
-  Wire.setSCL(16);
+  // Wire.setSDA(17);
+  // Wire.setSCL(16);
   Wire.setClock(400000);
   Wire.begin(I2C_SLAVE_ADDR);
   Wire.onRequest(onRequest);
@@ -31,8 +31,8 @@ void loop() {
     int16_t tmp[4];
     tmp[0] = (int16_t)analogRead(A0) - OFFSET;
     tmp[1] = (int16_t)analogRead(A1) - OFFSET;
-    tmp[2] = (int16_t)analogRead(A4) - OFFSET;
-    tmp[3] = (int16_t)analogRead(A5) - OFFSET;
+    tmp[2] = (int16_t)analogRead(A2) - OFFSET;
+    tmp[3] = (int16_t)analogRead(A3) - OFFSET;
 
     // Commit atomically
     noInterrupts();
