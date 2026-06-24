@@ -24,6 +24,7 @@
 #include "src/logging/LogMessages.hpp"
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
+#include "src/coms/MAVLink.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
@@ -90,6 +91,7 @@ static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 static THD_WORKING_AREA(waUSBCmd,   4096);  // 4 KB: FatFS log access + line parser
+static THD_WORKING_AREA(waMAVLink,  2048);  // MAVLink parser + heartbeat sender
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    2048);
 #endif
@@ -1041,6 +1043,23 @@ static THD_FUNCTION(DebugThread, arg)
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * MAVLinkThread — 100 Hz, NORMALPRIO-8
+ * Slimmed-down MAVLink on TELEM2 (USART3, 115200 baud).
+ * Sends heartbeat at 1 Hz; receives VISION_POSITION_ESTIMATE and
+ * VISION_SPEED_ESTIMATE and writes them into g_mocap for the EKF.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(MAVLinkThread, arg)
+{
+    (void)arg;
+    mavlink_comms_init();
+    while (true) {
+        mavlink_comms_update();
+        chThdSleepMilliseconds(10);  // 100 Hz poll — sufficient to drain 115200 baud
+    }
+}
+
 static THD_FUNCTION(LogThread, arg)
 {
     chRegSetThreadName("log");
@@ -1179,14 +1198,16 @@ static THD_FUNCTION(LogThread, arg)
 void threads_start(const ThreadRates &rates)
 {
     // Priority ordering (highest first):
-    //   SPIThread      +30  1 kHz IMU reads
-    //   CANThread      +28  event-driven CAN RX
-    //   StateEstThread +25  500 Hz EKF
-    //   ControlThread  +20  400 Hz PID/mixer/DShot
-    //   RadioThread    +10  50 Hz RC input
-    //   HeartbeatThread -5  LED + DShot diag
-    //   DebugThread    -10  10 Hz $TEL/$EKFL USB stream
-    //   USBCmdThread   -20  event-driven USB commands
+    //   SPIThread       +30  1 kHz IMU reads
+    //   CANThread       +28  event-driven CAN RX
+    //   StateEstThread  +25  500 Hz EKF
+    //   ControlThread   +20  400 Hz PID/mixer/DShot
+    //   RadioThread     +10  50 Hz RC input
+    //   HeartbeatThread  -5  LED + DShot diag
+    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
+    //   DebugThread     -10  10 Hz $TEL/$EKFL USB stream
+    //   LogThread       -15  50 Hz SD card logging
+    //   USBCmdThread    -20  event-driven USB commands
 
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
@@ -1195,6 +1216,7 @@ void threads_start(const ThreadRates &rates)
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
+    chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif

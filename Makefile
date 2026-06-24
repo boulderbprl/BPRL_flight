@@ -156,6 +156,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/Radio.cpp \
          src/coms/SBUS.cpp \
          src/coms/CRSF.cpp \
+         src/coms/MAVLink.cpp \
          src/usb_serial.cpp \
          src/logging/Logger.cpp
 
@@ -176,7 +177,7 @@ CPPWARN = -Wall -Wextra -Wundef
 # Board-specific MCU variant + optional debug flag
 UDEFS   = $(BOARD_UDEFS) -DCHPRINTF_USE_FLOAT=1 $(UDEFS_EXTRA)
 UADEFS  =
-UINCDIR =
+UINCDIR = $(CURDIR)/third_party/mavlink
 ULIBDIR =
 ULIBS   = -lm
 
