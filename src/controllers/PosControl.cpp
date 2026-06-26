@@ -15,7 +15,7 @@ PosControl::PosControl()
 // This function needs to be updated to consider stick inputs 
 
 void PosControl::NED_update(const float state[], const float pos_tgt[3],
-                    float out_cmds_vel[3])
+                    float vel_tgt[3])
 {   
 
     float vel_N_tgt  = _pos_N.update(pos_tgt[0] - state[0]);
@@ -24,9 +24,9 @@ void PosControl::NED_update(const float state[], const float pos_tgt[3],
     float vel_D_tgt  = _pos_N.update(pos_tgt[2] - state[2]);
 
 
-    out_cmds_vel[0]  = constrain_float(vel_N_tgt, -MAX_VEL_NE, MAX_VEL_NE);
-    out_cmds_vel[1]  = constrain_float(vel_E_tgt, -MAX_VEL_NE, MAX_VEL_NE);
-    out_cmds_vel[2]  = constrain_float(vel_D_tgt, -MAX_VEL_D, MAX_VEL_D);
+    vel_tgt[0]  = constrain_float(vel_N_tgt, -MAX_VEL_NE, MAX_VEL_NE);
+    vel_tgt[1]  = constrain_float(vel_E_tgt, -MAX_VEL_NE, MAX_VEL_NE);
+    vel_tgt[2]  = constrain_float(vel_D_tgt, -MAX_VEL_D, MAX_VEL_D);
 
 
 }

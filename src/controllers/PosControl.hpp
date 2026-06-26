@@ -11,17 +11,19 @@
  * Conventions:
  *   state[0..2]  N,E,D in inertial frame in m
  *   state[3..5]  roll,pitch,yaw body-frame positions in rad
-  *   state[6..8]  vN,vE,vD in inertial frame in m/s
- *   vel_target[0..2]    N,E targets in m
- *   vel_D_target   vel_D_tgt in m
+ *   state[6..8]  vN,vE,vD in inertial frame in m/s
+  *  pos_tgt[0..3]    N,E.D position targets in m
+ *   vel_tgt[0..3]    N,E,D velocity/rate targets in m/s
+ *   vel_D_tgt   D velocity target (vel_tgt[2]) in m/s
  *   att_cmd[0..2]  targets [roll, pitch]in rad
+ *   yaw_rad        current yaw state[5]
  *   thr_cmd throttle in [0, 1]
  */
 class PosControl {
 public:
     PosControl();
 
-    void  NED_update(const float state[], const float pos_tgt[3], float vel_cmds[3]);
+    void  NED_update(const float state[], const float pos_tgt[3], float vel_tgt[3]);
     void  NE_rate_update(const float state[], const float vel_tgt[2], float att_cmds[2]);
     void  D_rate_update(const float state[], const float vel_D_tgt, const float thr_cmd);
     void  compute_lean_angles(const float yaw_rad, const float accel_N_tgt, 
