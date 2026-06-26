@@ -12,6 +12,8 @@
 
 /* ── Scalar helpers ──────────────────────────────────────────────────────── */
 
+float degreesToRadians(float deg);
+
 float constrain_float(float v, float lo, float hi);
 
 /* ── Signal processing ───────────────────────────────────────────────────── */
