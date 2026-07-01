@@ -6,10 +6,11 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 
 ## TODO
 
-- Add position hold controller.
 - Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
 - Complete arming logic (dedicated RC switch channel).
 - IMX5 yaw magnetometer / heading reference integration.
+- Unmixer motor polynomial calibration (bench thrust test).
+- Gain tuning on H7 hardware.
 
 
 ---
@@ -54,11 +55,13 @@ BPRL_flight/
 │   │   ├── ICM20948.hpp/.cpp InvenSense ICM-20948 9-DOF driver
 │   │   └── ICM20602.hpp/.cpp InvenSense ICM-20602 6-DOF driver
 │   │
-│   ├── controllers/          Flight control algorithms
-│   │   ├── PID.hpp/.cpp            Cascade PID with derivative filter + anti-windup
+│   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
+│   │   ├── PID.hpp/.cpp            PID base class with derivative filter + anti-windup
 │   │   ├── FlightStateMachine.hpp/.cpp  Top-level mode/phase dispatcher (400 Hz)
-│   │   ├── SLCPID.hpp/.cpp         Cascaded P+PID attitude controller (STABILIZE mode)
-│   │   ├── INDI.hpp/.cpp           Incremental NDI roll/pitch controller (INDI mode)
+│   │   ├── Attitude_PID.hpp/.cpp   Cascaded P+PID attitude controller
+│   │   ├── Attitude_INDI.hpp/.cpp  Incremental NDI roll/pitch controller
+│   │   ├── AltControl.hpp/.cpp     Altitude hold cascade (stick→climb rate→accel→thrust)
+│   │   ├── PosControl.hpp/.cpp     Position hold cascade (pos→vel→lean angles)
 │   │   ├── Unmixer.hpp/.cpp        RPM → physical torque (N·m) for INDI feedback
 │   │   └── MotorMixer.hpp/.cpp     X-frame quadcopter mixer (torque+thrust → motor cmds)
 │   │
@@ -120,116 +123,71 @@ All inter-thread communication goes through mutex-protected globals defined in `
 
 ## 2. Controller
 
+> For a full breakdown of each controller, see [`src/controllers/README.md`](src/controllers/README.md).
+
 ### Architecture
 
-The controller stack has three layers: `FlightStateMachine` dispatches to one of two attitude controllers, whose normalised torque outputs are passed to `MotorMixer`.
+The controller stack runs at 400 Hz. `FlightStateMachine` selects the active flight mode and dispatches to the attitude and throttle controllers, whose outputs feed `MotorMixer`.
 
 ```
-RC input
-  │
-  ├─ input[4] (flight_mode) ─► FlightStateMachine ──────────────────────────────────┐
-  │                               │ phase: DISARMED / ACTIVE                         │
-  │                               │                                                   │
-  │         ┌─── STABILIZE ───────┤   SLCPID                                          │
-  │         │                     └─── INDI ─────────────────────────────────────────┤
-  │         │                                ▲                                        │
-  │         │                         Unmixer (RPM → N·m)                            │
-  │         │                                ▲                                        │
-  │         │                         DShot GCR telemetry (rpm[4])                   │
-  │         │                                                                          │
-  ├─ Thrust ──────────────────────────────────────────────────────────── MotorMixer ◄─┘
-  │
-  ├─ Roll target  ┐
-  ├─ Pitch target ├─ (into active controller above)
-  └─ Yaw rate     ┘
+RC input[5]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
+     │
+     ▼
+FlightStateMachine
+     ├─ STABILIZE   — attitude PID/INDI + expo throttle passthrough
+     ├─ ALT_HOLD    — attitude PID/INDI + altitude hold (stick → climb rate cascade)
+     └─ POS_HOLD    — position hold → lean angles + altitude hold (D-axis rate)
+     │
+     ▼
+MotorMixer  →  DShot600 (4 motors)
 ```
 
-### FlightStateMachine (`src/controllers/FlightStateMachine.hpp/.cpp`)
+### Flight modes (3-position RC switch)
 
-Called at 400 Hz from `ControlThread`. Manages two orthogonal concepts:
+| `input[4]` value | Mode | Attitude target | Throttle |
+|---|---|---|---|
+| < −0.33 | STABILIZE | Pilot stick [rad] | Expo + tilt boost passthrough |
+| −0.33 to +0.33 | ALT_HOLD | Pilot stick [rad] | Climb rate cascade → thrust |
+| > +0.33 | POS_HOLD | PosControl lean angles [rad] | AltControl D-axis rate |
 
-**Flight phase** — tracks arm state:
+Mode changes reset all controller integrators.
 
-| Phase | Condition | Torque output |
-|---|---|---|
-| DISARMED | arm switch low | 0, 0, 0 — motors off |
-| ACTIVE | armed | full controller running; zero throttle idles props |
+### Attitude controller
 
-**Flight mode** — selected from `input[InputIdx::FLIGHT_MODE]` (RC switch):
+Attitude is independent of flight mode, selected at runtime by `set_use_indi(bool)`:
 
-| `input[4]` value | Mode | Controller used |
-|---|---|---|
-| < 0 | STABILIZE | SLCPID |
-| ≥ 0 | INDI | INDI + Unmixer |
+| Controller | Description |
+|---|---|
+| `AttitudePID` (default) | Cascaded outer-P / inner-PID for roll, pitch, yaw |
+| `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
 
-Any mode change resets all PID integrators.
+### AltControl — altitude hold
 
-### STABILIZE mode — SLCPID (`src/controllers/SLCPID.hpp/.cpp`)
-
-Standard two-loop cascade:
-
-```
-roll_target [rad] ──► outer P ──► rate_target [rad/s] ──► inner PID ──► torque_norm [-1,1]
-pitch_target [rad] ─► outer P ──► rate_target [rad/s] ──► inner PID ──► torque_norm [-1,1]
-yaw_rate_target ───────────────────────────────────────── rate PID ───► torque_norm [-1,1]
-```
-
-All derivative terms use a 30 Hz first-order low-pass filter. Integrators are anti-windup clamped to ±0.5.
-
-### INDI mode — Incremental NDI (`src/controllers/INDI.hpp/.cpp`)
-
-Uses the measured angular acceleration (`p_dot`, `q_dot` from `g_state[P_DOT/Q_DOT]`) to close feedback around the actual dynamics. Roll and pitch use INDI; yaw falls back to the standard rate PID.
-
-INDI loop per axis (roll shown, pitch is symmetric):
+`AltControl` owns the throttle output for all modes. In STABILIZE it applies expo shaping and a tilt-boost (`1/min(cos φ, cos θ)`) to the raw stick. In ALT_HOLD and POS_HOLD it runs a two-loop cascade:
 
 ```
-1. Outer loop (P only):  roll_error [rad] → roll_rate_target [rad/s]
-2. Inner loop (PID):     rate_error [rad/s] → accel_cmd [rad/s²]
-3. INDI step:
-     delta_accel  = accel_cmd − p_dot_measured          (rad/s²)
-     delta_torque = delta_accel × INDI_GAIN              (N·m)
-     total_torque = current_torque_Nm + delta_torque     (N·m)
-     out          = clamp(total_torque / T_MAX_NM, −1, 1)
+pilot stick [0,1]  ──►  stick_to_climb_rate  ──►  climb_rate_pid  ──►  accel_pid  ──►  thrust_out
 ```
 
-`current_torque_Nm` is the physical roll/pitch torque currently being produced by the motors, estimated by the **Unmixer** from live DShot RPM telemetry. `INDI_GAIN = 0.01` is the effective airframe moment of inertia (Ixx ≈ Iyy in N·m·s²/rad) — update once the airframe is characterised.
+In POS_HOLD the outer stick-to-rate step is skipped; the climb rate target comes directly from `PosControl`.
 
-> **Note:** The Unmixer motor polynomial coefficients (`MOTOR_P1`–`MOTOR_P4`) are currently all zero — placeholders until a motor thrust bench test is completed. In this state `current_torque` is always 0 N·m and the INDI step reduces to a pure increment from zero, which is still functional but does not use physical torque feedback.
+### PosControl — position hold
 
-### Unmixer (`src/controllers/Unmixer.hpp/.cpp`)
-
-Converts per-motor RPM (from DShot GCR telemetry) to physical roll/pitch torques in N·m.
-
-**Motor force model** (cubic polynomial, fill from bench test):
-```
-F_kg = P1·rpm³ + P2·rpm² + P3·rpm + P4
-F_N  = F_kg × 9.81
-```
-
-**X-frame geometry** (arm length L = 0.225 m, NED body frame X-fwd Y-right):
-```
-roll_Nm  = (L/√2) × (−F_FR + F_RL + F_FL − F_RR)
-pitch_Nm = (L/√2) × (+F_FR − F_RL + F_FL − F_RR)
-```
-
-Signs are consistent with `MotorMixer`: positive roll command spins RL/FL motors faster, producing positive `roll_Nm`.
-
-### Throttle shaping (both modes)
-
-`compute_throttle` applies an exponential curve around mid-throttle (`THR_MID = 0.4`) and an angle boost:
+`PosControl` runs a two-stage cascade converting a 3-D position target to lean angles:
 
 ```
-boost = 1 / min(cos(roll), cos(pitch))
-thrust = constrain(thr_exp × boost, 0, 1)
+pos_error [m]  ──►  pos_P  ──►  vel_target [m/s]  ──►  vel_PID  ──►  accel_target [m/s²]
+                                                                              │
+                                                                    yaw rotation + atan2
+                                                                              │
+                                                                    roll/pitch targets [rad]
 ```
 
-The boost compensates for reduced vertical thrust component when the drone is banked.
+The NE axes include a per-axis pilot-blend state machine (PILOT → BRAKE → HOLD → RETURNING) so the drone brakes and holds automatically when the stick is released, and blends smoothly back to manual when the stick is pushed again.
 
-### MotorMixer (`src/controllers/MotorMixer.hpp/.cpp`)
+### MotorMixer
 
-Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised [-1,1]/[0,1]) to four motor commands (0–1000) using an X-frame mixing matrix. All motors are set to 0 when disarmed or when |roll| or |pitch| exceeds ~80°. `motor_output_write()` translates these to DShot600 pulses.
-
-Motor channel mapping (top view):
+Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor commands (0–1000) using an X-frame mixing matrix. All motors output 0 when disarmed or when attitude exceeds ~80°.
 
 ```
     FL [2]       FR [0]
@@ -238,28 +196,6 @@ Motor channel mapping (top view):
          /       \
     RL [1]       RR [3]
 ```
-
-### Current gain values
-
-Gains live in `src/controllers/SLCPID.cpp` and `src/controllers/INDI.cpp` (both controllers use the same values):
-
-| Loop | Kp | Ki | Kd | D-filter | Imax |
-|---|---|---|---|---|---|
-| Roll / Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
-| Roll / Pitch rate | 0.065 | 0.09 | 0.002 | 30 Hz | 0.5 |
-| Yaw rate | 0.065 | 0.02 | 0 | 30 Hz | 0.5 |
-
-The outer attitude loop is P-only (Kd = Ki = 0). `INDI_GAIN = 0.01` (N·m·s²/rad).
-
-### TODOs
-
-- **Arming logic** — `radio_armed()` returns `false` unconditionally. Needs a dedicated switch channel decoded from the radio.
-
-- **Gain tuning** — gains have not been flight-tested on the H7 hardware.
-
-- **Unmixer calibration** — motor polynomial coefficients (`MOTOR_P1`–`MOTOR_P4`) must be filled in from a bench thrust test before INDI torque feedback is meaningful.
-
-- **Yaw position hold** — currently only yaw *rate* is commanded. An outer yaw angle loop would require a heading reference from the magnetometer or IMX5.
 
 ---
 
@@ -638,4 +574,49 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 | `0x04` | r rate + z accel | same encoding | 100 Hz |
 
 When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`). The on-board IMUs continue to run and are logged regardless of IMX5 state.
+
+---
+
+## 9. Building on Windows
+
+The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs natively on Windows without a compatibility layer; WSL2 is the recommended path.
+
+### Setup (WSL2)
+
+1. **Install WSL2** — run in PowerShell as Administrator, then reboot:
+   ```powershell
+   wsl --install
+   ```
+   This installs Ubuntu by default.
+
+2. **Inside Ubuntu (WSL2), install the toolchain:**
+   ```bash
+   sudo apt update
+   sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi make python3
+   ```
+
+3. **Clone the repo and build** — the Makefile works unchanged:
+   ```bash
+   make BOARD=CubeBlueH7
+   ```
+
+### Flashing from WSL2
+
+WSL2 does not expose USB devices by default. Two options:
+
+**Option A — `usbipd-win` (USB bootloader or ST-Link over WSL2):**
+```powershell
+# In PowerShell (install usbipd-win first from https://github.com/dorssel/usbipd-win)
+usbipd list                       # find the Cube or ST-Link bus ID
+usbipd attach --wsl --busid <ID>
+```
+Then in WSL2:
+```bash
+make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
+# or
+make flash-stlink BOARD=CubeBlueH7
+```
+
+**Option B — STM32CubeProgrammer (no usbipd needed):**
+Build in WSL2, then flash `build/BPRL.bin` using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08000000` (CubeBlueH7) or `0x08020000` (CubeOrangePlus).
 
