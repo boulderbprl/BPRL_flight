@@ -2,54 +2,40 @@
 #include "PID.hpp"
 
 /*
- * Cascade position controller (PosControl) — Target pos rate -> desired angles + throttle.
+ * Cascade position controller (PosControl) — position target → lean angles + climb rate.
  *
- * Outer loop:  NE/D position  [m]  → NE/D rate (vel) [m/s]
- * Inner loop: NE rate (vel) [m/s]  → NE/ accel [m/s^2] → lean angle compute (roll_cmd, pitch_cmd)[rad]
- * Inner loop: D rate (vel) [m/s]  → throttle [0,1]
+ * Outer loop:  NE/D position  [m]    → NE/D velocity target [m/s]
+ * Inner NE:    NE velocity    [m/s]  → roll/pitch commands  [rad]
  *
  * Conventions:
- *   state[0..2]  N,E,D in inertial frame in m
- *   state[3..5]  roll,pitch,yaw body-frame positions in rad
- *   state[6..8]  vN,vE,vD in inertial frame in m/s
-  *  pos_tgt[0..3]    N,E.D position targets in m
- *   vel_tgt[0..3]    N,E,D velocity/rate targets in m/s
- *   vel_D_tgt   D velocity target (vel_tgt[2]) in m/s
- *   att_cmd[0..2]  targets [roll, pitch]in rad
- *   yaw_rad        current yaw state[5]
- *   thr_cmd throttle in [0, 1]
+ *   state[0..2]  N, E, D in inertial frame [m]
+ *   state[3..5]  roll, pitch, yaw body-frame [rad]
+ *   state[6..8]  vN, vE, vD inertial frame [m/s]
+ *   pos_tgt[3]   N, E, D position targets [m]
+ *   vel_tgt[3]   N, E, D velocity targets [m/s]  (output of NED_update)
+ *   att_cmds[2]  [roll_tgt, pitch_tgt] [rad]      (output of NE_rate_update)
  */
 class PosControl {
 public:
     PosControl();
 
-    void  NED_update(const float state[], const float pos_tgt[3], float vel_tgt[3]);
-    void  NE_rate_update(const float state[], const float vel_tgt[2], float att_cmds[2]);
-    void  D_rate_update(const float state[], const float vel_D_tgt, const float thr_cmd);
-    void  compute_lean_angles(const float yaw_rad, const float accel_N_tgt, 
-                    const float accel_E_tgt, float roll_tgt, const float pitch_tgt);
-    
+    void NED_update(const float state[], const float pos_tgt[3], float vel_tgt[3]);
+    void NE_rate_update(const float state[], const float vel_NE_tgt[2], float att_cmds[2]);
 
-    float compute_throttle(const float state[], const float input[]) const;
-    
-    void  reset_all();
+    void reset_all();
 
 private:
+    void compute_lean_angles(float yaw_rad, float accel_N_tgt, float accel_E_tgt,
+                             float &roll_tgt, float &pitch_tgt);
+
     PID _pos_N;
     PID _pos_E;
     PID _pos_D;
     PID _vel_N;
     PID _vel_E;
-    PID _vel_D;
 
-   
-    static constexpr float THR_MID  = 0.4f;
-
-    static constexpr float MAX_VEL_NE  = 5.0f;
-    static constexpr float MAX_VEL_D  = 3.0f;
+    static constexpr float MAX_VEL_NE   = 5.0f;
+    static constexpr float MAX_VEL_D    = 3.0f;
     static constexpr float MAX_LEAN_deg = 30.0f;
-
-    static constexpr float GRAVITY_MSS = 9.80665f;
-
-
+    static constexpr float GRAVITY_MSS  = 9.80665f;
 };
