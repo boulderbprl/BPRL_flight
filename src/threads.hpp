@@ -3,6 +3,7 @@
 #include "hal.h"
 #include "src/FlightState.hpp"
 #include "src/coms/DShot.hpp"   // ESCTelemetry
+#include "src/sensors/StrainRate.hpp"
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -27,11 +28,6 @@ struct CANIMURaw {
     bool  valid;             // true while IMX5 frames are arriving
 };
 
-struct StrainRateRaw {
-    int16_t val[4];  // 4 signed int16 strain-rate values, one per arm (CAN ID 0x69)
-    bool    valid;   // true once at least one frame has arrived
-};
-
 struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
@@ -44,7 +40,7 @@ struct MocapRaw {
 extern mutex_t state_mtx;
 extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
-extern float   g_input[4];           // InputIdx::*  (thrust, roll/pitch/yaw targets)
+extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs entering MotorMixer
 extern bool    g_armed;
@@ -55,8 +51,6 @@ extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
 extern mutex_t   can_imu_mtx;
 extern CANIMURaw g_can_imu;
 
-extern mutex_t        strainRate_mtx;
-extern StrainRateRaw  g_strain_rate;
 
 extern mutex_t  mocap_mtx;
 extern MocapRaw g_mocap;

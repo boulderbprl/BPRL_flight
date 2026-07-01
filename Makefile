@@ -139,7 +139,12 @@ CPPSRC = $(ALLCPPSRC) \
          src/state_estimator/EKF.cpp \
          src/state_estimator/StateManager.cpp \
          src/controllers/PID.cpp \
-         src/controllers/AttitudeController.cpp \
+         src/controllers/Attitude_PID.cpp \
+         src/controllers/Attitude_INDI.cpp \
+         src/controllers/AltControl.cpp \
+         src/controllers/PosControl.cpp \
+         src/controllers/Unmixer.cpp \
+         src/controllers/FlightStateMachine.cpp \
          src/controllers/MotorMixer.cpp \
          src/coms/IMUs/ICM42688.cpp \
          src/coms/IMUs/ICM45686.cpp \
@@ -147,11 +152,13 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \
          src/coms/I2C.cpp \
+         src/sensors/StrainRate.cpp \
          src/coms/PWM.cpp \
          src/coms/DShot.cpp \
          src/coms/Radio.cpp \
          src/coms/SBUS.cpp \
          src/coms/CRSF.cpp \
+         src/coms/MAVLink.cpp \
          src/usb_serial.cpp \
          src/logging/Logger.cpp
 
@@ -172,7 +179,7 @@ CPPWARN = -Wall -Wextra -Wundef
 # Board-specific MCU variant + optional debug flag
 UDEFS   = $(BOARD_UDEFS) -DCHPRINTF_USE_FLOAT=1 $(UDEFS_EXTRA)
 UADEFS  =
-UINCDIR =
+UINCDIR = $(CURDIR)/third_party/mavlink
 ULIBDIR =
 ULIBS   = -lm
 

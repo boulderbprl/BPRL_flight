@@ -188,10 +188,11 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 
 ```bash
 # Flash
-make flash BOARD=CubeBlueH7
+make flash CubeOrangePlus  
+defalut:(BOARD=CubeBlueH7)
 
 # Debug build + flash
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeBlueH7
+make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeOrangePlus
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry

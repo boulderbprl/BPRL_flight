@@ -17,13 +17,14 @@
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
 #include "src/coms/Radio.hpp"
-#include "src/controllers/AttitudeController.hpp"
+#include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/MotorMixer.hpp"
 #include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
+#include "src/coms/MAVLink.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
@@ -36,7 +37,7 @@
 MUTEX_DECL(state_mtx);
 float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
-float   g_input[4]           = {};
+float   g_input[5]           = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
 bool    g_armed              = false;
@@ -74,7 +75,7 @@ int32_t g_motor_test_cmd[4] = {};
 static MUTEX_DECL(s_usb_write_mtx);
 
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
-static AttitudeController att_ctrl;
+static FlightStateMachine flight_sm;
 static MotorMixer         mixer;
 
 /* ── State estimator (StateEstThread only) ───────────────────────────────── */
@@ -90,6 +91,7 @@ static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 static THD_WORKING_AREA(waUSBCmd,   4096);  // 4 KB: FatFS log access + line parser
+static THD_WORKING_AREA(waMAVLink,  2048);  // MAVLink parser + heartbeat sender
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    2048);
 #endif
@@ -314,28 +316,32 @@ static THD_FUNCTION(ControlThread, arg)
             }
         }
 
-        /* ── Full cascade: EKF state → PID → mixer → DShot ─────────────── */
-        float ctrl_state[6];
+        /* ── Full cascade: EKF state → FlightStateMachine → mixer → DShot ─ */
+        float ctrl_full[StateIdx::N];
+        float euler[3];
+        float input[InputIdx::N_INPUTS];
         bool  armed;
-        float input[4];
         chMtxLock(&state_mtx);
-        ctrl_state[0] = g_euler[0];             // roll  (rad)
-        ctrl_state[1] = g_euler[1];             // pitch (rad)
-        ctrl_state[2] = g_euler[2];             // yaw   (rad)
-        ctrl_state[3] = g_state[StateIdx::P];   // p (rad/s)
-        ctrl_state[4] = g_state[StateIdx::Q];   // q (rad/s)
-        ctrl_state[5] = g_state[StateIdx::R];   // r (rad/s)
+        memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
+        memcpy(euler,     g_euler,  sizeof(euler));
+        memcpy(input,     g_input,  sizeof(input));
         armed = g_armed;
-        memcpy(input, g_input, sizeof(input));
-        if (!armed) att_ctrl.reset_all();
         chMtxUnlock(&state_mtx);
 
-        float torque_cmds[3];
-        att_ctrl.update(ctrl_state, input, torque_cmds);
-        const float thrust = att_ctrl.compute_throttle(ctrl_state, input);
+        ESCTelemetry sm_telem[4];
+        dshot_get_telemetry(sm_telem);
+        uint32_t rpm[4];
+        for (int i = 0; i < 4; i++)
+            rpm[i] = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
 
+        float torque_cmds[3];
+        float thrust;
+        flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
+
+        // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
+        const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
-        mixer.update(torque_cmds, thrust, armed, ctrl_state, motor_out);
+        mixer.update(torque_cmds, thrust, armed, safety_state, motor_out);
         motor_output_write(motor_out);
 
         chMtxLock(&state_mtx);
@@ -364,12 +370,12 @@ static THD_FUNCTION(RadioThread, arg)
         radio_input_update();
 
         chMtxLock(&state_mtx);
-        g_input[InputIdx::THRUST]    = radio_thr();
-        g_input[InputIdx::ROLL_TGT]  = radio_roll();
-        g_input[InputIdx::PITCH_TGT] = radio_pitch();
-        g_input[InputIdx::YAW_RATE]  = radio_yaw();
+        g_input[InputIdx::THRUST]      = radio_thr();
+        g_input[InputIdx::ROLL_TGT]    = radio_roll();
+        g_input[InputIdx::PITCH_TGT]   = radio_pitch();
+        g_input[InputIdx::YAW_RATE]    = radio_yaw();
+        g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
         g_armed = radio_armed();
-        if (!g_armed) { att_ctrl.reset_all(); }
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -757,6 +763,28 @@ static void usb_cmd_dispatch(const char *line)
                  (int)snap.val[2], (int)snap.val[3],
                  (unsigned)snap.valid);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "I2C,scan") == 0) {
+        // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
+        // Use a 2 ms timeout per probe so a stuck device can't hang the scan
+        // forever and starve the I2CThread of bus access.
+        uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
+        uint8_t dummy[1];
+        i2cAcquireBus(&I2CD2);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
+                acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
+            }
+        }
+        i2cReleaseBus(&I2CD2);
+        chMtxLock(&s_usb_write_mtx);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (acked[addr >> 3] & (1U << (addr & 7U))) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
+            }
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
     }
 }
 
@@ -1016,6 +1044,23 @@ static THD_FUNCTION(DebugThread, arg)
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * MAVLinkThread — 100 Hz, NORMALPRIO-8
+ * Slimmed-down MAVLink on TELEM2 (USART3, 115200 baud).
+ * Sends heartbeat at 1 Hz; receives VISION_POSITION_ESTIMATE and
+ * VISION_SPEED_ESTIMATE and writes them into g_mocap for the EKF.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(MAVLinkThread, arg)
+{
+    (void)arg;
+    mavlink_comms_init();
+    while (true) {
+        mavlink_comms_update();
+        chThdSleepMilliseconds(10);  // 100 Hz poll — sufficient to drain 115200 baud
+    }
+}
+
 static THD_FUNCTION(LogThread, arg)
 {
     chRegSetThreadName("log");
@@ -1137,6 +1182,15 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         logger.flush();
+
+        /* If a write error killed the logger, attempt a clean restart.
+         * 2-second cooldown prevents hammering a truly dead card. */
+        if (!logger.is_ready()) {
+            logger.close();
+            chThdSleepMilliseconds(2000);
+            logger.init();  // internally retries sdcConnect/f_mount up to 5×
+        }
+
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->period));
     }
 }
@@ -1145,21 +1199,25 @@ static THD_FUNCTION(LogThread, arg)
 void threads_start(const ThreadRates &rates)
 {
     // Priority ordering (highest first):
-    //   SPIThread      +30  1 kHz IMU reads
-    //   CANThread      +28  event-driven CAN RX
-    //   StateEstThread +25  500 Hz EKF
-    //   ControlThread  +20  400 Hz PID/mixer/DShot
-    //   RadioThread    +10  50 Hz RC input
-    //   HeartbeatThread -5  LED + DShot diag
-    //   DebugThread    -10  10 Hz $TEL/$EKFL USB stream
-    //   USBCmdThread   -20  event-driven USB commands
+    //   SPIThread       +30  1 kHz IMU reads
+    //   CANThread       +28  event-driven CAN RX
+    //   StateEstThread  +25  500 Hz EKF
+    //   ControlThread   +20  400 Hz PID/mixer/DShot
+    //   RadioThread     +10  50 Hz RC input
+    //   HeartbeatThread  -5  LED + DShot diag
+    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
+    //   DebugThread     -10  10 Hz $TEL/$EKFL USB stream
+    //   LogThread       -15  50 Hz SD card logging
+    //   USBCmdThread    -20  event-driven USB commands
 
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 22, I2CThread,       (void *)&rates.i2c);
     chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
+    chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);
 #ifdef BPRL_DEBUG
     chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif

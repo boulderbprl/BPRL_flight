@@ -1,6 +1,8 @@
 #include "math.hpp"
 #include <cmath>
 
+
+
 /* ── Scalar helpers ──────────────────────────────────────────────────────── */
 
 float constrain_float(float v, float lo, float hi)
@@ -8,6 +10,9 @@ float constrain_float(float v, float lo, float hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+float degreesToRadians(float deg) {
+    return deg * (M_PI / 180.0);
+}
 /* ── Signal processing ───────────────────────────────────────────────────── */
 
 float lowpass_alpha(float fc_hz, float dt_s)

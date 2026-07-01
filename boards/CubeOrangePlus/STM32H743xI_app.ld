@@ -23,7 +23,8 @@ MEMORY
     flash5 (rx) : org = 0x00000000, len = 0
     flash6 (rx) : org = 0x00000000, len = 0
     flash7 (rx) : org = 0x00000000, len = 0
-    ram0   (wx) : org = 0x24000000, len = 512k       /* AXI SRAM  */
+    ram0   (wx) : org = 0x24000000, len = 496k       /* AXI SRAM (cacheable)   */
+    ram0nc (wx) : org = 0x2407C000, len = 16k        /* AXI SRAM — non-cacheable via MPU (SDMMC DMA) */
     ram1   (wx) : org = 0x30000000, len = 256k       /* AHB SRAM1+SRAM2 */
     ram2   (wx) : org = 0x30000000, len = 288k       /* AHB SRAM1+SRAM2+SRAM3 */
     ram3   (wx) : org = 0x30040000, len = 32k        /* AHB SRAM3 */
@@ -51,7 +52,7 @@ REGION_ALIAS("DATA_RAM",          ram0);
 REGION_ALIAS("DATA_RAM_LMA",      flash0);
 REGION_ALIAS("BSS_RAM",           ram0);
 REGION_ALIAS("HEAP_RAM",          ram0);
-REGION_ALIAS("NOCACHE_RAM",       ram3);
+REGION_ALIAS("NOCACHE_RAM",       ram0nc);
 REGION_ALIAS("ETH_RAM",           ram3);
 
 INCLUDE rules_stacks.ld
@@ -66,7 +67,7 @@ SECTIONS
         *(.bss.__nocache_*)
         . = ALIGN(4);
         __nocache_end__ = .;
-    } > NOCACHE_RAM
+    } > ram0nc
 
     .eth (NOLOAD) : ALIGN(4)
     {

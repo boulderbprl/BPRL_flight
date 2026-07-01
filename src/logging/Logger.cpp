@@ -1,11 +1,11 @@
 /*
  * Logger.cpp — ring-buffered binary SD card logger implementation.
  *
- * DMA coherency:  The STM32H7 SDMMC IDMA bypasses the CPU D-cache.
- * Any buffer passed to disk_write() must reside in non-cacheable memory.
- * s_fs, s_file, and s_flush_buf are placed in the .nocache section
- * (SRAM3, 0x30040000) which the MPU marks non-cacheable when
- * STM32_NOCACHE_ENABLE is TRUE in mcuconf.h.
+ * DMA coherency:  STM32H743 SDMMC1 IDMA can only reliably access AXI SRAM
+ * (0x24000000).  s_fs, s_file, and s_flush_buf are placed in the .nocache
+ * section (last 16 KB of AXI SRAM, 0x2407C000) which the MPU marks
+ * non-cacheable — see STM32_NOCACHE_RBAR in mcuconf.h.  No explicit cache
+ * operations are needed because non-cacheable memory is coherent by definition.
  *
  * The ring buffer _buf[] stays in normal cached AXI SRAM — it is copied
  * into s_flush_buf (non-cached) by ring_read() before each f_write call.
@@ -58,26 +58,36 @@ bool Logger::init()
     _open       = false;
     _sync_count = 0;
 
-    if (sdcStart(&SDCD1, &sdc_cfg) != MSG_OK) {
-        _last_init_err = 1;
-        sdcStop(&SDCD1);
-        return false;
-    }
-    if (sdcConnect(&SDCD1) != HAL_SUCCESS) {
-        _last_init_err = 2;
-        sdcStop(&SDCD1);
-        return false;
-    }
-    {
+    /* Retry sdcStart→sdcConnect→f_mount up to 5 times with a 100 ms settling
+     * delay between attempts.  The SD card needs time to reset its internal
+     * state machine after a partial command sequence before it will respond
+     * correctly to the next initialisation round. */
+    bool mounted = false;
+    for (int attempt = 0; attempt < 5; attempt++) {
+        if (attempt > 0) chThdSleepMilliseconds(100);
+
+        if (sdcStart(&SDCD1, &sdc_cfg) != MSG_OK) {
+            _last_init_err = 1;
+            sdcStop(&SDCD1);
+            continue;
+        }
+        if (sdcConnect(&SDCD1) != HAL_SUCCESS) {
+            _last_init_err = 2;
+            sdcStop(&SDCD1);
+            continue;
+        }
         FRESULT fr = f_mount(&s_fs, "/", 1);
         if (fr != FR_OK) {
             _last_init_err = 3;
             _last_ff_err   = (uint8_t)fr;
             sdcDisconnect(&SDCD1);
             sdcStop(&SDCD1);
-            return false;
+            continue;
         }
+        mounted = true;
+        break;
     }
+    if (!mounted) return false;
 
     f_mkdir("/LOGS");  // ignore error if directory already exists
 

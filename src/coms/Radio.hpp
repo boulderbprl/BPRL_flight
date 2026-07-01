@@ -25,8 +25,9 @@
 void  radio_input_init(void);
 void  radio_input_update(void);
 
-float radio_thr(void);    /* throttle  [0, 1]  */
-float radio_roll(void);   /* roll      [-1, 1] */
-float radio_pitch(void);  /* pitch     [-1, 1] */
-float radio_yaw(void);    /* yaw rate  [-1, 1] */
+float radio_thr(void);          /* throttle       [0, 1]  */
+float radio_roll(void);         /* roll           [-1, 1] */
+float radio_pitch(void);        /* pitch          [-1, 1] */
+float radio_yaw(void);          /* yaw rate       [-1, 1] */
+float radio_flight_mode(void);  /* flight mode sw [-1, 1] from channel 5 */
 bool  radio_armed(void);

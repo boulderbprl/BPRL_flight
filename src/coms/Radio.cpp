@@ -26,8 +26,9 @@ static float norm_thr (uint16_t v) { return (float)(v - 172)  / 1639.0f; }
 void  radio_input_init()   { PARSER.init();   }
 void  radio_input_update() { PARSER.update(); }
 
-float radio_thr()    { return norm_thr (PARSER.channel(0)); }
-float radio_roll()   { return norm_axis(PARSER.channel(1)); }
-float radio_pitch()  { return -norm_axis(PARSER.channel(2)); }
-float radio_yaw()    { return norm_axis(PARSER.channel(3)); }
-bool  radio_armed()  { return PARSER.channel(4) > 992u;    }
+float radio_thr()         { return norm_thr (PARSER.channel(0)); }
+float radio_roll()        { return norm_axis(PARSER.channel(1)); }
+float radio_pitch()       { return -norm_axis(PARSER.channel(2)); }
+float radio_yaw()         { return norm_axis(PARSER.channel(3)); }
+bool  radio_armed()       { return PARSER.channel(4) > 992u;    }
+float radio_flight_mode() { return norm_axis(PARSER.channel(5)); }

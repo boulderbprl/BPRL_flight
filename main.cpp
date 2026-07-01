@@ -11,7 +11,8 @@
  *   src/threads.cpp/.hpp   All eight thread function bodies + shared state.
  *   src/coms/SPI.*         ICM-20948/20602 SPI bus drivers.
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
- *   src/coms/I2C.*         I2C device table (compass, baro — future).
+ *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
+ *   src/sensors/StrainRate.*  Strain rate sensor, CAN/I2C switchable via STRAIN_RATE_INTERFACE.
  *   src/coms/PWM.*         Motor PWM output stub (TIM1, future DShot).
  *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
  *   src/controllers/       PID, AttitudeController, MotorMixer.
@@ -38,6 +39,7 @@
 #include "src/threads.hpp"
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
+#include "src/sensors/StrainRate.hpp"
 #include "src/coms/PWM.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/usb_serial.hpp"
@@ -89,7 +91,7 @@ int main(void)
     static const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
         /* .est     = */ TIME_US2I(2000),
-        /* .i2c     = */ TIME_MS2I(10),
+        /* .i2c     = */ TIME_US2I(2000),  // 500 Hz — matches Teensy ADC sample rate
         /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
@@ -98,8 +100,10 @@ int main(void)
     };
 
     motor_output_init();
-    can_drv_init();        // start FDCAN1, register IMX5 callbacks (Phase 3)
-    radio_input_init();    // start USART3 CRSF receiver at 420000 baud (Phase 4)
+    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    i2c_drv_init();        // start I2CD2 at 400 kHz
+    strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
+    radio_input_init();    // start USART3 CRSF receiver at 420000 baud
     threads_start(kRates);
 
     /* Main thread: low-priority idle, feeds IWDG. */

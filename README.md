@@ -55,9 +55,12 @@ BPRL_flight/
 │   │   └── ICM20602.hpp/.cpp InvenSense ICM-20602 6-DOF driver
 │   │
 │   ├── controllers/          Flight control algorithms
-│   │   ├── PID.hpp/.cpp      Cascade PID with derivative filter + anti-windup
-│   │   ├── AttitudeController.hpp/.cpp  Outer (attitude) + inner (rate) PIDs
-│   │   └── MotorMixer.hpp/.cpp          X-frame quadcopter mixer
+│   │   ├── PID.hpp/.cpp            Cascade PID with derivative filter + anti-windup
+│   │   ├── FlightStateMachine.hpp/.cpp  Top-level mode/phase dispatcher (400 Hz)
+│   │   ├── SLCPID.hpp/.cpp         Cascaded P+PID attitude controller (STABILIZE mode)
+│   │   ├── INDI.hpp/.cpp           Incremental NDI roll/pitch controller (INDI mode)
+│   │   ├── Unmixer.hpp/.cpp        RPM → physical torque (N·m) for INDI feedback
+│   │   └── MotorMixer.hpp/.cpp     X-frame quadcopter mixer (torque+thrust → motor cmds)
 │   │
 │   ├── state_estimator/      EKF state estimation
 │   │   ├── EKF.hpp/.cpp      16-state Extended Kalman Filter (one lane per IMU)
@@ -89,13 +92,13 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 400 Hz | Fuse sensors → g_state[] |
-| I2CThread | NORMALPRIO+22 | 100 Hz | Poll I2C devices (TODO: strain) |
-| ControlThread | NORMALPRIO+20 | 400 Hz | Cascade PID → MotorMixer → motor output |
-| RadioThread | NORMALPRIO+10 | 50 Hz | Read RC input → g_input[] |
-| HouseThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
+| StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
+| I2CThread | NORMALPRIO+22 | 500 Hz | Poll I2C devices (strain rate sensor) |
+| ControlThread | NORMALPRIO+20 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
+| HeartbeatThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
 | LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (6 message types per tick) |
-| DebugThread | NORMALPRIO-10 | 10 Hz | UART status print (BPRL_DEBUG only) |
+| DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
 
 ### Shared state
 
@@ -119,25 +122,112 @@ All inter-thread communication goes through mutex-protected globals defined in `
 
 ### Architecture
 
-The flight controller uses a two-loop cascade structure, standard for quadcopters:
+The controller stack has three layers: `FlightStateMachine` dispatches to one of two attitude controllers, whose normalised torque outputs are passed to `MotorMixer`.
 
 ```
 RC input
   │
-  ├─ Thrust ──────────────────────────────────────────────── MotorMixer
+  ├─ input[4] (flight_mode) ─► FlightStateMachine ──────────────────────────────────┐
+  │                               │ phase: DISARMED / ACTIVE                         │
+  │                               │                                                   │
+  │         ┌─── STABILIZE ───────┤   SLCPID                                          │
+  │         │                     └─── INDI ─────────────────────────────────────────┤
+  │         │                                ▲                                        │
+  │         │                         Unmixer (RPM → N·m)                            │
+  │         │                                ▲                                        │
+  │         │                         DShot GCR telemetry (rpm[4])                   │
+  │         │                                                                          │
+  ├─ Thrust ──────────────────────────────────────────────────────────── MotorMixer ◄─┘
   │
-  ├─ Roll target  ┐                                               │
-  ├─ Pitch target ├─ Outer PID (attitude) → inner PID (rate) ────┘
+  ├─ Roll target  ┐
+  ├─ Pitch target ├─ (into active controller above)
   └─ Yaw rate     ┘
 ```
 
-**Outer loop** (`_roll_att`, `_pitch_att` in `AttitudeController`): converts angle error (rad) to a body-rate target (rad/s). P-only by default.
+### FlightStateMachine (`src/controllers/FlightStateMachine.hpp/.cpp`)
 
-**Inner loop** (`_roll_rate`, `_pitch_rate`, `_yaw_rate`): converts rate error (rad/s) to a normalised torque output in [-1, 1]. PID with derivative low-pass filter (30 Hz cutoff) and integrator anti-windup clamping.
+Called at 400 Hz from `ControlThread`. Manages two orthogonal concepts:
 
-**Throttle shaping** (`compute_throttle`): applies an exponential curve around mid-throttle and an angle boost to hold altitude during maneuvers.
+**Flight phase** — tracks arm state:
 
-**MotorMixer** converts `[roll_cmd, pitch_cmd, yaw_cmd, thrust]` to four normalized motor commands (0–1000) using an X-frame mixing matrix. All motors are set to 0 when disarmed or when |roll| or |pitch| exceeds ~80°. `motor_output_write()` in `src/coms/PWM.hpp` translates these values to DShot or PWM pulses depending on the `MOTOR_PROTOCOL` compile-time define.
+| Phase | Condition | Torque output |
+|---|---|---|
+| DISARMED | arm switch low | 0, 0, 0 — motors off |
+| ACTIVE | armed | full controller running; zero throttle idles props |
+
+**Flight mode** — selected from `input[InputIdx::FLIGHT_MODE]` (RC switch):
+
+| `input[4]` value | Mode | Controller used |
+|---|---|---|
+| < 0 | STABILIZE | SLCPID |
+| ≥ 0 | INDI | INDI + Unmixer |
+
+Any mode change resets all PID integrators.
+
+### STABILIZE mode — SLCPID (`src/controllers/SLCPID.hpp/.cpp`)
+
+Standard two-loop cascade:
+
+```
+roll_target [rad] ──► outer P ──► rate_target [rad/s] ──► inner PID ──► torque_norm [-1,1]
+pitch_target [rad] ─► outer P ──► rate_target [rad/s] ──► inner PID ──► torque_norm [-1,1]
+yaw_rate_target ───────────────────────────────────────── rate PID ───► torque_norm [-1,1]
+```
+
+All derivative terms use a 30 Hz first-order low-pass filter. Integrators are anti-windup clamped to ±0.5.
+
+### INDI mode — Incremental NDI (`src/controllers/INDI.hpp/.cpp`)
+
+Uses the measured angular acceleration (`p_dot`, `q_dot` from `g_state[P_DOT/Q_DOT]`) to close feedback around the actual dynamics. Roll and pitch use INDI; yaw falls back to the standard rate PID.
+
+INDI loop per axis (roll shown, pitch is symmetric):
+
+```
+1. Outer loop (P only):  roll_error [rad] → roll_rate_target [rad/s]
+2. Inner loop (PID):     rate_error [rad/s] → accel_cmd [rad/s²]
+3. INDI step:
+     delta_accel  = accel_cmd − p_dot_measured          (rad/s²)
+     delta_torque = delta_accel × INDI_GAIN              (N·m)
+     total_torque = current_torque_Nm + delta_torque     (N·m)
+     out          = clamp(total_torque / T_MAX_NM, −1, 1)
+```
+
+`current_torque_Nm` is the physical roll/pitch torque currently being produced by the motors, estimated by the **Unmixer** from live DShot RPM telemetry. `INDI_GAIN = 0.01` is the effective airframe moment of inertia (Ixx ≈ Iyy in N·m·s²/rad) — update once the airframe is characterised.
+
+> **Note:** The Unmixer motor polynomial coefficients (`MOTOR_P1`–`MOTOR_P4`) are currently all zero — placeholders until a motor thrust bench test is completed. In this state `current_torque` is always 0 N·m and the INDI step reduces to a pure increment from zero, which is still functional but does not use physical torque feedback.
+
+### Unmixer (`src/controllers/Unmixer.hpp/.cpp`)
+
+Converts per-motor RPM (from DShot GCR telemetry) to physical roll/pitch torques in N·m.
+
+**Motor force model** (cubic polynomial, fill from bench test):
+```
+F_kg = P1·rpm³ + P2·rpm² + P3·rpm + P4
+F_N  = F_kg × 9.81
+```
+
+**X-frame geometry** (arm length L = 0.225 m, NED body frame X-fwd Y-right):
+```
+roll_Nm  = (L/√2) × (−F_FR + F_RL + F_FL − F_RR)
+pitch_Nm = (L/√2) × (+F_FR − F_RL + F_FL − F_RR)
+```
+
+Signs are consistent with `MotorMixer`: positive roll command spins RL/FL motors faster, producing positive `roll_Nm`.
+
+### Throttle shaping (both modes)
+
+`compute_throttle` applies an exponential curve around mid-throttle (`THR_MID = 0.4`) and an angle boost:
+
+```
+boost = 1 / min(cos(roll), cos(pitch))
+thrust = constrain(thr_exp × boost, 0, 1)
+```
+
+The boost compensates for reduced vertical thrust component when the drone is banked.
+
+### MotorMixer (`src/controllers/MotorMixer.hpp/.cpp`)
+
+Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised [-1,1]/[0,1]) to four motor commands (0–1000) using an X-frame mixing matrix. All motors are set to 0 when disarmed or when |roll| or |pitch| exceeds ~80°. `motor_output_write()` translates these to DShot600 pulses.
 
 Motor channel mapping (top view):
 
@@ -151,25 +241,26 @@ Motor channel mapping (top view):
 
 ### Current gain values
 
-Gains live in `src/controllers/AttitudeController.cpp`:
+Gains live in `src/controllers/SLCPID.cpp` and `src/controllers/INDI.cpp` (both controllers use the same values):
 
-| Loop | Kp | Ki | Kd | Imax |
-|---|---|---|---|---|
-| Roll attitude | 4.50 | 0 | 0 | 0.5 |
-| Pitch attitude | 4.50 | 0 | 0 | 0.5 |
-| Roll rate | 0.11 | 0.09 | 0.003 | 0.5 |
-| Pitch rate | 0.11 | 0.09 | 0.003 | 0.5 |
-| Yaw rate | 0.10 | 0.02 | 0 | 0.5 |
+| Loop | Kp | Ki | Kd | D-filter | Imax |
+|---|---|---|---|---|---|
+| Roll / Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
+| Roll / Pitch rate | 0.065 | 0.09 | 0.002 | 30 Hz | 0.5 |
+| Yaw rate | 0.065 | 0.02 | 0 | 30 Hz | 0.5 |
+
+The outer attitude loop is P-only (Kd = Ki = 0). `INDI_GAIN = 0.01` (N·m·s²/rad).
 
 ### TODOs
 
 - **Arming logic** — `radio_armed()` returns `false` unconditionally. Needs a dedicated switch channel decoded from the radio.
 
-- **Gain tuning** — gains were ported from the Tiva platform and have not been flight-tested on the H7 hardware.
+- **Gain tuning** — gains have not been flight-tested on the H7 hardware.
+
+- **Unmixer calibration** — motor polynomial coefficients (`MOTOR_P1`–`MOTOR_P4`) must be filled in from a bench thrust test before INDI torque feedback is meaningful.
 
 - **Yaw position hold** — currently only yaw *rate* is commanded. An outer yaw angle loop would require a heading reference from the magnetometer or IMX5.
 
-- **INDI** — add an INDI controller around angular accelerations. 
 ---
 
 ## 3. State Estimation (EKF)
