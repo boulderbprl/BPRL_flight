@@ -861,6 +861,7 @@ static THD_FUNCTION(DebugThread, arg)
         /* ── Snapshot flight state ──────────────────────────────────────── */
         float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw;
         float p, q, r;
+        float pos_x, pos_y, pos_z, vel_u, vel_v, vel_w;
         float lane_roll[3], lane_pitch[3], lane_yaw[3];
         float lane_p[3], lane_q[3], lane_r[3];
         int   primary_lane;
@@ -872,6 +873,12 @@ static THD_FUNCTION(DebugThread, arg)
         p        = g_state[StateIdx::P];
         q        = g_state[StateIdx::Q];
         r        = g_state[StateIdx::R];
+        pos_x    = g_state[StateIdx::X];
+        pos_y    = g_state[StateIdx::Y];
+        pos_z    = g_state[StateIdx::Z_POS];
+        vel_u    = g_state[StateIdx::U];
+        vel_v    = g_state[StateIdx::V];
+        vel_w    = g_state[StateIdx::W];
         thr      = g_input[InputIdx::THRUST];
         rc_roll  = g_input[InputIdx::ROLL_TGT];
         rc_pitch = g_input[InputIdx::PITCH_TGT];
@@ -917,6 +924,19 @@ static THD_FUNCTION(DebugThread, arg)
         can_qy     = g_can_imu.q2;
         can_qz     = g_can_imu.q3;
         chMtxUnlock(&can_imu_mtx);
+
+        /* ── Snapshot mocap ground truth ────────────────────────────────── */
+        float mocap_x, mocap_y, mocap_z, mocap_vx, mocap_vy, mocap_vz;
+        bool  mocap_v;
+        chMtxLock(&mocap_mtx);
+        mocap_x  = g_mocap.x;
+        mocap_y  = g_mocap.y;
+        mocap_z  = g_mocap.z;
+        mocap_vx = g_mocap.vx;
+        mocap_vy = g_mocap.vy;
+        mocap_vz = g_mocap.vz;
+        mocap_v  = g_mocap.valid;
+        chMtxUnlock(&mocap_mtx);
 
         // Quaternion → ZYX Euler (deg) for the CAN IMX5 lane in $EKFL.
         // Always computed from the stored quaternion so the display shows the
@@ -1040,6 +1060,37 @@ static THD_FUNCTION(DebugThread, arg)
             if (ilen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
                                 (uint8_t *)imu_buf, ilen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
+        /* ── Emit $POS line over USB (EKF position/velocity + mocap truth) */
+        /* Format: $POS,<ms>,
+         *   <ekf_x>,<ekf_y>,<ekf_z>,          NED position (m)
+         *   <ekf_u>,<ekf_v>,<ekf_w>,          body-frame velocity (m/s)
+         *   <mocap_x>,<mocap_y>,<mocap_z>,    NED position (m)
+         *   <mocap_vx>,<mocap_vy>,<mocap_vz>, NED velocity (m/s)
+         *   <mocap_valid>                                                  */
+        {
+            static char pos_buf[256];
+            MemoryStream pos_ms;
+            msObjectInit(&pos_ms, (uint8_t *)pos_buf, sizeof(pos_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&pos_ms,
+                "$POS,%lu,"
+                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,"
+                "%.4f,%.4f,%.4f,%d\r\n",
+                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                (double)pos_x, (double)pos_y, (double)pos_z,
+                (double)vel_u, (double)vel_v, (double)vel_w,
+                (double)mocap_x, (double)mocap_y, (double)mocap_z,
+                (double)mocap_vx, (double)mocap_vy, (double)mocap_vz,
+                (int)mocap_v);
+            size_t plen = pos_ms.eos;
+            if (plen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)pos_buf, plen, TIME_MS2I(50));
                 chMtxUnlock(&s_usb_write_mtx);
             }
         }

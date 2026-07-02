@@ -246,6 +246,44 @@ class EkfLaneState:
     lines_rx:     int   = 0
 
 
+# ── Position / velocity (EKF vs mocap ground truth) ──────────────────────────
+
+@dataclass
+class PosVelState:
+    time_ms:      float = 0.0
+    ekf_pos:      list  = field(default_factory=lambda: [0.0, 0.0, 0.0])  # NED (m)
+    ekf_vel:      list  = field(default_factory=lambda: [0.0, 0.0, 0.0])  # body u,v,w (m/s)
+    mocap_pos:    list  = field(default_factory=lambda: [0.0, 0.0, 0.0])  # NED (m)
+    mocap_vel:    list  = field(default_factory=lambda: [0.0, 0.0, 0.0])  # NED (m/s)
+    mocap_valid:  bool  = False
+    received_any: bool  = False
+    usb_rx_any:   bool  = False
+    last_rx:      float = field(default_factory=time.monotonic)
+    lines_rx:     int   = 0
+
+
+def parse_pos_line(line: str, state: PosVelState) -> bool:
+    """Parse a $POS CSV line into state. Returns True on success."""
+    if not line.startswith("$POS,"):
+        return False
+    try:
+        parts = line[5:].split(",")
+        if len(parts) < 14:
+            return False
+        state.time_ms     = float(parts[0])
+        state.ekf_pos     = [float(parts[1]), float(parts[2]), float(parts[3])]
+        state.ekf_vel     = [float(parts[4]), float(parts[5]), float(parts[6])]
+        state.mocap_pos   = [float(parts[7]), float(parts[8]), float(parts[9])]
+        state.mocap_vel   = [float(parts[10]), float(parts[11]), float(parts[12])]
+        state.mocap_valid = bool(int(parts[13]))
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+    except (ValueError, IndexError):
+        return False
+
+
 def parse_ekfl_line(line: str, state: EkfLaneState) -> bool:
     """Parse a $EKFL line into state. Returns True on success."""
     if not line.startswith("$EKFL,"):

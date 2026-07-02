@@ -9,6 +9,7 @@ Usage:
     python3 tools/telemetry.py telemetry              # attitude / rates / RPM / IMU dashboard
     python3 tools/telemetry.py ekf-status             # per-lane EKF roll/pitch/yaw table
     python3 tools/telemetry.py imu-compare            # side-by-side IMU accel+gyro with deltas
+    python3 tools/telemetry.py pos-vel                # XYZ position/velocity vs mocap ground truth
 
 Options:
     --port /dev/ttyACMx   Serial port (auto-detected if omitted)
@@ -26,6 +27,7 @@ from bprl_common import (
     TelState, parse_tel_line,
     ImuSample, parse_imu_line,
     EkfLaneState, parse_ekfl_line,
+    PosVelState, parse_pos_line,
 )
 
 from rich.layout import Layout
@@ -378,6 +380,85 @@ def cmd_imu_compare(ser, _args):
         reader.stop()
 
 
+# ── Position / velocity (EKF vs mocap ground truth) ───────────────────────────
+
+_POS_AXIS_LABELS = ["X (N)", "Y (E)", "Z (D)"]
+_VEL_AXIS_LABELS = ["u", "v", "w"]
+
+
+def build_pos_vel_panel(s: PosVelState) -> Panel:
+    age   = time.monotonic() - s.last_rx
+    stale = age > 1.0
+    t_sec = s.time_ms / 1000.0
+
+    if not s.usb_rx_any:
+        stale_note = "  [dim](no USB data)[/dim]"
+    elif not s.received_any:
+        stale_note = "  [dim](waiting for $POS — requires -DBPRL_DEBUG build)[/dim]"
+    elif stale:
+        stale_note = "  [yellow](stale)[/yellow]"
+    else:
+        stale_note = ""
+
+    mocap_tag = "[green]● mocap valid[/green]" if s.mocap_valid else "[dim]○ mocap absent[/dim]"
+
+    p_tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    p_tbl.add_column("Position (m)", min_width=12)
+    p_tbl.add_column("EKF (NED)",    min_width=13, justify="right")
+    p_tbl.add_column("Mocap (NED)",  min_width=13, justify="right")
+    p_tbl.add_column("Δ error",      min_width=10, justify="right")
+
+    for k, ax in enumerate(_POS_AXIS_LABELS):
+        ekf_v   = s.ekf_pos[k]
+        mocap_v = s.mocap_pos[k] if s.mocap_valid else float("nan")
+        d       = (ekf_v - mocap_v) if s.mocap_valid else float("nan")
+        mocap_str = f"{mocap_v:+10.3f}" if s.mocap_valid else "  [dim]  ------[/dim]"
+        d_str     = (f"[{_delta_style(d,.1,.5)}]{d:+9.3f}[/{_delta_style(d,.1,.5)}]"
+                     if s.mocap_valid else "  [dim]  ------[/dim]")
+        p_tbl.add_row(f"  {ax}", f"{ekf_v:+10.3f}", mocap_str, d_str)
+
+    v_tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 2))
+    v_tbl.add_column("Velocity (m/s)",      min_width=12)
+    v_tbl.add_column("EKF (body u,v,w)",    min_width=15, justify="right")
+    v_tbl.add_column("Mocap (NED vx,vy,vz)", min_width=17, justify="right")
+
+    for k, ax in enumerate(_VEL_AXIS_LABELS):
+        ekf_v   = s.ekf_vel[k]
+        mocap_v = s.mocap_vel[k] if s.mocap_valid else float("nan")
+        mocap_str = f"{mocap_v:+10.3f}" if s.mocap_valid else "  [dim]  ------[/dim]"
+        v_tbl.add_row(f"  {ax}", f"{ekf_v:+10.3f}", mocap_str)
+    v_tbl.add_row("", "", "")
+    v_tbl.add_row("  [dim]note: EKF velocity is body-frame; mocap velocity is NED —"
+                  " frames are not directly comparable[/dim]", "", "")
+
+    diag  = f"  [dim]lines_rx={s.lines_rx}[/dim]"
+    title = f"Position / Velocity (mocap)    t={t_sec:8.1f} s{stale_note}  {mocap_tag}{diag}"
+
+    body = Table.grid()
+    body.add_row(Panel(p_tbl, title="Position (NED)",       border_style="dim"))
+    body.add_row(Panel(v_tbl, title="Velocity",              border_style="dim"))
+    return Panel(body, title=title, border_style="green")
+
+
+def cmd_pos_vel(ser, _args):
+    state  = PosVelState()
+    reader = SerialReader(ser)
+    try:
+        with Live(build_pos_vel_panel(state), refresh_per_second=10,
+                  console=console) as live:
+            while True:
+                for line in reader.pop_lines():
+                    state.lines_rx += 1
+                    if not parse_pos_line(line, state):
+                        state.usb_rx_any = True
+                live.update(build_pos_vel_panel(state))
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.stop()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -389,6 +470,7 @@ def main():
     sub.add_parser("telemetry",   help="Live attitude / rates / IMU / RPM dashboard")
     sub.add_parser("ekf-status",  help="Per-lane EKF roll/pitch/yaw/p/q/r table")
     sub.add_parser("imu-compare", help="Side-by-side IMU accel+gyro comparison with deltas")
+    sub.add_parser("pos-vel",     help="Live XYZ position/velocity vs mocap ground truth")
 
     args = parser.parse_args()
     if args.command is None:
@@ -402,6 +484,8 @@ def main():
             cmd_ekf_status(ser, args)
         elif args.command == "imu-compare":
             cmd_imu_compare(ser, args)
+        elif args.command == "pos-vel":
+            cmd_pos_vel(ser, args)
     finally:
         ser.close()
 
