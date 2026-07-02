@@ -178,7 +178,11 @@ static THD_FUNCTION(SPIThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * CANThread — event-driven  NORMALPRIO+28
- * Blocks on the CAN RxFIFO and dispatches frames as they arrive.
+ * Blocks on a semaphore signaled by the FDCAN1 ISR (new message / message
+ * lost / bus-off), then drains RxFIFO0 and dispatches. The wait has a
+ * timeout purely so Bus_Off gets checked (and self-healed) periodically
+ * even in the freak case the ISR itself never fires. See CAN.cpp for why
+ * this doesn't use ChibiOS's canReceiveTimeout()/CAND1.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(CANThread, arg)
 {
@@ -186,10 +190,15 @@ static THD_FUNCTION(CANThread, arg)
     chRegSetThreadName("can");
 
     while (true) {
+        bprl_can_wait_rx(TIME_MS2I(200));
+
         CANRxFrame rxf;
-        if (canReceiveTimeout(&CAND1, CAN_ANY_MAILBOX, &rxf,
-                              TIME_MS2I(5)) == MSG_OK) {
+        while (bprl_can_poll(rxf)) {
             can_dispatch(rxf);
+        }
+
+        if (can_is_bus_off()) {
+            can_hw_reinit();
         }
     }
 }
@@ -715,12 +724,14 @@ static void usb_cmd_dispatch(const char *line)
         chprintf((BaseSequentialStream *)&SDU1,
                  "CAN,DIAG,total_rx=%lu,dispatched=%lu,"
                  "last_sid=0x%03x,last_eid=0x%08lx,last_eff=%u,"
-                 "last_dlc=%u,last_data=%02x%02x%02x%02x%02x%02x%02x%02x\r\n",
+                 "last_dlc=%u,last_data=%02x%02x%02x%02x%02x%02x%02x%02x,"
+                 "msg_lost=%lu,reinit_count=%lu\r\n",
                  (uint32_t)d.total_rx, (uint32_t)d.dispatched,
                  (unsigned)d.last_sid, (uint32_t)d.last_eid, (unsigned)d.last_eff,
                  (unsigned)d.last_dlc,
                  d.last_data[0], d.last_data[1], d.last_data[2], d.last_data[3],
-                 d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7]);
+                 d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7],
+                 (uint32_t)d.msg_lost, (uint32_t)d.reinit_count);
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,scan,start") == 0) {
         can_scan_start();

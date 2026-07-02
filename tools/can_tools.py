@@ -88,6 +88,72 @@ def cmd_can_status(ser, _args):
     console.print("[red]No CAN,STATUS response — firmware may not support this command[/red]")
 
 
+# ── CAN diag (software-side dispatch counters) ─────────────────────────────────
+
+def cmd_can_diag(ser, _args):
+    ser.write(b"CAN,diag\r\n")
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        m = re.match(
+            r"CAN,DIAG,total_rx=(\d+),dispatched=(\d+),"
+            r"last_sid=(0x[0-9a-fA-F]+),last_eid=(0x[0-9a-fA-F]+),last_eff=(\d+),"
+            r"last_dlc=(\d+),last_data=([0-9a-fA-F]+),"
+            r"msg_lost=(\d+),reinit_count=(\d+)", line)
+        if m:
+            console.print("[bold]CANThread dispatch counters[/bold]")
+            console.print(f"  total_rx   = {m.group(1)}   (frames CANThread has pulled off RxFIFO0, any ID)")
+            console.print(f"  dispatched = {m.group(2)}   (frames matching a registered callback)")
+            console.print(f"  last_sid   = {m.group(3)}  last_eid = {m.group(4)}  ext={m.group(5)}")
+            console.print(f"  last_dlc   = {m.group(6)}  last_data = {m.group(7)}")
+            console.print(f"  msg_lost      = {m.group(8)}   (RxFIFO0 overflowed — CANThread fell behind the bus)")
+            console.print(f"  reinit_count  = {m.group(9)}   (times the driver self-healed from Bus_Off)")
+            console.print()
+            console.print("[dim]total_rx stuck at 0 while RXF0S fill is also 0 → hardware never stored a frame "
+                          "(filter/RXF0C config or bit-timing), not a software/thread problem.[/dim]")
+            console.print("[dim]total_rx increasing but dispatched staying 0 → frames arriving on an ID nobody registered.[/dim]")
+            console.print("[dim]reinit_count > 0 → the bus went Bus_Off at least once and the driver recovered on its "
+                          "own; if it keeps climbing, something on the bus (wiring, termination, a second bad node) "
+                          "is causing real errors, not just this app.[/dim]")
+            console.print("[dim]Run this twice a couple seconds apart — if total_rx resets to 0 with reinit_count also "
+                          "back at 0, firmware is rebooting rather than recovering.[/dim]")
+            return
+    console.print("[red]No CAN,DIAG response — firmware may not support this command[/red]")
+
+
+# ── CAN regdump (raw FDCAN1 register block) ────────────────────────────────────
+
+def cmd_can_regdump(ser, _args):
+    ser.write(b"CAN,regdump\r\n")
+    deadline = time.monotonic() + 2.0
+    regs = {}
+    while time.monotonic() < deadline:
+        line = ser.readline().decode("ascii", errors="replace").strip()
+        if line == "CAN,REG,END":
+            break
+        m = re.match(r"CAN,REG,(\w+)=(0x[0-9a-fA-F]+)", line)
+        if m:
+            regs[m.group(1)] = int(m.group(2), 16)
+
+    if not regs:
+        console.print("[red]No CAN,REG response — firmware may not support this command[/red]")
+        return
+
+    tbl = Table(title="FDCAN1 raw registers", show_header=True, header_style="bold")
+    tbl.add_column("Register")
+    tbl.add_column("Value", justify="right")
+    tbl.add_column("Note")
+    notes = {
+        "RXF0C": "bits[23:16]=F0S (FIFO0 element count) — 0 here means RxFIFO0 has zero depth, "
+                 "so frames are ACKed on the bus but never stored anywhere",
+        "RXESC": "element size config",
+        "NBTP":  "nominal bit timing — compare against 0x00040C01 in CAN.cpp",
+    }
+    for name, val in regs.items():
+        tbl.add_row(name, f"0x{val:08x}", notes.get(name, ""))
+    console.print(tbl)
+
+
 # ── CAN scan ──────────────────────────────────────────────────────────────────
 
 REGISTERED_IDS = {0x01, 0x02, 0x03, 0x04, 0x69}
@@ -178,6 +244,8 @@ def main():
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("can-status", help="Read FDCAN1 protocol status and error counters")
+    sub.add_parser("can-diag", help="Read CANThread software dispatch counters (total_rx/dispatched)")
+    sub.add_parser("can-regdump", help="Dump raw FDCAN1 registers (CCCR, NBTP, RXGFC, RXF0C, RXF0S, RXESC, PSR, ECR)")
 
     scan_p = sub.add_parser("can-scan", help="Scan all CAN IDs on bus and show Hz breakdown")
     scan_p.add_argument("--duration", type=int, default=1,
@@ -191,6 +259,10 @@ def main():
     try:
         if args.command == "can-status":
             cmd_can_status(ser, args)
+        elif args.command == "can-diag":
+            cmd_can_diag(ser, args)
+        elif args.command == "can-regdump":
+            cmd_can_regdump(ser, args)
         elif args.command == "can-scan":
             cmd_can_scan(ser, args)
     finally:

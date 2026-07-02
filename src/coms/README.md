@@ -8,7 +8,22 @@ All peripheral drivers live in `src/coms/`. Register CAN devices and I2C devices
 
 **Clock:** PLL2Q = 80 MHz → 1 Mbit/s (BRP=5, TSEG1=13, TSEG2=2, 87.5% sample point)
 
-Classical CAN, standard 11-bit IDs, RxFIFO0 accept-all filter.
+Classical CAN, standard 11-bit IDs, RxFIFO0 accept-all filter (16 elements, overwrite-on-full).
+
+This is a **direct register-level FDCAN1 driver**, not ChibiOS's `HAL_USE_CAN` (`HAL_USE_CAN` is `FALSE` in `cfg/halconf.h`). That driver's `canStart()` never programs `RXF0C` — the register that gives RxFIFO0 an actual address/size in message RAM — so on STM32H7 it silently receives nothing forever: frames get ACKed on the wire (no bus errors, looks perfectly healthy) and then have nowhere to be stored. ArduPilot doesn't hit this because it has its own FDCAN driver (`AP_HAL_ChibiOS/CANFDIface.cpp`) and never goes through that ChibiOS layer either. Full writeup is in the comment at the top of `CAN.cpp`.
+
+### RX path — interrupt-driven
+
+`FDCAN1_IT0` (our own `OSAL_IRQ_HANDLER(STM32_FDCAN1_IT0_HANDLER)`, not ChibiOS's) fires on new-message / message-lost / bus-off and signals a binary semaphore — no register or FIFO work happens in ISR context. `CANThread` blocks on that semaphore (`bprl_can_wait_rx()`, 200 ms timeout), drains RxFIFO0 with `bprl_can_poll()`, and calls `can_dispatch()` per frame, routing it to the registered callback in O(n) time.
+
+### Self-healing
+
+Every time `CANThread` wakes (on real traffic or the 200 ms timeout), it checks `PSR.BO` (Bus_Off) and calls `can_hw_reinit()` — a full hardware reconfigure — if set, so a transient bus fault recovers without a reflash. Two counters track this instead of it happening silently:
+
+- `msg_lost` — RxFIFO0 overflowed (CANThread fell behind the bus)
+- `reinit_count` — Bus_Off recoveries so far; climbing steadily means something on the bus (wiring, termination, a bad node) is causing real errors, not just this firmware
+
+Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-status` (raw PSR/ECR/RXF0S/CCCR), `can-regdump` (full FDCAN1 register dump), `can-scan` (per-ID traffic breakdown over a time window).
 
 ### Registered devices
 
@@ -18,7 +33,7 @@ Classical CAN, standard 11-bit IDs, RxFIFO0 accept-all filter.
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz (in development) |
+| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — only registered when `STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN` (see `src/sensors/StrainRate.*`); I2C is the default interface |
 
 ### Adding a device
 
@@ -26,8 +41,6 @@ Classical CAN, standard 11-bit IDs, RxFIFO0 accept-all filter.
 // in main.cpp, before threads_start():
 bprl_can_register(0x10, my_callback, nullptr);
 ```
-
-`CANThread` blocks on `canReceiveTimeout` and calls `can_dispatch()` on each frame, routing it to the registered callback in O(n) time.
 
 ---
 
@@ -91,13 +104,20 @@ SPI clock: 1 MHz for init, 8 MHz for burst reads. Both ICM drivers use 32-byte a
 
 ---
 
-## I2C (`I2C.hpp/.cpp`)
+## I2C — I2C2 (`I2C.hpp/.cpp`)
 
-**Status: stub.** Registration table and `i2c_poll_all()` dispatch loop are implemented; the peripheral is not started.
+**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 500 Hz via `i2c_poll_all()`.
 
-**To enable:** set `HAL_USE_I2C TRUE` in `cfg/halconf.h`, configure `I2CD1` in `cfg/mcuconf.h`, call `i2cStart()` inside `i2c_drv_init()`.
+**Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Planned use: strain gauge amplifiers.
+Current use: strain rate sensor (`src/sensors/StrainRate.*`, default interface — see `STRAIN_RATE_INTERFACE` in `StrainRate.hpp`).
+
+### Adding a device
+
+```cpp
+// in main.cpp, before threads_start():
+bprl_i2c_register(MY_ADDR, my_poll, nullptr);
+```
 
 ---
 

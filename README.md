@@ -48,8 +48,8 @@ BPRL_flight/
 │   │
 │   ├── coms/                 Peripheral drivers
 │   │   ├── SPI.hpp/.cpp      SPI bus init, ICM-20948/20602 instantiation
-│   │   ├── CAN.hpp/.cpp      FDCAN1 driver, IMX5 callback, device table
-│   │   ├── I2C.hpp/.cpp      I2C device table (stub — planned for strain gauges)
+│   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
+│   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — used by strain rate sensor
 │   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
 │   │   ├── Radio.hpp/.cpp    CRSF receiver input
 │   │   ├── ICM20948.hpp/.cpp InvenSense ICM-20948 9-DOF driver
@@ -521,10 +521,10 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 |---|---|---|---|
 | SPI1 | `SPI.hpp/.cpp` | ICM-20948 (primary IMU) | Working |
 | SPI4 | `SPI.hpp/.cpp` | ICM-20948 (external IMU), ICM-20602 (backup IMU) | Working |
-| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69) | Working |
+| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, CAN-interface build only) | Working |
 | TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
 | UART | `Radio.hpp/.cpp` | CRSF receiver | Working |
-| I2C1 | `I2C.hpp/.cpp` | (planned: strain gauge amplifiers) | Stub |
+| I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (default interface) | Working |
 
 ---
 

@@ -119,9 +119,13 @@ include $(CHIBIOS)/os/hal/lib/streams/streams.mk
 include $(CHIBIOS)/os/various/fatfs_bindings/fatfs.mk
 
 # CubeOrangePlus: application starts at 0x08020000 (after 128 KB BL).
-# CubeBlueH7: uses the generic layout (adjust if its BL offset differs).
+# CubeBlueH7: same flash layout as the generic ChibiOS script (org=0x08000000,
+# no bootloader offset), but with its own .nocache placement fixed to match
+# STM32_NOCACHE_RBAR/RASR in cfg/mcuconf.h — see boards/CubeBlueH7/STM32H743xI.ld.
 ifeq ($(BOARD),CubeOrangePlus)
     LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
+else ifeq ($(BOARD),CubeBlueH7)
+    LDSCRIPT = $(BOARDDIR)/STM32H743xI.ld
 else
     LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
 endif
