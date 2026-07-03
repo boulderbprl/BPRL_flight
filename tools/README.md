@@ -18,6 +18,7 @@ pip install pyserial rich
 | `motor_test.py` | `motor-test` | No |
 | `calibrate.py` | `calibrate` | Required |
 | `can_tools.py` | `can-status`, `can-scan` | No |
+| `mav_tools.py` | `mav-diag` | No |
 | `strain_rate.py` | `strain-rate` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
@@ -98,6 +99,23 @@ python3 tools/can_tools.py can-scan --duration 2
 ```
 
 `can-scan` marks each ID as registered (in the device table) or unknown. Unknown IDs appearing at high rate indicate a device that needs `bprl_can_register()`.
+
+---
+
+## mav_tools.py
+
+> Works on any firmware build.
+
+| Subcommand | Description |
+|---|---|
+| `mav-diag [--watch] [--interval N]` | Read MAVLinkThread's SD3/TELEM2 RX counters (bytes, frames parsed OK/bad-CRC, per-message-type counts) |
+
+```bash
+python3 tools/mav_tools.py mav-diag
+python3 tools/mav_tools.py mav-diag --watch --interval 1
+```
+
+Diagnoses the RX side of the MAVLink/TELEM2 link independent of the radio and any ground-side bridge — tells you whether bytes are reaching SD3 at all, whether frames are failing CRC (dialect mismatch), and whether `VISION_POSITION_ESTIMATE`/`VISION_SPEED_ESTIMATE` specifically are showing up.
 
 ---
 

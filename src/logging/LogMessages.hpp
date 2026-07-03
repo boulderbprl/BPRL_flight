@@ -29,6 +29,9 @@ constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + arm state
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
 constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
 constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
+constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -104,6 +107,21 @@ struct __attribute__((packed)) LogMsgSTRN {
 };
 // Format: "QHhhhhB"   Body: 8+2+4×2+1 = 19 B   Record: 22 B
 
+struct __attribute__((packed)) LogMsgIMU {
+    uint64_t time_us;
+    uint16_t rate_hz;
+    float    ax;        // m/s²  body-frame accel (post axis-rotation, calibration-bias-corrected)
+    float    ay;
+    float    az;
+    float    gx;         // rad/s  body-frame gyro (post axis-rotation, calibration-bias-corrected)
+    float    gy;
+    float    gz;
+    uint8_t  valid;      // 1 if this IMU is currently reporting valid data
+};
+// Format: "QHffffffB"   Body: 8+2+6×4+1 = 35 B   Record: 38 B
+// Shared body layout for IMU1/IMU2/IMU3 — same struct, three distinct msg_ids/names
+// so each IMU shows up as its own series in the log viewer.
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -150,6 +168,24 @@ constexpr LogDef kLogDefs[] = {
       "QHhhhhB",
       "TimeUS,Rate,S0,S1,S2,S3,Valid",
       sizeof(LogMsgSTRN) },
+
+    { LOG_MSG_IMU1,
+      "IMU1",
+      "QHffffffB",
+      "TimeUS,Rate,AccX,AccY,AccZ,GyrX,GyrY,GyrZ,Valid",
+      sizeof(LogMsgIMU) },
+
+    { LOG_MSG_IMU2,
+      "IMU2",
+      "QHffffffB",
+      "TimeUS,Rate,AccX,AccY,AccZ,GyrX,GyrY,GyrZ,Valid",
+      sizeof(LogMsgIMU) },
+
+    { LOG_MSG_IMU3,
+      "IMU3",
+      "QHffffffB",
+      "TimeUS,Rate,AccX,AccY,AccZ,GyrX,GyrY,GyrZ,Valid",
+      sizeof(LogMsgIMU) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

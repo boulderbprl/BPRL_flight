@@ -41,6 +41,7 @@ float   g_input[5]           = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
 bool    g_armed              = false;
+int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -359,6 +360,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[2] = torque_cmds[2];
         g_ctrl[3] = thrust;
         memcpy(g_output, motor_out, sizeof(g_output));
+        g_flight_mode = (int)flight_sm.mode();
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -733,6 +735,18 @@ static void usb_cmd_dispatch(const char *line)
                  d.last_data[4], d.last_data[5], d.last_data[6], d.last_data[7],
                  (uint32_t)d.msg_lost, (uint32_t)d.reinit_count);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "MAV,diag") == 0) {
+        MavlinkDiag d = {};
+        mavlink_get_diag(d);
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "MAV,DIAG,bytes_rx=%lu,frames_ok=%lu,frames_bad_crc=%lu,"
+                 "heartbeat_rx=%lu,param_req_rx=%lu,vision_pos_rx=%lu,"
+                 "vision_speed_rx=%lu,unknown_rx=%lu\r\n",
+                 (uint32_t)d.bytes_rx, (uint32_t)d.frames_ok, (uint32_t)d.frames_bad_crc,
+                 (uint32_t)d.heartbeat_rx, (uint32_t)d.param_req_rx, (uint32_t)d.vision_pos_rx,
+                 (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx);
+        chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,scan,start") == 0) {
         can_scan_start();
         chMtxLock(&s_usb_write_mtx);
@@ -833,7 +847,8 @@ static THD_FUNCTION(USBCmdThread, arg)
  *   $TEL,<time_ms>,<roll°>,<pitch°>,<yaw°>,<p>,<q>,<r>,<thr>,
  *        <rc_roll>,<rc_pitch>,<rc_yaw>,<armed>,
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
- *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>
+ *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
+ *        <flight_mode>          ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -866,6 +881,7 @@ static THD_FUNCTION(DebugThread, arg)
         float lane_p[3], lane_q[3], lane_r[3];
         int   primary_lane;
         bool  armed;
+        int   flight_mode;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
         pitch    = g_euler[1];
@@ -884,6 +900,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_pitch = g_input[InputIdx::PITCH_TGT];
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
+        flight_mode = g_flight_mode;
         for (int li = 0; li < 3; ++li) {
             lane_roll[li]  = s_lane_roll[li];
             lane_pitch[li] = s_lane_pitch[li];
@@ -976,7 +993,8 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.4f,%.4f,%.4f,"
                 "%.3f,%.3f,%.3f,%.3f,%d,"
                 "%lu,%lu,%lu,%lu,"
-                "%d,%d,%d,%d,%lu,%lu\r\n",
+                "%d,%d,%d,%d,%lu,%lu,"
+                "%d\r\n",
                 (uint32_t)TIME_I2MS(chVTGetSystemTime()),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
@@ -988,7 +1006,8 @@ static THD_FUNCTION(DebugThread, arg)
                 rpm[0], rpm[1], rpm[2], rpm[3],
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
-                can_quat_hz, can_rate_hz);
+                can_quat_hz, can_rate_hz,
+                flight_mode);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1102,7 +1121,7 @@ static THD_FUNCTION(DebugThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * LogThread — 50 Hz  NORMALPRIO-15
- * Logs 6 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN.
+ * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN, IMU1, IMU2, IMU3.
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1158,6 +1177,12 @@ static THD_FUNCTION(LogThread, arg)
         /* ── RPM snapshot (dshot_get_telemetry is thread-safe) ───────── */
         ESCTelemetry telem[4] = {};
         dshot_get_telemetry(telem);
+
+        /* ── IMU snapshot ────────────────────────────────────────────── */
+        IMURaw imu_snap_log[3];
+        chMtxLock(&imu_mtx);
+        memcpy(imu_snap_log, g_imu, sizeof(imu_snap_log));
+        chMtxUnlock(&imu_mtx);
 
         /* ── ATT — angular states ─────────────────────────────────────── */
         {
@@ -1241,6 +1266,24 @@ static THD_FUNCTION(LogThread, arg)
             msg.s3      = strain.val[3];
             msg.valid   = (uint8_t)strain.valid;
             logger.write(LOG_MSG_STRN, msg);
+        }
+
+        /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */
+        {
+            static constexpr uint8_t ids[3] = { LOG_MSG_IMU1, LOG_MSG_IMU2, LOG_MSG_IMU3 };
+            for (uint8_t i = 0; i < 3; i++) {
+                LogMsgIMU msg = {};
+                msg.time_us = t_us;
+                msg.rate_hz = 50U;
+                msg.ax    = imu_snap_log[i].accel[0];
+                msg.ay    = imu_snap_log[i].accel[1];
+                msg.az    = imu_snap_log[i].accel[2];
+                msg.gx    = imu_snap_log[i].gyro[0];
+                msg.gy    = imu_snap_log[i].gyro[1];
+                msg.gz    = imu_snap_log[i].gyro[2];
+                msg.valid = (uint8_t)imu_snap_log[i].valid;
+                logger.write(ids[i], msg);
+            }
         }
 
         logger.flush();

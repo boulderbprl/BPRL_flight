@@ -265,9 +265,16 @@ void EKF::update_gravity(const float accel[3], float R_var)
     H[1][iQ0] = -2*qx*g;  H[1][iQ1] = -2*qw*g;  H[1][iQ2] = -2*qz*g;  H[1][iQ3] = -2*qy*g;
     H[2][iQ0] =  0.0f;    H[2][iQ1] =  4*qx*g;  H[2][iQ2] =  4*qy*g;  H[2][iQ3] =  0.0f;
 
-    // ∂/∂accel_bias  (identity block)
-    H[0][iBax] = 1.0f;
-    H[1][iBay] = 1.0f;
+    // ∂/∂accel_bias — Z only.
+    // Z is unambiguous: body-frame gravity Z-component is -g at any known
+    // attitude regardless of horizontal motion, so a Z residual is always bias.
+    // X/Y residuals are NOT unambiguous — a single specific-force sample can't
+    // distinguish "sensor is biased" from "vehicle is genuinely accelerating
+    // horizontally," so feeding them into iBax/iBay here caused real
+    // translational accel (e.g. a hand push) to get absorbed into the bias
+    // state and lag behind real motion, corrupting u/v on direction reversals.
+    // X/Y bias is instead only resolvable via mocap velocity fusion's
+    // cross-covariance with iU/iV, which correctly separates bias from motion.
     H[2][iBaz] = 1.0f;
 
     // ── Chi-squared innovation gate ────────────────────────────────────────

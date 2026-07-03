@@ -44,6 +44,7 @@ extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw tar
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs entering MotorMixer
 extern bool    g_armed;
+extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602

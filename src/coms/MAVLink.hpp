@@ -15,3 +15,21 @@
 
 void mavlink_comms_init();    // call once, before the thread loop starts
 void mavlink_comms_update();  // call each thread tick (~100 Hz)
+
+// ── Diagnostics ──────────────────────────────────────────────────────────────
+// Lets you tell, from the FC side alone (over USB, independent of the radio
+// link), whether bytes are reaching SD3 at all and what's in them — without
+// needing a working end-to-end GCS/mocap-bridge connection.
+struct MavlinkDiag {
+    uint32_t bytes_rx;        // total bytes read off SD3
+    uint32_t frames_ok;       // MAVLINK_FRAMING_OK
+    uint32_t frames_bad_crc;  // MAVLINK_FRAMING_BAD_CRC (dialect/version mismatch)
+    uint32_t heartbeat_rx;
+    uint32_t param_req_rx;
+    uint32_t vision_pos_rx;
+    uint32_t vision_speed_rx;
+    uint32_t unknown_rx;      // frames_ok but msgid not handled here
+};
+
+// Copy out current diagnostic counters (safe to call from any thread).
+void mavlink_get_diag(MavlinkDiag &out);

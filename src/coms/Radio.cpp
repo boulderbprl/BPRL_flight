@@ -31,4 +31,4 @@ float radio_roll()        { return norm_axis(PARSER.channel(1)); }
 float radio_pitch()       { return -norm_axis(PARSER.channel(2)); }
 float radio_yaw()         { return norm_axis(PARSER.channel(3)); }
 bool  radio_armed()       { return PARSER.channel(4) > 992u;    }
-float radio_flight_mode() { return norm_axis(PARSER.channel(5)); }
+float radio_flight_mode() { return norm_axis(PARSER.channel(6)); }

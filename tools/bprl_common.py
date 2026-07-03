@@ -151,10 +151,20 @@ class TelState:
     can_valid:    bool  = False
     can_quat_hz:  int   = 0
     can_rate_hz:  int   = 0
+    flight_mode:  int   = 0
     received_any: bool  = False
     usb_rx_any:   bool  = False
     last_rx:      float = field(default_factory=time.monotonic)
     lines_rx:     int   = 0
+
+
+FLIGHT_MODE_NAMES = ["STABILIZE", "ALT_HOLD", "POS_HOLD"]
+
+
+def flight_mode_name(mode: int) -> str:
+    if 0 <= mode < len(FLIGHT_MODE_NAMES):
+        return FLIGHT_MODE_NAMES[mode]
+    return f"UNKNOWN({mode})"
 
 
 def parse_tel_line(line: str, state: TelState) -> bool:
@@ -163,7 +173,7 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         return False
     try:
         parts = line[5:].split(",")
-        if len(parts) < 22:
+        if len(parts) < 23:
             return False
         state.time_ms     = float(parts[0])
         state.roll        = float(parts[1])
@@ -185,6 +195,7 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         state.can_valid   = bool(int(parts[19]))
         state.can_quat_hz = int(parts[20])
         state.can_rate_hz = int(parts[21])
+        state.flight_mode = int(parts[22])
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()
