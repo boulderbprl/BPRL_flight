@@ -60,11 +60,11 @@ static void handle_vision_position(const mavlink_message_t *msg)
     mavlink_msg_vision_position_estimate_decode(msg, &m);
 
     chMtxLock(&mocap_mtx);
-    g_mocap.x       = m.x;
-    g_mocap.y       = m.y;
-    g_mocap.z       = m.z;
-    g_mocap.valid   = true;
-    g_mocap.has_new = true;
+    g_mocap.x           = m.x;
+    g_mocap.y           = m.y;
+    g_mocap.z           = m.z;
+    g_mocap.valid       = true;
+    g_mocap.has_new_pos = true;
     chMtxUnlock(&mocap_mtx);
 }
 
@@ -74,10 +74,10 @@ static void handle_vision_speed(const mavlink_message_t *msg)
     mavlink_msg_vision_speed_estimate_decode(msg, &m);
 
     chMtxLock(&mocap_mtx);
-    g_mocap.vx      = m.x;
-    g_mocap.vy      = m.y;
-    g_mocap.vz      = m.z;
-    g_mocap.has_new = true;
+    g_mocap.vx          = m.x;
+    g_mocap.vy          = m.y;
+    g_mocap.vz          = m.z;
+    g_mocap.has_new_vel = true;
     chMtxUnlock(&mocap_mtx);
 }
 

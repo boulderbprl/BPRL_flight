@@ -19,6 +19,13 @@
  * Quaternion output: hard-selected from the primary lane (lowest smoothed
  * innovation norm among valid lanes) — no blending to avoid antipodal issues.
  *
+ * X/Y/Z and U/V/W output: soft-blended across all valid lanes weighted by
+ * 1/innovation_norm, same as p/q/r below. Plain vectors have no antipodal
+ * issue, so there is no reason to hard-select these from a single lane —
+ * doing so let the raw output jump discontinuously every time _select_primary()
+ * picked a different lane, since independent per-IMU integration drift means
+ * lanes' u/v estimates diverge from each other even under identical motion.
+ *
  * p/q/r output: soft-blended across all valid lanes weighted by
  * 1/innovation_norm, giving partial noise averaging with fault isolation.
  *
@@ -72,6 +79,10 @@ private:
 
     // Soft-blended angular rates (weighted by 1/innovation_norm across valid lanes)
     float _blended_p, _blended_q, _blended_r;
+
+    // Soft-blended position/velocity (same weights as _blended_p/q/r)
+    float _blended_x, _blended_y, _blended_z;
+    float _blended_u, _blended_v, _blended_w;
 
     // Body acceleration: blended gravity+Coriolis-corrected IMU accel
     float _blended_ud, _blended_vd, _blended_wd;

@@ -18,6 +18,8 @@ static constexpr int iBgx=13, iBgy=14, iBgz=15;
 StateManager::StateManager()
     : _primary(0), _initialized(false),
       _blended_p(0.0f), _blended_q(0.0f), _blended_r(0.0f),
+      _blended_x(0.0f), _blended_y(0.0f), _blended_z(0.0f),
+      _blended_u(0.0f), _blended_v(0.0f), _blended_w(0.0f),
       _blended_ud(0.0f), _blended_vd(0.0f), _blended_wd(0.0f),
       _prev_p(0.0f), _prev_q(0.0f), _prev_r(0.0f),
       _pdot_filt(0.0f), _qdot_filt(0.0f), _rdot_filt(0.0f),
@@ -32,6 +34,8 @@ void StateManager::init()
 
     _primary      = 0;
     _blended_p    = _blended_q    = _blended_r    = 0.0f;
+    _blended_x    = _blended_y    = _blended_z    = 0.0f;
+    _blended_u    = _blended_v    = _blended_w    = 0.0f;
     _blended_ud   = _blended_vd   = _blended_wd   = 0.0f;
     _prev_p       = _prev_q       = _prev_r       = 0.0f;
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
@@ -88,14 +92,41 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     }
 
     // ── 5. Mocap position + velocity fusion (all lanes, when connected) ───
-    if (mocap.valid && mocap.has_new) {
-        const float xyz[3] = { mocap.x,  mocap.y,  mocap.z  };
-        const float vel[3] = { mocap.vx, mocap.vy, mocap.vz };
+    // Gated independently: VISION_POSITION_ESTIMATE and VISION_SPEED_ESTIMATE
+    // are separate MAVLink messages that need not arrive together or at the
+    // same rate. Fusing update_ned_vel() off a has_new_pos-only tick would
+    // re-fuse a stale mocap.vx/vy/vz into u/v on every position packet.
+    if (mocap.valid && mocap.has_new_pos) {
+        const float xyz[3] = { mocap.x, mocap.y, mocap.z };
         for (int i = 0; i < NUM_LANES; ++i) {
             if (!_lanes[i].is_valid()) continue;
             _lanes[i].update_position(xyz, R_MOCAP_POS);
+        }
+    }
+    if (mocap.valid && mocap.has_new_vel) {
+        const float vel[3] = { mocap.vx, mocap.vy, mocap.vz };
+        for (int i = 0; i < NUM_LANES; ++i) {
+            if (!_lanes[i].is_valid()) continue;
             _lanes[i].update_ned_vel(vel, R_MOCAP_VEL);
         }
+    }
+
+    // ── 5.5. Soft-blend X/Y/Z, U/V/W across lanes (same weights as p/q/r) ──
+    // Unlike quaternion, plain vectors have no antipodal issue, so there is
+    // no reason to hard-select these from a single _primary lane — doing so
+    // let independent per-IMU integration drift show up as a discontinuous
+    // jump in u/v every time _select_primary() picked a different lane.
+    _blended_x = _blended_y = _blended_z = 0.0f;
+    _blended_u = _blended_v = _blended_w = 0.0f;
+    for (int i = 0; i < NUM_LANES; ++i) {
+        if (w[i] < 1e-15f || !_lanes[i].is_valid()) continue;
+        const float* st = _lanes[i].state();
+        _blended_x += w[i] * st[iX];
+        _blended_y += w[i] * st[iY];
+        _blended_z += w[i] * st[iZ];
+        _blended_u += w[i] * st[iU];
+        _blended_v += w[i] * st[iV];
+        _blended_w += w[i] * st[iW];
     }
 
     // ── 6. Soft-blend p/q/r: bias-corrected gyros + IMX5 blend ──
@@ -211,15 +242,15 @@ void StateManager::get_state(float out[StateIdx::N]) const
 
     const float* ekf = _lanes[_primary].state();  // EKF::N = 16 elements
 
-    // Position (NED) — EKF[0–2] → out[0–2]
-    out[StateIdx::X]     = ekf[iX];
-    out[StateIdx::Y]     = ekf[iY];
-    out[StateIdx::Z_POS] = ekf[iZ];
+    // Position (NED) — soft-blended across lanes (see _blended_x/y/z)
+    out[StateIdx::X]     = _blended_x;
+    out[StateIdx::Y]     = _blended_y;
+    out[StateIdx::Z_POS] = _blended_z;
 
-    // Body velocity — EKF[3–5] → out[3–5]
-    out[StateIdx::U] = ekf[iU];
-    out[StateIdx::V] = ekf[iV];
-    out[StateIdx::W] = ekf[iW];
+    // Body velocity — soft-blended across lanes (see _blended_u/v/w)
+    out[StateIdx::U] = _blended_u;
+    out[StateIdx::V] = _blended_v;
+    out[StateIdx::W] = _blended_w;
 
     // Body acceleration (blended + lowpass filtered) → out[6–8]
     out[StateIdx::U_DOT] = _ud_filt;

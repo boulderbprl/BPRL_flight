@@ -112,6 +112,12 @@ private:
     // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 500 Hz
     static constexpr float GRAV_VIBE_ALPHA = 0.02f;
 
+    // ── Mocap position/velocity measurement update parameters ─────────────
+    // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is
+    // diagonal here (each row observes exactly one state directly), so
+    // S_ii is just that state's P diagonal + R — no matrix product needed.
+    static constexpr float MOCAP_CHI2_GATE = 5.0f;
+
     // ── Covariance variance floors and ceilings (ConstrainVariances) ──────
     // Gyro bias: floor prevents collapse, ceiling = 0.5 rad/s 1σ
     static constexpr float P_MIN_BIAS_G = 1e-12f;

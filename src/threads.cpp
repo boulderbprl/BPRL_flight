@@ -266,7 +266,8 @@ static THD_FUNCTION(StateEstThread, arg)
         MocapRaw mocap_snap;
         chMtxLock(&mocap_mtx);
         mocap_snap = g_mocap;
-        g_mocap.has_new = false;
+        g_mocap.has_new_pos = false;
+        g_mocap.has_new_vel = false;
         chMtxUnlock(&mocap_mtx);
 
         // Run all EKF lanes and derive outputs.

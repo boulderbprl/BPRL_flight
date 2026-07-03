@@ -31,7 +31,8 @@ struct CANIMURaw {
 struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
-    bool  has_new;     // fresh data this tick — cleared by StateEstThread
+    bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
+    bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by StateEstThread
     bool  valid;       // mocap link connected and receiving
 };
 

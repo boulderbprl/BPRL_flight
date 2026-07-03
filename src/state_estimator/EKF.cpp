@@ -318,13 +318,29 @@ void EKF::update_position(const float xyz[3], float R_var)
 {
     if (!_initialized) return;
 
+    const float innov[3] = { xyz[0]-_x[iX], xyz[1]-_x[iY], xyz[2]-_x[iZ] };
+
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // H is diagonal (row i observes state iX+i directly), so S_ii is just
+    // that state's P diagonal + R — no matrix product needed. Rejects stale
+    // or corrupted mocap position samples instead of snapping X/Y/Z to them.
+    {
+        float innov_sq_sum = 0.0f;
+        float S_sum        = 0.0f;
+        for (int i = 0; i < 3; ++i) {
+            S_sum        += _P[iX+i][iX+i] + R_var;
+            innov_sq_sum += innov[i] * innov[i];
+        }
+        const float gate_sq = MOCAP_CHI2_GATE * MOCAP_CHI2_GATE;
+        if (S_sum < 1e-10f || innov_sq_sum > S_sum * gate_sq) return;
+    }
+
     float H[3][N] = {};
     H[0][iX] = 1.0f;
     H[1][iY] = 1.0f;
     H[2][iZ] = 1.0f;
 
     const float R_diag[3] = { R_var, R_var, R_var };
-    const float innov[3]  = { xyz[0]-_x[iX], xyz[1]-_x[iY], xyz[2]-_x[iZ] };
     _update(3, H, R_diag, innov);
 }
 
@@ -341,13 +357,30 @@ void EKF::update_ned_vel(const float vel_ned[3], float R_var)
         R[0][2]*vel_ned[0] + R[1][2]*vel_ned[1] + R[2][2]*vel_ned[2]
     };
 
+    const float innov[3] = { v_body[0]-_x[iU], v_body[1]-_x[iV], v_body[2]-_x[iW] };
+
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // H is diagonal (row i observes state iU+i directly), so S_ii is just
+    // that state's P diagonal + R. This is the primary guard against a
+    // stale/corrupted mocap velocity sample snapping u/v (see the has_new_vel
+    // split in MocapRaw — this gate is the second line of defense).
+    {
+        float innov_sq_sum = 0.0f;
+        float S_sum        = 0.0f;
+        for (int i = 0; i < 3; ++i) {
+            S_sum        += _P[iU+i][iU+i] + R_var;
+            innov_sq_sum += innov[i] * innov[i];
+        }
+        const float gate_sq = MOCAP_CHI2_GATE * MOCAP_CHI2_GATE;
+        if (S_sum < 1e-10f || innov_sq_sum > S_sum * gate_sq) return;
+    }
+
     float H[3][N] = {};
     H[0][iU] = 1.0f;
     H[1][iV] = 1.0f;
     H[2][iW] = 1.0f;
 
     const float R_diag[3] = { R_var, R_var, R_var };
-    const float innov[3]  = { v_body[0]-_x[iU], v_body[1]-_x[iV], v_body[2]-_x[iW] };
     _update(3, H, R_diag, innov);
 }
 

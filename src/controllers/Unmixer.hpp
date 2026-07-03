@@ -42,7 +42,7 @@ public:
     static constexpr float MOTOR_P4 = 0.0f;   // kg (zero-RPM offset, usually 0)
 
     // ── Drone geometry ────────────────────────────────────────────────────────
-    static constexpr float ARM_LENGTH_M = 0.225f;  // motor-to-centre arm length (m)
+    static constexpr float ARM_LENGTH_M = 0.1275f;  // motor-to-centre arm length (m)
 
     // ── Normalisation ─────────────────────────────────────────────────────────
     // Maximum achievable roll/pitch torque in N·m used to normalise to [-1, 1].
