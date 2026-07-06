@@ -32,6 +32,7 @@ constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of _use_indi)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -122,6 +123,20 @@ struct __attribute__((packed)) LogMsgIMU {
 // Shared body layout for IMU1/IMU2/IMU3 — same struct, three distinct msg_ids/names
 // so each IMU shows up as its own series in the log viewer.
 
+struct __attribute__((packed)) LogMsgINDI {
+    uint64_t time_us;
+    uint16_t rate_hz;
+    float    unmix_roll;   // N·m  measured roll torque from Unmixer (RPM feedback)
+    float    unmix_pitch;  // N·m  measured pitch torque from Unmixer
+    float    delta_roll;   // N·m  INDI incremental roll torque correction
+    float    delta_pitch;  // N·m  INDI incremental pitch torque correction
+    float    cmd_roll;     // [-1, 1]  normalized roll torque commanded by INDI
+    float    cmd_pitch;    // [-1, 1]  normalized pitch torque commanded by INDI
+};
+// Format: "QHffffff"   Body: 8+2+6×4 = 34 B   Record: 37 B
+// Always populated regardless of FlightStateMachine::_use_indi — this is INDI
+// running in shadow mode alongside whichever controller actually flies (OUTP).
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -186,6 +201,12 @@ constexpr LogDef kLogDefs[] = {
       "QHffffffB",
       "TimeUS,Rate,AccX,AccY,AccZ,GyrX,GyrY,GyrZ,Valid",
       sizeof(LogMsgIMU) },
+
+    { LOG_MSG_INDI,
+      "INDI",
+      "QHffffff",
+      "TimeUS,Rate,UnmixR,UnmixP,DeltaR,DeltaP,CmdR,CmdP",
+      sizeof(LogMsgINDI) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

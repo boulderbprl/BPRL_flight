@@ -22,11 +22,11 @@ float AltControl::stick_to_climb_rate(float pilot_thr) const
     const float centered = pilot_thr - 0.5f;  // [-0.5, +0.5]
     const float half     = 0.5f - DEADBAND;
     if (centered > DEADBAND) {
-        // stick above centre → descend (positive W / positive vD)
-        return  ((centered - DEADBAND) / half) * MAX_CLIMB_RATE;
+        // stick above centre → climb (negative W / negative vD)
+        return -((centered - DEADBAND) / half) * MAX_CLIMB_RATE;
     } else if (centered < -DEADBAND) {
-        // stick below centre → climb (negative W / negative vD)
-        return  ((centered + DEADBAND) / half) * MAX_CLIMB_RATE;
+        // stick below centre → descend (positive W / positive vD)
+        return -((centered + DEADBAND) / half) * MAX_CLIMB_RATE;
     }
     return 0.0f;
 }

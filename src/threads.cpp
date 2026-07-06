@@ -39,7 +39,8 @@ float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
 float   g_input[5]           = {};
 int32_t g_output[4]          = {};
-float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs
+float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
+float   g_indi_diag[6]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch] — INDI shadow diagnostics, always populated
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
@@ -349,6 +350,9 @@ static THD_FUNCTION(ControlThread, arg)
         float thrust;
         flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
 
+        float indi_diag[6];
+        flight_sm.get_indi_diag(indi_diag);
+
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
@@ -360,6 +364,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[1] = torque_cmds[1];
         g_ctrl[2] = torque_cmds[2];
         g_ctrl[3] = thrust;
+        memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode = (int)flight_sm.mode();
         chMtxUnlock(&state_mtx);
@@ -1159,13 +1164,14 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[4], ctrl[4];
+        float euler[3], state[StateIdx::N], inp[4], ctrl[4], indi_diag[6];
         bool  armed;
         chMtxLock(&state_mtx);
-        memcpy(euler, g_euler,  sizeof(euler));
-        memcpy(state, g_state,  sizeof(state));
-        memcpy(inp,   g_input,  sizeof(inp));
-        memcpy(ctrl,  g_ctrl,   sizeof(ctrl));
+        memcpy(euler,     g_euler,     sizeof(euler));
+        memcpy(state,     g_state,     sizeof(state));
+        memcpy(inp,       g_input,     sizeof(inp));
+        memcpy(ctrl,      g_ctrl,      sizeof(ctrl));
+        memcpy(indi_diag, g_indi_diag, sizeof(indi_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -1242,6 +1248,20 @@ static THD_FUNCTION(LogThread, arg)
             msg.yaw_tq   = ctrl[2];
             msg.throttle = ctrl[3];
             logger.write(LOG_MSG_OUTP, msg);
+        }
+
+        /* ── INDI — shadow INDI controller diagnostics (always logged) ── */
+        {
+            LogMsgINDI msg = {};
+            msg.time_us     = t_us;
+            msg.rate_hz     = 50U;
+            msg.unmix_roll  = indi_diag[0];
+            msg.unmix_pitch = indi_diag[1];
+            msg.delta_roll  = indi_diag[2];
+            msg.delta_pitch = indi_diag[3];
+            msg.cmd_roll    = indi_diag[4];
+            msg.cmd_pitch   = indi_diag[5];
+            logger.write(LOG_MSG_INDI, msg);
         }
 
         /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */

@@ -32,7 +32,7 @@ void MotorMixer::update(const float cmds[3], float thrust,
 
     // Step 2: how much yaw headroom each motor has left after roll+pitch,
     // then guarantee yaw a minimum share of the output span regardless of
-    // how much roll+pitch demand there is (mirrors ArduPilot's MOT_YAW_HEADROOM).
+    // how much roll+pitch demand there is (mirrors ArduPilot).
     float yaw_allowed = YAW_SCALE;
     for (int i = 0; i < 4; i++) {
         const float base = thr + rp[i];

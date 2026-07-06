@@ -7,7 +7,7 @@
 #define STATEMGR_LP_UVWDOT_HZ     50.0f   // cutoff for u_dot/v_dot/w_dot
 #define STATEMGR_LP_PQRDOT_HZ     50.0f   // cutoff for p_dot/q_dot/r_dot
 #define STATEMGR_LP_PQ_HZ         25.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
-#define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID — heavier than p/q
+#define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID 
 // IMX5 angular rate blend weight: 0=pure onboard gyros, 1=pure IMX5
 #define STATEMGR_IMX5_RATE_WEIGHT  0.3f
 

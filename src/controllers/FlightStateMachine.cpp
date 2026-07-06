@@ -34,13 +34,29 @@ void FlightStateMachine::run_attitude(const float ctrl_state6[],
                                       const uint32_t rpm[],
                                       float out_cmds[3])
 {
-    if (_use_indi) {
-        float current_torque[2];
-        _unmixer.compute(rpm, current_torque);
-        _indi.update(euler, state_full, input, current_torque, _unmixer, out_cmds);
-    } else {
-        _pid.update(ctrl_state6, input, out_cmds);
-    }
+    // Both controllers always run (shadow mode) so INDI stays live and
+    // comparable in the logs regardless of which one actually flies.
+    float current_torque[2];
+    _unmixer.compute(rpm, current_torque);
+
+    float indi_cmds[3];
+    float delta_torque[2];
+    _indi.update(euler, state_full, input, current_torque, _unmixer, indi_cmds, delta_torque);
+
+    float pid_cmds[3];
+    _pid.update(ctrl_state6, input, pid_cmds);
+
+    _indi_diag[0] = current_torque[0];
+    _indi_diag[1] = current_torque[1];
+    _indi_diag[2] = delta_torque[0];
+    _indi_diag[3] = delta_torque[1];
+    _indi_diag[4] = indi_cmds[0];
+    _indi_diag[5] = indi_cmds[1];
+
+    const float *active = _use_indi ? indi_cmds : pid_cmds;
+    out_cmds[0] = active[0];
+    out_cmds[1] = active[1];
+    out_cmds[2] = active[2];
 }
 
 // ── Mode: STABILIZE ─────────────────────────────────────────────────────────
@@ -273,10 +289,38 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
         }
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
+        _takeoff_debounce_ticks = _landed_debounce_ticks = _spool_ticks = 0;
         return;
     }
     if (_phase == FlightPhase::DISARMED) {
-        _phase = FlightPhase::ACTIVE;
+        _phase = FlightPhase::GROUND_IDLE;   // arm → ground idle, never straight to ACTIVE
+        reset_all();
+        _takeoff_debounce_ticks = 0;
+    }
+
+    // ── Ground-idle gating: require a sustained, deliberate stick push past a
+    // mode-dependent threshold before leaving GROUND_IDLE. Mirrors ArduPilot's
+    // spool-state machine: controller output is discarded outright while
+    // grounded, so nothing computed by the cascades can reach the motors.
+    const float thr_stick = input[InputIdx::THRUST];
+    if (_phase == FlightPhase::GROUND_IDLE) {
+        const float takeoff_threshold = (_mode == FlightMode::STABILIZE)
+            ? TAKEOFF_THR_THRESHOLD_STABILIZE : TAKEOFF_THR_THRESHOLD_HOLD;
+        if (thr_stick > takeoff_threshold) {
+            if (++_takeoff_debounce_ticks >= TAKEOFF_DEBOUNCE_TICKS) {
+                _phase = FlightPhase::ACTIVE;
+                _spool_ticks = 0;
+            }
+        } else {
+            _takeoff_debounce_ticks = 0;
+        }
+    }
+
+    if (_phase == FlightPhase::GROUND_IDLE) {
+        reset_all();
+        out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
+        thrust_out = 0.0f;
+        return;
     }
 
     // ── Build 6-element attitude state [roll,pitch,yaw, p,q,r] ──────────────
@@ -298,5 +342,30 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
         case FlightMode::POS_HOLD:
             mode_pos_hold(ctrl_state6, euler, state_full, input, rpm, out_cmds, thrust_out);
             break;
+    }
+
+    // ── Spool-up ramp: linearly ramp thrust over the first SPOOL_UP_TICKS
+    // after leaving GROUND_IDLE, rather than stepping straight to whatever
+    // the cascade commands (mirrors ArduPilot's MOT_SPOOL_TIME).
+    const bool still_spooling = _spool_ticks < SPOOL_UP_TICKS;
+    if (still_spooling) {
+        thrust_out *= (float)_spool_ticks / (float)SPOOL_UP_TICKS;
+        ++_spool_ticks;
+    }
+
+    // ── Landed detection: sustained low commanded thrust + low vertical speed
+    // drops back to GROUND_IDLE so a future cascade bug can't idle-wind-up
+    // while sitting on the ground. Suppressed during the spool-up ramp itself:
+    // the ramp deliberately holds thrust_out near zero right after leaving
+    // GROUND_IDLE, which would otherwise look identical to "landed" and bounce
+    // the phase straight back before the vehicle ever reaches full authority.
+    const float vD = state_full[StateIdx::W];
+    if (!still_spooling && thrust_out < LANDED_THR_THRESHOLD && fabsf(vD) < LANDED_VEL_THRESHOLD) {
+        if (++_landed_debounce_ticks >= LANDED_DEBOUNCE_TICKS) {
+            _phase = FlightPhase::GROUND_IDLE;
+            _takeoff_debounce_ticks = 0;
+        }
+    } else {
+        _landed_debounce_ticks = 0;
     }
 }

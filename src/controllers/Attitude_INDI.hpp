@@ -22,6 +22,7 @@
  *   input[]           [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
  *   current_torque[2] [roll_Nm, pitch_Nm] from Unmixer
  *   out_cmds[3]       normalised torque [roll, pitch, yaw] in [-1, 1]
+ *   delta_torque[2]   [delta_roll_Nm, delta_pitch_Nm] incremental INDI correction (for logging)
  */
 class AttitudeINDI {
 public:
@@ -29,11 +30,13 @@ public:
 
     void update(const float euler[3], const float state_full[],
                 const float input[], const float current_torque[2],
-                const Unmixer &unmixer, float out_cmds[3]);
+                const Unmixer &unmixer, float out_cmds[3],
+                float delta_torque[2]);
     void reset_all();
 
-    // N·m per rad/s² — airframe moment of inertia (Ixx, Iyy). Update once characterised.
-    static constexpr float INDI_GAIN = 0.01f;
+    // G(x)^-1 : N·m per rad/s² — airframe moment of inertia (Ixx, Iyy) * gain (1 for now)
+    static constexpr float INDI_GAIN_ROLL = 0.0023f;
+    static constexpr float INDI_GAIN_PITCH = 0.0033f;
 
 private:
     PID _roll_att;

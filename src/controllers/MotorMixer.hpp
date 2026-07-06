@@ -32,7 +32,7 @@ public:
 
 private:
     static constexpr float ATT_SCALE = 350.0f;
-    static constexpr float YAW_SCALE = 175.0f;
+    static constexpr float YAW_SCALE = 250.0f;
     static constexpr float MAX_ANGLE = 1.396f;  // ~80°
     static constexpr float YAW_HEADROOM_MIN = 0.18f;  // min fraction of PWM span reserved for yaw
 };

@@ -17,7 +17,7 @@ void AttitudePID::update(const float state[], const float input[],
 
     out_cmds[0] = constrain_float(_roll_rate.update(roll_rate_tgt      - state[3]), -1.0f, 1.0f);
     out_cmds[1] = constrain_float(_pitch_rate.update(pitch_rate_tgt    - state[4]), -1.0f, 1.0f);
-    out_cmds[2] = constrain_float(_yaw_rate.update(YAW_GAIN * input[3] - state[5]), -1.0f, 1.0f);
+    out_cmds[2] = constrain_float(_yaw_rate.update(YAW_STICK_GAIN * input[3] - state[5]), -1.0f, 1.0f);
 }
 
 void AttitudePID::reset_all()

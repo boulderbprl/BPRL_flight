@@ -9,11 +9,9 @@ static inline float clampf(float v, float lo, float hi)
 
 float Unmixer::motor_force_N(uint32_t rpm)
 {
-    const float r   = static_cast<float>(rpm);
-    const float r2  = r * r;
-    const float r3  = r2 * r;
-    const float f_kg = MOTOR_P1 * r3 + MOTOR_P2 * r2 + MOTOR_P3 * r + MOTOR_P4;
-    return clampf(f_kg, 0.0f, 1e6f) * 9.81f;   // kg → N, clamp to non-negative
+    const float rn = (static_cast<float>(rpm) - RPM_NORM_CENTER) / RPM_NORM_SCALE;
+    const float f_n = ((MOTOR_C3 * rn + MOTOR_C2) * rn + MOTOR_C1) * rn + MOTOR_C0;
+    return clampf(f_n, 0.0f, MAX_THRUST_N);   // guard small negative thrust, clamp to bench max
 }
 
 void Unmixer::compute(const uint32_t rpm[4], float torque_Nm[2]) const

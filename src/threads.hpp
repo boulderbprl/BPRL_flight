@@ -43,7 +43,8 @@ extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
 extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
-extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — PID outputs entering MotorMixer
+extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
+extern float   g_indi_diag[6];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch] — INDI shadow diagnostics, always populated
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 

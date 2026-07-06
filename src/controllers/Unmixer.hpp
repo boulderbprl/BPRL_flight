@@ -4,8 +4,10 @@
 /*
  * Unmixer — converts per-motor RPM to physical roll/pitch torques (N·m).
  *
- * Motor model: F_kg = p1*rpm³ + p2*rpm² + p3*rpm + p4  (RPM → force in kg)
- *              F_N  = F_kg * 9.81
+ * Motor model (bench thrust fit, normalised RPM cubic → thrust in N):
+ *   rpm_norm = (rpm - RPM_NORM_CENTER) / RPM_NORM_SCALE
+ *   F_N      = C3*rpm_norm³ + C2*rpm_norm² + C1*rpm_norm + C0
+ *   F_N      = max(F_N, 0)   // guard small negative thrust near zero RPM
  *
  * X-frame geometry (matches MotorMixer numbering, NED body frame X-fwd Y-right):
  *   Motor 0 (FR): position (+L/√2, +L/√2)
@@ -20,8 +22,10 @@
  * Signs are consistent with MotorMixer: positive roll cmd increases RL/FL motors,
  * producing positive roll_Nm here.
  *
- * All motor polynomial coefficients and geometry constants are placeholders —
- * update from bench motor characterisation and airframe measurement.
+ * Note: the bench fit also gives motor reaction (drag) torque as a function of
+ * thrust — torque_Nm = 0.03*((F_N - 2.991)/2.183) + 0.0423 — but that isn't
+ * wired in here since yaw currently uses a rate PID rather than INDI torque
+ * feedback (see AttitudeINDI). Add it if yaw moves to torque-based control.
  */
 class Unmixer {
 public:
@@ -34,21 +38,24 @@ public:
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
 
-    // ── Motor polynomial: RPM → force in kg ───────────────────────────────────
-    // Fill these from a static motor thrust bench test.
-    static constexpr float MOTOR_P1 = 0.0f;   // kg / RPM³
-    static constexpr float MOTOR_P2 = 0.0f;   // kg / RPM²
-    static constexpr float MOTOR_P3 = 0.0f;   // kg / RPM
-    static constexpr float MOTOR_P4 = 0.0f;   // kg (zero-RPM offset, usually 0)
+    // ── Motor polynomial: normalised RPM → thrust in N ────────────────────────
+    // From static motor thrust bench test/fit.
+    static constexpr float RPM_NORM_CENTER = 2005.0f;  // RPM
+    static constexpr float RPM_NORM_SCALE  = 880.8f;   // RPM
+    static constexpr float MOTOR_C3 = 0.0134f;  // N / rpm_norm³
+    static constexpr float MOTOR_C2 = 0.5607f;  // N / rpm_norm²
+    static constexpr float MOTOR_C1 = 2.2831f;  // N / rpm_norm
+    static constexpr float MOTOR_C0 = 2.4540f;  // N (rpm_norm = 0 offset)
 
     // ── Drone geometry ────────────────────────────────────────────────────────
     static constexpr float ARM_LENGTH_M = 0.1275f;  // motor-to-centre arm length (m)
 
     // ── Normalisation ─────────────────────────────────────────────────────────
-    // Maximum achievable roll/pitch torque in N·m used to normalise to [-1, 1].
-    // Update once motor characterisation is complete:
-    //   T_MAX ≈ ARM_LENGTH/√2 * F_max_per_motor_N * 2
-    static constexpr float T_MAX_NM = 1.0f;
+    // Maximum single-motor thrust from the bench fit (N).
+    static constexpr float MAX_THRUST_N = 7.04f;
+    // Maximum achievable roll/pitch torque in N·m used to normalise to [-1, 1]:
+    //   T_MAX = 2*sin(45°) * ARM_LENGTH_M * MAX_THRUST_N
+    static constexpr float T_MAX_NM = 1.2693981f;
 
 private:
     static float motor_force_N(uint32_t rpm);
