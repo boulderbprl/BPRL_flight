@@ -23,6 +23,7 @@ StateManager::StateManager()
       _blended_ud(0.0f), _blended_vd(0.0f), _blended_wd(0.0f),
       _prev_p(0.0f), _prev_q(0.0f), _prev_r(0.0f),
       _pdot_filt(0.0f), _qdot_filt(0.0f), _rdot_filt(0.0f),
+      _p_filt(0.0f), _q_filt(0.0f), _r_filt(0.0f),
       _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f),
       _lane_p{}, _lane_q{}, _lane_r{}
 {}
@@ -39,6 +40,7 @@ void StateManager::init()
     _blended_ud   = _blended_vd   = _blended_wd   = 0.0f;
     _prev_p       = _prev_q       = _prev_r       = 0.0f;
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
+    _p_filt       = _q_filt       = _r_filt       = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
 
     for (int i = 0; i < NUM_LANES; ++i)
@@ -149,20 +151,10 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _blended_r += w[i] * lr;
     }
     if (can_imu.valid) {
-        // IMX5 rates are in NED z-down world frame. Rotate to body frame: v_body = R_b2n^T * v_NED
-        float R_imx[3][3];
-        {
-            const float* st = _lanes[_primary].state();
-            Quat q = { st[iQ0], st[iQ1], st[iQ2], st[iQ3] };
-            quat_to_rot_body2ned(q, R_imx);
-        }
-        // NED z-down: v_body = R_b2n^T * v_NED (standard transpose multiply)
-        const float p_b = R_imx[0][0]*can_imu.p + R_imx[1][0]*can_imu.q + R_imx[2][0]*can_imu.r;
-        const float q_b = R_imx[0][1]*can_imu.p + R_imx[1][1]*can_imu.q + R_imx[2][1]*can_imu.r;
-        const float r_b = R_imx[0][2]*can_imu.p + R_imx[1][2]*can_imu.q + R_imx[2][2]*can_imu.r;
-        _blended_p = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_p + STATEMGR_IMX5_RATE_WEIGHT*p_b;
-        _blended_q = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_q + STATEMGR_IMX5_RATE_WEIGHT*q_b;
-        _blended_r = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_r + STATEMGR_IMX5_RATE_WEIGHT*r_b;
+        // IMX5 p/q/r blending
+        _blended_p = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_p + STATEMGR_IMX5_RATE_WEIGHT*can_imu.p;
+        _blended_q = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_q + STATEMGR_IMX5_RATE_WEIGHT*can_imu.q;
+        _blended_r = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_r + STATEMGR_IMX5_RATE_WEIGHT*can_imu.r;
     }
 
     // ── 7. Blend uvw_dot: gravity+Coriolis-corrected IMU accel per lane ───
@@ -209,6 +201,15 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _prev_p = _blended_p;
     _prev_q = _blended_q;
     _prev_r = _blended_r;
+
+    // ── 9. Lowpass the blended rates themselves before they reach the rate
+    // PID — rejects vibration-band noise that would otherwise pass through unfiltered.
+    // Yaw (r) gets a heavier cutoff than roll/pitch (p/q).
+    const float alpha_pq_out = lowpass_alpha(STATEMGR_LP_PQ_HZ, dt);
+    const float alpha_r_out  = lowpass_alpha(STATEMGR_LP_R_HZ, dt);
+    _p_filt = lowpass(_blended_p, _p_filt, alpha_pq_out);
+    _q_filt = lowpass(_blended_q, _q_filt, alpha_pq_out);
+    _r_filt = lowpass(_blended_r, _r_filt, alpha_r_out);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -263,10 +264,10 @@ void StateManager::get_state(float out[StateIdx::N]) const
     out[StateIdx::Q2] = ekf[iQ2];
     out[StateIdx::Q3] = ekf[iQ3];
 
-    // Angular rates (soft-blended, NED z-down body frame) → out[13–15]
-    out[StateIdx::P] = _blended_p;
-    out[StateIdx::Q] = _blended_q;
-    out[StateIdx::R] = _blended_r;
+    // Angular rates (soft-blended + lowpass filtered, body frame) → out[13–15]
+    out[StateIdx::P] = _p_filt;
+    out[StateIdx::Q] = _q_filt;
+    out[StateIdx::R] = _r_filt;
 
     // Angular acceleration (differentiated + lowpass filtered) → out[16–18]
     out[StateIdx::P_DOT] = _pdot_filt;

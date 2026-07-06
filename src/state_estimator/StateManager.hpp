@@ -6,6 +6,8 @@
 // Lowpass cutoff frequencies for derived derivative states (Hz)
 #define STATEMGR_LP_UVWDOT_HZ     50.0f   // cutoff for u_dot/v_dot/w_dot
 #define STATEMGR_LP_PQRDOT_HZ     50.0f   // cutoff for p_dot/q_dot/r_dot
+#define STATEMGR_LP_PQ_HZ         25.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
+#define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID — heavier than p/q
 // IMX5 angular rate blend weight: 0=pure onboard gyros, 1=pure IMX5
 #define STATEMGR_IMX5_RATE_WEIGHT  0.3f
 
@@ -90,6 +92,9 @@ private:
     // Angular acceleration via differentiation of blended rates + lowpass
     float _prev_p,    _prev_q,    _prev_r;
     float _pdot_filt, _qdot_filt, _rdot_filt;
+
+    // Lowpass-filtered p/q/r fed to the rate PID (vibration rejection)
+    float _p_filt, _q_filt, _r_filt;
 
     // Lowpass-filtered uvw_dot output
     float _ud_filt, _vd_filt, _wd_filt;
