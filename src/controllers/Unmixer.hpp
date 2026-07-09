@@ -4,8 +4,11 @@
 /*
  * Unmixer — converts per-motor RPM to physical roll/pitch torques (N·m).
  *
- * Motor model (bench thrust fit, normalised RPM cubic → thrust in N):
- *   rpm_norm = (rpm - RPM_NORM_CENTER) / RPM_NORM_SCALE
+ * Motor model (bench thrust fit, normalised angular velocity cubic → thrust in N).
+ * The bench fit was done against motor angular velocity in rad/s, not RPM, so
+ * incoming mechanical RPM is converted first:
+ *   omega    = rpm * (pi / 30)                       // RPM → rad/s
+ *   rpm_norm = (omega - RPM_NORM_CENTER) / RPM_NORM_SCALE
  *   F_N      = C3*rpm_norm³ + C2*rpm_norm² + C1*rpm_norm + C0
  *   F_N      = max(F_N, 0)   // guard small negative thrust near zero RPM
  *
@@ -38,10 +41,11 @@ public:
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
 
-    // ── Motor polynomial: normalised RPM → thrust in N ────────────────────────
-    // From static motor thrust bench test/fit.
-    static constexpr float RPM_NORM_CENTER = 2005.0f;  // RPM
-    static constexpr float RPM_NORM_SCALE  = 880.8f;   // RPM
+    // ── Motor polynomial: normalised angular velocity (rad/s) → thrust in N ───
+    // From static motor thrust bench test/fit (fit against omega, not raw RPM).
+    static constexpr float RPM_TO_RADS     = 3.14159265f / 30.0f;  // RPM → rad/s
+    static constexpr float RPM_NORM_CENTER = 2005.0f;  // rad/s
+    static constexpr float RPM_NORM_SCALE  = 880.8f;   // rad/s
     static constexpr float MOTOR_C3 = 0.0134f;  // N / rpm_norm³
     static constexpr float MOTOR_C2 = 0.5607f;  // N / rpm_norm²
     static constexpr float MOTOR_C1 = 2.2831f;  // N / rpm_norm
