@@ -6,17 +6,17 @@
  * Strain rate sensor — 4-axis, one reading per arm [FR, RL, FL, RR].
  *
  * Interface selection (compile-time):
- *   STRAIN_RATE_I2C  — I2C polling at 0x11, 400 kHz (default)
- *   STRAIN_RATE_CAN  — CAN ID 0x69, 4×int16 little-endian, 8-byte frame
+ *   STRAIN_RATE_CAN  — CAN ID 0x69, 4×int16 little-endian, 8-byte frame (default)
+ *   STRAIN_RATE_I2C  — I2C polling at 0x11, 400 kHz
  *
- * Override at the command line: -DSTRAIN_RATE_INTERFACE=STRAIN_RATE_CAN
+ * Override at the command line: -DSTRAIN_RATE_INTERFACE=STRAIN_RATE_I2C
  */
 
 #define STRAIN_RATE_CAN 0
 #define STRAIN_RATE_I2C 1
 
 #ifndef STRAIN_RATE_INTERFACE
-#define STRAIN_RATE_INTERFACE STRAIN_RATE_I2C
+#define STRAIN_RATE_INTERFACE STRAIN_RATE_CAN
 #endif
 
 struct StrainRateRaw {
