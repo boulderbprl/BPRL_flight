@@ -4,9 +4,9 @@
 #include "src/threads.hpp"   // IMURaw, CANIMURaw, MocapRaw
 
 // Lowpass cutoff frequencies for derived derivative states (Hz)
-#define STATEMGR_LP_UVWDOT_HZ     50.0f   // cutoff for u_dot/v_dot/w_dot
-#define STATEMGR_LP_PQRDOT_HZ     50.0f   // cutoff for p_dot/q_dot/r_dot
-#define STATEMGR_LP_PQ_HZ         25.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
+#define STATEMGR_LP_UVWDOT_HZ     30.0f   // cutoff for u_dot/v_dot/w_dot
+#define STATEMGR_LP_PQRDOT_HZ     20.0f   // cutoff for p_dot/q_dot/r_dot
+#define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID 
 // IMX5 angular rate blend weight: 0=pure onboard gyros, 1=pure IMX5
 #define STATEMGR_IMX5_RATE_WEIGHT  0.3f
@@ -48,6 +48,7 @@ public:
     static constexpr float R_GRAVITY   = 0.5f;    // accel gravity-vector variance (m/s²)²
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
     static constexpr float R_MOCAP_VEL = 1e-2f;   // mocap NED velocity variance (m/s)²
+    static constexpr float R_BARO_POS  = 0.5f;    // baro altitude variance (m²) — tune from bench log noise
 
     StateManager();
 
@@ -58,7 +59,8 @@ public:
     // imu: snapshot of g_imu[3] (taken under imu_mtx before this call).
     // can_imu: snapshot of g_can_imu (taken under can_imu_mtx before this call).
     // mocap: snapshot of g_mocap (taken under mocap_mtx before this call).
-    void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap);
+    // baro: snapshot of g_baro (taken under baro_mtx before this call).
+    void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro);
 
     // Full 19-element state output — maps 13-state EKF lanes onto StateIdx ordering
     // and fills in the 6 derived quantities (uvw_dot, pqr_dot).

@@ -2,12 +2,15 @@
 #include "hal.h"
 
 /*
- * I2C bus driver — stub, ready for magnetometer / barometer.
+ * I2C bus driver — currently used only by the strain-rate sensor's I2C
+ * fallback interface (STRAIN_RATE_I2C override; CAN is the default). No
+ * magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see
+ * src/coms/Baro/MS5611.hpp.
  *
  * Adding devices:
  *   1. Write a poll function: void my_poll(void *ctx)
  *   2. In main(): bprl_i2c_register(MY_ADDR, my_poll, nullptr);
- *   I2CThread calls i2c_poll_all() at 100 Hz.
+ *   I2CThread calls i2c_poll_all() at 500 Hz.
  *
  * I2C2 on PB10 (SCL) / PB11 (SDA), AF4, 400 kHz.
  */

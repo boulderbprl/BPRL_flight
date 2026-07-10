@@ -61,9 +61,9 @@ public:
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
 
-    // diag[6]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch]
+    // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
     // Always populated from AttitudeINDI, regardless of _use_indi (shadow-mode logging).
-    void get_indi_diag(float diag[6]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
+    void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
     void reset_all();
 
@@ -127,8 +127,8 @@ private:
     FlightMode  _mode     = FlightMode::STABILIZE;
     bool        _use_indi = false;
 
-    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch] — see get_indi_diag()
-    float _indi_diag[6] = {};
+    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
+    float _indi_diag[8] = {};
 
     AttitudePID  _pid;
     AttitudeINDI _indi;

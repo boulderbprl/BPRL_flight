@@ -67,14 +67,17 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 
 | ID | Name | Fields |
 |----|------|--------|
-| 0x01 | ATT  | TimeUS, rate_hz, roll, pitch, yaw, p, q, r, p_dot, q_dot, r_dot |
-| 0x02 | LIN  | TimeUS, ax, ay, az, vx, vy, vz, x, y, z |
-| 0x03 | RCIN | TimeUS, throttle, roll, pitch, yaw, armed |
-| 0x04 | OUTP | TimeUS, m1–m4 (motor commands) |
-| 0x05 | RPMS | TimeUS, rpm1–rpm4, v1–v4 (ESC telemetry) |
-| 0x06 | STRN | TimeUS, strain_rate, valid |
+| 0x09 | ATT  | time_us, roll, pitch, yaw, p, q, r, p_dot, q_dot, r_dot |
+| 0x0A | LIN  | time_us, x, y, z, u, v, w, u_dot, v_dot, w_dot |
+| 0x05 | RCIN | time_us, roll_stk, pitch_stk, yaw_stk, thr_stk, flight_mode, armed |
+| 0x06 | OUTP | time_us, roll_tq, pitch_tq, yaw_tq, throttle |
+| 0x07 | RPMS | time_us, rpm0–rpm3 |
+| 0x08 | STRN | time_us, s0–s3, valid |
+| 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
+| 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch |
+| 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
 
-See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
+No message carries a rate field — every one logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
 
 ## Robustness
 

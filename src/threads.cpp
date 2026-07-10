@@ -40,7 +40,7 @@ float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaterni
 float   g_input[5]           = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
-float   g_indi_diag[6]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch] — INDI shadow diagnostics, always populated
+float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
@@ -55,6 +55,9 @@ StrainRateRaw g_strain_rate = {};
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
+
+MUTEX_DECL(baro_mtx);
+BaroRaw   g_baro    = {};
 
 MUTEX_DECL(esc_mtx);
 ESCTelemetry g_esc_telem[4] = {};
@@ -174,6 +177,17 @@ static THD_FUNCTION(SPIThread, arg)
             chMtxUnlock(&imu_mtx);
         }
 
+        float baro_p, baro_t, baro_alt;
+        if (baro1.read(baro_p, baro_t, baro_alt)) {
+            chMtxLock(&baro_mtx);
+            g_baro.pressure_pa   = baro_p;
+            g_baro.temperature_c = baro_t;
+            g_baro.alt_m         = baro_alt;
+            g_baro.has_new       = true;
+            g_baro.valid         = true;
+            chMtxUnlock(&baro_mtx);
+        }
+
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
@@ -206,7 +220,7 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 100 Hz  NORMALPRIO+22
+ * I2CThread — 500 Hz  NORMALPRIO+22
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
@@ -271,8 +285,14 @@ static THD_FUNCTION(StateEstThread, arg)
         g_mocap.has_new_vel = false;
         chMtxUnlock(&mocap_mtx);
 
+        BaroRaw baro_snap;
+        chMtxLock(&baro_mtx);
+        baro_snap = g_baro;
+        g_baro.has_new = false;
+        chMtxUnlock(&baro_mtx);
+
         // Run all EKF lanes and derive outputs.
-        state_mgr.update(dt, imu_snap, can_snap, mocap_snap);
+        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
@@ -350,7 +370,7 @@ static THD_FUNCTION(ControlThread, arg)
         float thrust;
         flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
 
-        float indi_diag[6];
+        float indi_diag[8];
         flight_sm.get_indi_diag(indi_diag);
 
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
@@ -1164,7 +1184,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[4], ctrl[4], indi_diag[6];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1185,6 +1205,12 @@ static THD_FUNCTION(LogThread, arg)
         ESCTelemetry telem[4] = {};
         dshot_get_telemetry(telem);
 
+        /* ── Barometer snapshot ───────────────────────────────────────── */
+        BaroRaw baro_snap_log = {};
+        chMtxLock(&baro_mtx);
+        baro_snap_log = g_baro;
+        chMtxUnlock(&baro_mtx);
+
         /* ── IMU snapshot ────────────────────────────────────────────── */
         IMURaw imu_snap_log[3];
         chMtxLock(&imu_mtx);
@@ -1195,7 +1221,6 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgATT msg = {};
             msg.time_us = t_us;
-            msg.rate_hz = 50U;
             msg.roll    = euler[0];
             msg.pitch   = euler[1];
             msg.yaw     = euler[2];
@@ -1212,7 +1237,6 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgLIN msg = {};
             msg.time_us = t_us;
-            msg.rate_hz = 50U;
             msg.x       = state[StateIdx::X];
             msg.y       = state[StateIdx::Y];
             msg.z       = state[StateIdx::Z_POS];
@@ -1228,13 +1252,13 @@ static THD_FUNCTION(LogThread, arg)
         /* ── RCIN — RC stick inputs ───────────────────────────────────── */
         {
             LogMsgRCIN msg = {};
-            msg.time_us   = t_us;
-            msg.rate_hz   = 50U;
-            msg.roll_stk  = inp[InputIdx::ROLL_TGT];
-            msg.pitch_stk = inp[InputIdx::PITCH_TGT];
-            msg.yaw_stk   = inp[InputIdx::YAW_RATE];
-            msg.thr_stk   = inp[InputIdx::THRUST];
-            msg.armed     = (uint8_t)armed;
+            msg.time_us    = t_us;
+            msg.roll_stk   = inp[InputIdx::ROLL_TGT];
+            msg.pitch_stk  = inp[InputIdx::PITCH_TGT];
+            msg.yaw_stk    = inp[InputIdx::YAW_RATE];
+            msg.thr_stk    = inp[InputIdx::THRUST];
+            msg.flight_mode = inp[InputIdx::FLIGHT_MODE];
+            msg.armed      = (uint8_t)armed;
             logger.write(LOG_MSG_RCIN, msg);
         }
 
@@ -1242,7 +1266,6 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgOUTP msg = {};
             msg.time_us  = t_us;
-            msg.rate_hz  = 50U;
             msg.roll_tq  = ctrl[0];
             msg.pitch_tq = ctrl[1];
             msg.yaw_tq   = ctrl[2];
@@ -1254,13 +1277,14 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgINDI msg = {};
             msg.time_us     = t_us;
-            msg.rate_hz     = 50U;
             msg.unmix_roll  = indi_diag[0];
             msg.unmix_pitch = indi_diag[1];
             msg.delta_roll  = indi_diag[2];
             msg.delta_pitch = indi_diag[3];
             msg.cmd_roll    = indi_diag[4];
             msg.cmd_pitch   = indi_diag[5];
+            msg.accel_roll  = indi_diag[6];
+            msg.accel_pitch = indi_diag[7];
             logger.write(LOG_MSG_INDI, msg);
         }
 
@@ -1268,7 +1292,6 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgRPMS msg = {};
             msg.time_us = t_us;
-            msg.rate_hz = 50U;
             msg.rpm0 = telem[0].valid ? (int32_t)(telem[0].erpm / 7U) : 0;
             msg.rpm1 = telem[1].valid ? (int32_t)(telem[1].erpm / 7U) : 0;
             msg.rpm2 = telem[2].valid ? (int32_t)(telem[2].erpm / 7U) : 0;
@@ -1280,7 +1303,6 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgSTRN msg = {};
             msg.time_us = t_us;
-            msg.rate_hz = 50U;
             msg.s0      = strain.val[0];
             msg.s1      = strain.val[1];
             msg.s2      = strain.val[2];
@@ -1295,7 +1317,6 @@ static THD_FUNCTION(LogThread, arg)
             for (uint8_t i = 0; i < 3; i++) {
                 LogMsgIMU msg = {};
                 msg.time_us = t_us;
-                msg.rate_hz = 50U;
                 msg.ax    = imu_snap_log[i].accel[0];
                 msg.ay    = imu_snap_log[i].accel[1];
                 msg.az    = imu_snap_log[i].accel[2];
@@ -1305,6 +1326,17 @@ static THD_FUNCTION(LogThread, arg)
                 msg.valid = (uint8_t)imu_snap_log[i].valid;
                 logger.write(ids[i], msg);
             }
+        }
+
+        /* ── BARO — barometric pressure/temperature/altitude ─────────── */
+        {
+            LogMsgBARO msg = {};
+            msg.time_us     = t_us;
+            msg.pressure_pa = baro_snap_log.pressure_pa;
+            msg.temp_c      = baro_snap_log.temperature_c;
+            msg.alt_m       = baro_snap_log.alt_m;
+            msg.valid       = (uint8_t)baro_snap_log.valid;
+            logger.write(LOG_MSG_BARO, msg);
         }
 
         logger.flush();

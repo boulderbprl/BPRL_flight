@@ -7,9 +7,7 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 ## TODO
 
 - Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
-- Complete arming logic (dedicated RC switch channel).
 - IMX5 yaw magnetometer / heading reference integration.
-- Unmixer motor polynomial calibration (bench thrust test).
 - Gain tuning on H7 hardware.
 
 
@@ -25,6 +23,7 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 6. [Build and Upload](#6-build-and-upload)
 7. [Comms Drivers](#7-comms-drivers)
 8. [IMU Drivers](#8-imu-drivers)
+9. [Building on Windows](#9-building-on-windows)
 
 ---
 
@@ -47,13 +46,15 @@ BPRL_flight/
 │   ├── threads.cpp           All thread function bodies + global state definitions
 │   │
 │   ├── coms/                 Peripheral drivers
-│   │   ├── SPI.hpp/.cpp      SPI bus init, ICM-20948/20602 instantiation
+│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (ICM-45686 driver class) + MS5611 barometer
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (drives imu1/2/3), ICM42688.hpp/.cpp (unused/dead code)
+│   │   ├── Baro/             MS5611.hpp/.cpp — barometer state-machine driver (SPI1, CS=PD7)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
-│   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — used by strain rate sensor
+│   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface only
 │   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
-│   │   ├── Radio.hpp/.cpp    CRSF receiver input
-│   │   ├── ICM20948.hpp/.cpp InvenSense ICM-20948 9-DOF driver
-│   │   └── ICM20602.hpp/.cpp InvenSense ICM-20602 6-DOF driver
+│   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL)
+│   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
+│   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
 │   │
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
 │   │   ├── PID.hpp/.cpp            PID base class with derivative filter + anti-windup
@@ -93,14 +94,14 @@ BPRL_flight/
 
 | Thread | Priority | Rate | Role |
 |---|---|---|---|
-| SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs |
+| SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
 | StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
 | I2CThread | NORMALPRIO+22 | 500 Hz | Poll I2C devices (strain rate sensor) |
 | ControlThread | NORMALPRIO+20 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
-| LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (6 message types per tick) |
+| LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (11 message types per tick) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
 
 ### Shared state
@@ -111,13 +112,14 @@ All inter-thread communication goes through mutex-protected globals defined in `
 |---|---|---|
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
-| `g_input[4]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets) |
+| `g_input[5]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch) |
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
 | `g_ctrl[4]` | `state_mtx` | PID torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
+| `g_baro` | `baro_mtx` | Pressure/temperature/altitude from the MS5611 barometer |
 
 ---
 
@@ -245,12 +247,15 @@ Updates are applied in order each tick (earlier updates inform later ones):
 
 | Step | Source | Rate | States updated |
 |------|--------|------|----------------|
-| 1.5 | Onboard accel (gravity vector) | 500 Hz, gated on \|a\| ≈ g | Quaternion (roll/pitch), accel bias |
+| 1.5 | Onboard accel (gravity vector) | 500 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
 | 2 | IMX5 quaternion over CAN | 200 Hz, async | Full quaternion |
 | 5 | Mocap NED position | Async | X, Y, Z |
 | 5 | Mocap NED velocity → body frame | Async | u, v, w |
+| 5.6 | MS5611 barometric altitude | ~100+ Hz, async, **suppressed while mocap is connected** | Z (and, via cross-covariance, w and Z accel bias) |
 
-The gravity-vector update (`update_gravity`) is gated, it is skipped whenever `|accel| − g > 1.0 m/s²` to suppress corrupted attitude corrections during aggressive maneuvers. Yaw is not observable from gravity alone and requires the IMX5.
+The gravity-vector update (`update_gravity`) hard-rejects samples where `|accel|` is outside `[0.1g, 3g]`, then applies a joint chi-squared gate (`GRAV_CHI2_GATE = 5σ`) over an adaptive measurement noise that grows with a lowpass-filtered vibration estimate (`GRAV_R_VIBE`) — so it's trusted less, not switched off outright, under vibration. Only the Z-axis accel bias is corrected here (X/Y residuals are ambiguous between bias and genuine horizontal acceleration; those are only resolved via mocap velocity fusion's cross-covariance with u/v). Yaw is not observable from gravity alone and requires the IMX5.
+
+The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BARO_CHI2_GATE = 5σ`) fusion of altitude into Z — see the [MS5611 Barometer](#ms5611-barometer) section below for why it's disabled outright whenever mocap is connected rather than blended with it.
 
 ### StateManager output (19 states)
 
@@ -260,10 +265,10 @@ The gravity-vector update (`update_gravity`) is gated, it is skipped whenever `|
 |---------|--------|--------|
 | 0–2 | X, Y, Z | Primary EKF lane |
 | 3–5 | u, v, w | Primary EKF lane |
-| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 50 Hz lowpass |
+| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 30 Hz lowpass |
 | 9–12 | q0, q1, q2, q3 | Primary EKF lane |
 | 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix |
-| 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 50 Hz lowpass |
+| 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 20 Hz lowpass |
 
 Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm` to improve noise reduction.
 
@@ -273,24 +278,30 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 
 | Parameter | Location | Default | Effect |
 |-----------|----------|---------|--------|
-| `Q_BIAS_A` | EKF.hpp | 1e-6 | Accel bias random-walk rate. Increase if bias changes rapidly. |
-| `Q_BIAS_G` | EKF.hpp | 1e-7 | Gyro bias random-walk rate. Typically slower than accel. |
-| `P0_BIAS_A` | EKF.hpp | 0.1 | Initial accel bias uncertainty. Larger = faster startup convergence. |
-| `P0_BIAS_G` | EKF.hpp | 0.01 | Initial gyro bias uncertainty. |
-| `GRAV_GATE_MS2` | EKF.hpp | 1.0 | Gate width (m/s²) for gravity update. Smaller value reduces gyro drift but drops updates during maneuvers.|
-| `R_QUAT` | StateManager.hpp | 1e-4 | IMX5 quaternion noise. Lower = trust IMX5 more. |
+| `Q_BIAS_A` | EKF.hpp | 1e-7 | Accel bias random-walk rate. Increase if bias changes rapidly. |
+| `Q_BIAS_G` | EKF.hpp | 1e-9 | Gyro bias random-walk rate. Typically slower than accel. |
+| `P0_BIAS_A` | EKF.hpp | 0.01 | Initial accel bias uncertainty. Larger = faster startup convergence. |
+| `P0_BIAS_G` | EKF.hpp | 1e-4 | Initial gyro bias uncertainty. |
+| `GRAV_HARD_GATE` | EKF.hpp | 3g | Outer reject: skip gravity update outright if `\|accel\|` exceeds this multiple of g. |
+| `GRAV_CHI2_GATE` | EKF.hpp | 5.0 | Joint chi-squared gate (σ) for the gravity-vector update. |
+| `MOCAP_CHI2_GATE` | EKF.hpp | 5.0 | Joint chi-squared gate (σ) for mocap position/velocity updates. |
+| `BARO_CHI2_GATE` | EKF.hpp | 5.0 | Chi-squared gate (σ) for the barometric altitude update. |
+| `R_QUAT` | StateManager.hpp | 1e-3 | IMX5 quaternion noise. Lower = trust IMX5 more. |
 | `R_GRAVITY` | StateManager.hpp | 0.5 | Accel gravity-vector noise (m/s²)². Lower = trust accel attitude more. |
 | `R_MOCAP_POS` | StateManager.hpp | 1e-3 | Mocap position noise (m²). |
 | `R_MOCAP_VEL` | StateManager.hpp | 1e-2 | Mocap velocity noise (m/s)². |
+| `R_BARO_POS` | StateManager.hpp | 0.5 | Baro altitude noise (m²) — tune from bench log noise once flashed. |
 | `STATEMGR_IMX5_RATE_WEIGHT` | StateManager.hpp | 0.3 | IMX5 share of blended p/q/r (0 = pure gyro, 1 = pure IMX5). |
-| `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 50 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
-| `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 50 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
+| `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 30 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
+| `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
 
 ### Sensor loss behaviour
 
 **IMX5 disconnect:** `update_quaternion` calls stop. Gravity vector continues correcting roll/pitch. Yaw drifts at the gyro Z-axis bias rate (probably a few degrees per minute). Rates fall back to 100% onboard gyros. Bias states continue being estimated.
 
-**Mocap disconnect:** `update_position` and `update_ned_vel` calls stop. Position and velocity states are no longer corrected and drift quickly ( position drifts quadratically with time ). Attitude and rates are unaffected.
+**Mocap disconnect:** `update_position` and `update_ned_vel` calls stop. Position and velocity states are no longer corrected and drift quickly (position drifts quadratically with time). Attitude and rates are unaffected. Barometric altitude fusion into Z automatically resumes the instant mocap goes invalid — see below.
+
+**Mocap vs. barometer priority:** mocap always wins for absolute position/altitude when connected — `StateManager::update()` gates barometer fusion on `!mocap.valid`, never fusing both simultaneously. This isn't just about mocap being more accurate: the two aren't anchored to the same origin (the barometer zeroes to whatever pressure it read during its own boot-time warm-up; mocap's Z origin is whatever the motion-capture system's world frame defines), so fusing both into the same `Z` state at once would fight between two different "zero points" rather than average two views of the same truth. Barometer fusion is purely a mocap-unavailable fallback.
 
 ### Quaternion convention
 
@@ -364,7 +375,7 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 
 ### How it works
 
-`LogThread` runs at 50 Hz. Each tick it snapshots all shared state under their respective mutexes, builds six packed records, and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
+`LogThread` runs at 50 Hz. Each tick it snapshots all shared state under their respective mutexes, builds eleven packed records, and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
 
 **Log file location:** `/LOGS/LOG0001.BIN`, `LOG0002.BIN`, … auto-incremented on each boot.
 
@@ -372,14 +383,17 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 
 | Name | ID | Fields |
 |---|---|---|
-| `ATT` | 0x03 | TimeUS, Rate, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
-| `LIN` | 0x04 | TimeUS, Rate, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
-| `RCIN` | 0x05 | TimeUS, Rate, RollStk, PitchStk, YawStk, ThrStk (normalized), Armed |
-| `OUTP` | 0x06 | TimeUS, Rate, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
-| `RPMS` | 0x07 | TimeUS, Rate, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
-| `STRN` | 0x08 | TimeUS, Rate, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
+| `ATT` | 0x09 | TimeUS, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
+| `LIN` | 0x0A | TimeUS, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
+| `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), Armed |
+| `OUTP` | 0x06 | TimeUS, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
+| `RPMS` | 0x07 | TimeUS, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
+| `STRN` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
+| `IMU1`/`IMU2`/`IMU3` | 0x0B/0x0C/0x0D | TimeUS, AccX, AccY, AccZ (m/s²), GyrX, GyrY, GyrZ (rad/s), Valid — one series per on-board IMU |
+| `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel) |
+| `BARO` | 0x0F | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
 
-TimeUS is a uint64 microsecond timestamp. Rate is the log rate in Hz (always 50).
+TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant.
 
 ### Decoding log files
 
@@ -393,47 +407,45 @@ python3 tools/logs.py logs decode LOG0042.BIN
 python3 tools/logs.py logs download --decode
 ```
 
-Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`.
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`.
 
-Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all six message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
+Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all eleven message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
 
 ### Adding a new log message type
 
-Three files, four steps:
+Three files, three steps (example below adds a hypothetical rangefinder):
 
 **Step 1 — Define the struct in `src/logging/LogMessages.hpp`**
 
 ```cpp
-constexpr uint8_t LOG_MSG_BARO = 0x09U;   // next unused ID
+constexpr uint8_t LOG_MSG_RNGF = 0x10U;   // next unused ID
 
-struct __attribute__((packed)) LogMsgBaro {
+struct __attribute__((packed)) LogMsgRNGF {
     uint64_t time_us;    // always first — required by UAV Log Viewer
-    uint16_t rate_hz;    // always second
-    float    pressure_pa;
-    float    temp_c;
-    float    altitude_m;
+    float    range_m;
+    uint8_t  valid;
 };
 ```
 
-Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first, `rate_hz` second.
+Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first. There is no rate field — every message logs at whatever rate `LogThread` calls `logger.write()` for it (50 Hz, unless you add your own divisor counter).
 
 **Step 2 — Add a row to `kLogDefs[]` in the same file**
 
 ```cpp
-{ LOG_MSG_BARO, "BARO", "QHfff", "TimeUS,Rate,Pressure,Temp,Alt", sizeof(LogMsgBaro) },
+{ LOG_MSG_RNGF, "RNGF", "QfB", "TimeUS,Range,Valid", sizeof(LogMsgRNGF) },
 ```
 
-Format codes: `Q`=uint64, `H`=uint16, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad).
+Format codes: `Q`=uint64, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad).
 
 **Step 3 — Snapshot and write in `LogThread` (`src/threads.cpp`)**
 
 ```cpp
-{ LogMsgBaro msg = {}; msg.time_us = t_us; msg.rate_hz = 50U;
-  msg.pressure_pa = baro_pressure(); msg.temp_c = baro_temp(); msg.altitude_m = baro_alt();
-  logger.write(LOG_MSG_BARO, msg); }
+{ LogMsgRNGF msg = {}; msg.time_us = t_us;
+  msg.range_m = rangefinder_distance(); msg.valid = rangefinder_valid();
+  logger.write(LOG_MSG_RNGF, msg); }
 ```
 
-**Step 4 — No rate change needed.** All messages share the 50 Hz `LogThread` period (`TIME_MS2I(20)` in `main.cpp`). If you need a different rate, add a divisor counter in `LogThread`.
+If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter around the write call.
 
 ### Binary format reference
 
@@ -448,7 +460,7 @@ Format codes: `Q`=uint64, `H`=uint16, `f`=float32, `i`=int32, `h`=int16, `B`=uin
 ```
 `length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate:** 50 Hz × 208 B/tick = ~10.4 KB/s. The 32 KB ring buffer holds ~3 s of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
 
 **D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
@@ -519,46 +531,46 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 | Channel | Driver | Device(s) | Status |
 |---|---|---|---|
-| SPI1 | `SPI.hpp/.cpp` | ICM-20948 (primary IMU) | Working |
-| SPI4 | `SPI.hpp/.cpp` | ICM-20948 (external IMU), ICM-20602 (backup IMU) | Working |
-| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, CAN-interface build only) | Working |
+| SPI1 | `SPI.hpp/.cpp` | imu1 (ICM-45686, CS=PG1), baro1 (MS5611, CS=PD7) | Working |
+| SPI4 | `SPI.hpp/.cpp` | imu2 (ICM-42688, CS=PC15), imu3 (ICM-42688, CS=PC13) | Working |
+| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, default interface) | Working |
 | TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
-| UART | `Radio.hpp/.cpp` | CRSF receiver | Working |
-| I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (default interface) | Working |
+| UART (TELEM1) | `Radio.hpp/.cpp` | CRSF receiver (default; SBUS also compiled, `RADIO_PROTOCOL` selects) | Working |
+| UART (TELEM2) | `MAVLink.hpp/.cpp` | MAVLink — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`) | Working |
+| I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (fallback interface only — CAN is default) | Working |
 
 ---
 
 ## 8. IMU Drivers
 
-The firmware reads four IMU sources. Index assignments are fixed:
+The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed:
 
 | Index | Variable | Sensor | Bus | DOF |
 |---|---|---|---|---|
-| 0 | `g_imu[0]` | ICM-20948 | SPI1 | 6 (accel + gyro) |
-| 1 | `g_imu[1]` | ICM-20948 | SPI4 | 6 (accel + gyro) |
-| 2 | `g_imu[2]` | ICM-20602 | SPI4 | 6 (accel + gyro) |
+| 0 | `g_imu[0]` | ICM-45686 | SPI1, CS=PG1 | 6 (accel + gyro) |
+| 1 | `g_imu[1]` | ICM-42688 (physically; read via the `ICM45686` driver class) | SPI4, CS=PC15 | 6 (accel + gyro) |
+| 2 | `g_imu[2]` | ICM-42688 (physically; read via the `ICM45686` driver class) | SPI4, CS=PC13 | 6 (accel + gyro) |
 | — | `g_can_imu` | IMX5 (INS) | FDCAN1 | attitude + rates |
+| — | `g_baro` | MS5611 | SPI1, CS=PD7 | pressure + temperature |
 
-### ICM-20948 (`src/coms/ICM20948.hpp/.cpp`)
+### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`)
 
-InvenSense 9-DOF MEMS (accelerometer, gyroscope, magnetometer). Two instances on FMUv5x hardware.
-
-- **Configured ranges:** ±16 g accelerometer, ±2000 °/s gyroscope
-- **Outputs:** accel in m/s², gyro in rad/s
-- **Read rate:** 1 kHz from SPIThread; internal ODR set to 1.125 kHz
-- **SPI speeds:** 1 MHz for init, 8 MHz for burst reads
-- **Magnetometer:** on-chip AK09916 is **not currently initialised** — TODO in state estimator
-
-### ICM-20602 (`src/coms/ICM20602.hpp/.cpp`)
-
-InvenSense 6-DOF MEMS (accelerometer + gyroscope only). One instance on FMUv5x hardware, sharing SPI4 with imu2.
+InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs** — `imu2`/`imu3` are physically ICM-42688 chips, but the ICM-45686 driver reads them too, because the two chips share a compatible WHOAMI/register/FIFO layout at the settings this firmware uses (see the comments in `ICM45686.cpp` on `PWR_MGMT0`/FS_SEL bit compatibility). The `ICM42688.hpp/.cpp` and `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` classes still exist in the tree but are dead code — not instantiated anywhere (the latter two are leftovers from an earlier hardware revision).
 
 - **Configured ranges:** ±16 g accelerometer, ±2000 °/s gyroscope
 - **Outputs:** accel in m/s², gyro in rad/s
-- **Read rate:** 1 kHz from SPIThread; internal ODR set to 1 kHz
-- **SPI speeds:** 1 MHz for init, 8 MHz for burst reads
+- **Read rate:** 1 kHz from SPIThread; internal ODR ~800 Hz
+- **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
+- **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
 
-Both ICM drivers use 32-byte aligned DMA buffers and apply `cacheBufferFlush` before TX / `cacheBufferInvalidate` after RX to maintain H7 D-cache coherency.
+### MS5611 Barometer
+
+`src/coms/Baro/MS5611.hpp/.cpp`, SPI1, CS=PD7, shares the bus with imu1. Unlike the IMU FIFO reads, a full pressure+temperature sample needs multi-millisecond ADC conversions, so `read()` is a small state machine called once per SPIThread tick (1 kHz): reset → read 6 PROM calibration words → alternate D1 (pressure) / D2 (temperature) conversions, returning a compensated pair roughly every 6 ticks.
+
+- Altitude is computed from the standard barometric formula and **zeroed to a boot-time reference** (averaged over the first 8 completed samples) — absolute accuracy doesn't matter here, only consistent relative height.
+- Fused into the EKF via `EKF::update_altitude()` — a single-row, chi-squared-gated (`BARO_CHI2_GATE`) measurement of the Z position state. Existing pos↔vel and vel↔accel-bias cross-covariance in the process model (`_build_F()`) automatically propagates the correction into vertical velocity and accelerometer bias — the same mechanism ArduPilot's EKF3 uses for baro fusion.
+- **Suppressed whenever mocap is connected** (`StateManager::update()` gates on `!mocap.valid`) — mocap measures absolute position far more accurately, and the two aren't anchored to a common origin, so fusing both would fight rather than agree. See [Sensor loss behaviour](#sensor-loss-behaviour) above.
+- Logged as `BARO` (pressure, temperature, altitude, valid) — see [SD Card Logging](#5-sd-card-logging).
 
 ### Inertial Sense IMX5 (FDCAN1)
 

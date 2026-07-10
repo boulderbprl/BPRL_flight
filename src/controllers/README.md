@@ -49,9 +49,19 @@ Top-level dispatcher. Manages two orthogonal concepts.
 | Phase | Condition | Behaviour |
 |---|---|---|
 | DISARMED | arm switch low | Zero torque and thrust; all controllers reset |
-| ACTIVE | armed | Full controller stack; zero throttle idles props |
+| GROUND_IDLE | just armed (or just landed) | Controller outputs discarded outright, motors held at idle floor, regardless of what the cascades compute |
+| ACTIVE | armed and spooled up | Full controller stack running |
 
-Transition ACTIVE → DISARMED resets all controller integrators and the position-hold latch.
+Arming always goes `DISARMED → GROUND_IDLE`, never straight to `ACTIVE` (mirrors ArduPilot's spool-state machine). Leaving `GROUND_IDLE` requires a sustained, deliberate stick push past a mode-dependent threshold:
+
+- **STABILIZE:** `thr_stick > 0.10` (any deliberate raise off idle — the stick there is a direct thrust command).
+- **ALT_HOLD / POS_HOLD:** `thr_stick > 0.50` (the stick there is a signed climb-rate command centered on a hold-altitude deadband, so intent-to-fly means crossing past that center).
+
+Once past threshold, it must stay there for `TAKEOFF_DEBOUNCE_TICKS = 100` (0.25 s @ 400 Hz) before transitioning to `ACTIVE`. On entering `ACTIVE`, thrust is linearly ramped from 0 over `SPOOL_UP_TICKS = 200` (0.5 s) rather than stepping straight to whatever the cascade commands.
+
+**Landed detection** drops back to `GROUND_IDLE` automatically: once spooled up, if commanded thrust stays below `LANDED_THR_THRESHOLD = 0.15` **and** vertical speed stays below `LANDED_VEL_THRESHOLD = 0.2 m/s` for `LANDED_DEBOUNCE_TICKS = 400` (1.0 s), the phase reverts — this exists so a future cascade bug can't idle-wind-up while sitting on the ground.
+
+Transition to `DISARMED` (from any phase) resets all controller integrators and the position-hold latch.
 
 ### Flight mode (3-position RC switch on `input[InputIdx::FLIGHT_MODE]`)
 
@@ -94,9 +104,9 @@ All derivative terms use a 30 Hz first-order low-pass filter. Integrators are an
 | Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
 | Roll rate | 0.09 | 0.075 | 0.001 | 30 Hz | 0.5 |
 | Pitch rate | 0.13 | 0.100 | 0.002 | 30 Hz | 0.5 |
-| Yaw rate | 0.18 | 0.018 | 0 | 30 Hz | 0.5 |
+| Yaw rate | 0.18 | 0.018 | 0 | 5 Hz | 0.5 |
 
-`YAW_GAIN = 1.5` scales the yaw rate target before the rate PID.
+`YAW_STICK_GAIN = 2.5` scales the yaw rate target before the rate PID — not the same constant as `AttitudeINDI::YAW_GAIN` (1.5); see the note in the AttitudeINDI section below.
 
 ---
 
@@ -117,14 +127,25 @@ INDI uses the measured angular acceleration (`p_dot`, `q_dot` from `g_state[P_DO
      out_cmds[0]   = clamp(total_torque / T_MAX_NM, −1, 1)
 ```
 
-`current_torque_Nm` is estimated from live DShot RPM telemetry by the **Unmixer**.
-`INDI_GAIN = 0.01` N·m·s²/rad — effective moment of inertia (Ixx ≈ Iyy). Update once airframe is characterised.
+`current_torque_Nm` is estimated from live DShot RPM telemetry by the **Unmixer**, which now has real bench-fit constants (see the Unmixer section below) — `current_torque` is no longer always zero.
 
-> **Note:** Motor polynomial coefficients (`MOTOR_P1`–`MOTOR_P4`) in the Unmixer are currently zero (placeholders). In this state `current_torque` is always 0 N·m and INDI reduces to a pure increment from zero — still functional but without physical torque feedback.
+`INDI_GAIN_ROLL = 0.0023f` / `INDI_GAIN_PITCH = 0.0033f` N·m·s²/rad — effective moment of inertia (Ixx, Iyy), one constant per axis (not a single shared `INDI_GAIN`).
+
+`accel_cmd` (the rate-PID's output, before the INDI increment) is exposed as an extra `update()` output parameter and logged in the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
 
 ### Gains
 
-Same Kp/Ki/Kd values as `AttitudePID`.
+The outer angle-P loops match `AttitudePID`'s attitude gains (3.50/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain with a real D-term:
+
+| Loop | Kp | Ki | Kd | D-filter | Imax |
+|---|---|---|---|---|---|
+| Roll attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
+| Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
+| Roll rate | 6.50 | 0 | 0.65 | 30 Hz | 0.5 |
+| Pitch rate | 6.50 | 0 | 0.65 | 30 Hz | 0.5 |
+| Yaw rate | 0.065 | 0.02 | 0 | 30 Hz | 0.5 |
+
+`YAW_GAIN = 1.5` scales the yaw rate target before the rate PID — **not** the same constant as `AttitudePID::YAW_STICK_GAIN` (2.5); these are two distinct constants in two distinct classes, easy to conflate.
 
 ---
 
@@ -246,21 +267,27 @@ D axis: altitude position is latched once both N and E axes have settled to HOLD
 
 ## Unmixer (`Unmixer.hpp/.cpp`)
 
-Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback.
+Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders).
 
-**Motor force model** (cubic polynomial — fill from bench test):
+**Motor force model** — cubic fit against *normalized angular velocity*, not raw RPM directly:
 ```
-F_kg = P1·rpm³ + P2·rpm² + P3·rpm + P4
-F_N  = F_kg × 9.81
+omega    = rpm × (π / 30)                       // RPM → rad/s
+rpm_norm = (omega − RPM_NORM_CENTER) / RPM_NORM_SCALE      // RPM_NORM_CENTER=2005, RPM_NORM_SCALE=880.8 rad/s
+F_N      = C3·rpm_norm³ + C2·rpm_norm² + C1·rpm_norm + C0  // C3=0.0134, C2=0.5607, C1=2.2831, C0=2.4540
+F_N      = max(F_N, 0)                          // guard small negative thrust near zero RPM
 ```
 
-**X-frame geometry** (arm length L = 0.225 m, NED body frame):
+**X-frame geometry** (arm length `ARM_LENGTH_M = 0.1275 m`, NED body frame):
 ```
-roll_Nm  = (L/√2) × (−F_FR + F_RL + F_FL − F_RR)
-pitch_Nm = (L/√2) × (+F_FR − F_RL + F_FL − F_RR)
+roll_Nm  = (ARM_LENGTH_M/√2) × (−F_FR + F_RL + F_FL − F_RR)
+pitch_Nm = (ARM_LENGTH_M/√2) × ( F_FR − F_RL + F_FL − F_RR)
 ```
 
 Signs are consistent with `MotorMixer`: positive roll command spins RL/FL faster, producing positive `roll_Nm`.
+
+**Normalization:** `MAX_THRUST_N = 7.04` (single-motor max from the bench fit) gives `T_MAX_NM = 2·sin(45°)·ARM_LENGTH_M·MAX_THRUST_N ≈ 1.269 N·m`, used to normalize torque to `[-1, 1]` via `normalize_torque()`.
+
+The bench fit also gives motor reaction (drag) torque as a function of thrust (`torque_Nm = 0.03·((F_N − 2.991)/2.183) + 0.0423`), but it isn't wired in since yaw currently uses a rate PID rather than INDI torque feedback — see `Unmixer.hpp`'s doc comment if yaw moves to torque-based control.
 
 ---
 
@@ -285,18 +312,22 @@ All motors output 0 when disarmed or when |roll| or |pitch| exceeds ~80°.
 All controllers use the same `PID` class with derivative filtering and anti-windup.
 
 ```cpp
-PID(float kp, float ki, float kd, float i_max, float d_lpf_hz);
-float update(float error, float dt_s = 0.0025f);
+PID(float kp, float ki, float kd, float imax, float fcut_hz = 30.0f);
+float update(float error);
 void  reset();
+void  set_gains(float kp, float ki, float kd);
 ```
 
-Derivative is filtered with a first-order IIR at `d_lpf_hz`. The integrator is clamped to `±i_max`.
+There is **no explicit `dt` parameter** — `update()` derives it internally from `chVTGetSystemTimeX()` between calls. Two edge cases are handled specially:
+
+- **First sample** (`_deriv_valid == false`): returns `kp * error` only (no I or D term), and latches the timestamp — avoids a derivative spike from an undefined previous error.
+- **Stale input** (gap since the last call `> 200 ms`, `STALE_TIMEOUT_US`): calls `reset()` (zeroes the integrator and derivative state) and returns `kp * error` only, same as the first-sample case — protects against a large derivative/integral kick if a caller stops calling `update()` for a while and then resumes.
+
+Derivative is filtered with a first-order IIR at `fcut_hz` (default 30 Hz). The integrator is clamped to `±imax`.
 
 ---
 
 ## TODOs
 
-- **Unmixer calibration** — `MOTOR_P1`–`MOTOR_P4` must be filled from a bench thrust test before INDI torque feedback is meaningful.
 - **Gain tuning** — all gains are untested on H7 hardware.
 - **Yaw hold** — POS_HOLD currently commands yaw *rate*, not yaw *angle*. An outer yaw loop requires a heading reference from the IMX5 or magnetometer.
-- **Arming logic** — `radio_armed()` returns `false` unconditionally; needs a dedicated switch channel.

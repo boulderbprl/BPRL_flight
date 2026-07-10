@@ -36,6 +36,14 @@ struct MocapRaw {
     bool  valid;       // mocap link connected and receiving
 };
 
+struct BaroRaw {
+    float pressure_pa;    // Pa, compensated
+    float temperature_c;  // °C, compensated
+    float alt_m;          // m, positive UP, relative to MS5611::init() boot-time reference
+    bool  has_new;        // fresh sample this tick — set by SPIThread, cleared by StateEstThread
+    bool  valid;          // true once MS5611 init + warm-up zero-reference capture completed
+};
+
 /* ── Shared flight state — access only under respective mutex ─────────────
  * Defined in threads.cpp.                                                   */
 extern mutex_t state_mtx;
@@ -44,7 +52,7 @@ extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from qu
 extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
-extern float   g_indi_diag[6];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch] — INDI shadow diagnostics, always populated
+extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
@@ -57,6 +65,9 @@ extern CANIMURaw g_can_imu;
 
 extern mutex_t  mocap_mtx;
 extern MocapRaw g_mocap;
+
+extern mutex_t baro_mtx;
+extern BaroRaw g_baro;
 
 extern mutex_t      esc_mtx;
 extern ESCTelemetry g_esc_telem[4]; // [FR, RL, FL, RR] — written by DShot ISR

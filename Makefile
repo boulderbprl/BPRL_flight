@@ -152,6 +152,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/MotorMixer.cpp \
          src/coms/IMUs/ICM42688.cpp \
          src/coms/IMUs/ICM45686.cpp \
+         src/coms/Baro/MS5611.cpp \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \

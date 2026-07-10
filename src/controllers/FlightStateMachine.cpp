@@ -41,7 +41,8 @@ void FlightStateMachine::run_attitude(const float ctrl_state6[],
 
     float indi_cmds[3];
     float delta_torque[2];
-    _indi.update(euler, state_full, input, current_torque, _unmixer, indi_cmds, delta_torque);
+    float accel_cmd[2];
+    _indi.update(euler, state_full, input, current_torque, _unmixer, indi_cmds, delta_torque, accel_cmd);
 
     float pid_cmds[3];
     _pid.update(ctrl_state6, input, pid_cmds);
@@ -52,6 +53,8 @@ void FlightStateMachine::run_attitude(const float ctrl_state6[],
     _indi_diag[3] = delta_torque[1];
     _indi_diag[4] = indi_cmds[0];
     _indi_diag[5] = indi_cmds[1];
+    _indi_diag[6] = accel_cmd[0];
+    _indi_diag[7] = accel_cmd[1];
 
     const float *active = _use_indi ? indi_cmds : pid_cmds;
     out_cmds[0] = active[0];

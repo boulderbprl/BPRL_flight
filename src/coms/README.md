@@ -33,7 +33,7 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — only registered when `STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN` (see `src/sensors/StrainRate.*`); I2C is the default interface |
+| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the **default** interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the override |
 
 ### Adding a device
 
@@ -90,17 +90,20 @@ Each ESC returns an eRPM frame on the same wire after the TX burst ends:
 
 ## SPI (`SPI.hpp/.cpp`)
 
-Two SPI buses drive all three on-board IMUs.
+Two SPI buses drive the three on-board IMUs plus the barometer.
 
 | Bus | Peripheral | CS pin | Device | Role |
 |---|---|---|---|---|
-| SPI1 | SPID1 | PC2  | ICM-20948 | Primary IMU (imu[0]) |
-| SPI4 | SPID4 | PE4  | ICM-20948 | External IMU (imu[1]) |
-| SPI4 | SPID4 | PC13 | ICM-20602 | Backup IMU (imu[2]) |
+| SPI1 | SPID1 | PG1  | ICM-45686 | Primary IMU (`imu1`) |
+| SPI4 | SPID4 | PC15 | ICM-42688 (probed/read as ICM-45686) | External IMU (`imu2`) |
+| SPI4 | SPID4 | PC13 | ICM-42688 (probed/read as ICM-45686) | Backup IMU (`imu3`) |
+| SPI1 | SPID1 | PD7  | MS5611 | Barometer (`baro1`) |
 
-`spi_drv_init()` must run inside `SPIThread` (power-on reset sequences use `chThdSleepMilliseconds`). imu[1] and imu[2] share SPI4 with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
+All three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `imu2`/`imu3` are physically ICM-42688 chips, but that driver reads them too because the two parts share a compatible WHOAMI/register/FIFO layout at the settings used here. The separate `ICM42688.hpp/.cpp` class exists in the tree but is never instantiated (dead code), as are the older `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` classes from an earlier hardware revision.
 
-SPI clock: 1 MHz for init, 8 MHz for burst reads. Both ICM drivers use 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency.
+`spi_drv_init()` must run inside `SPIThread` (power-on/reset sequences use `chThdSleepMilliseconds`). `imu2`/`imu3` share SPI4, and `imu1`/`baro1` share SPI1, each with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
+
+SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider). The IMU driver uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
 
 ---
 
@@ -110,7 +113,7 @@ SPI clock: 1 MHz for init, 8 MHz for burst reads. Both ICM drivers use 32-byte a
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Current use: strain rate sensor (`src/sensors/StrainRate.*`, default interface — see `STRAIN_RATE_INTERFACE` in `StrainRate.hpp`).
+Current use: strain rate sensor's I2C **fallback** interface only (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C` override — CAN is the default; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
 
 ### Adding a device
 
@@ -123,6 +126,27 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
-CRSF receiver input. `radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()` return normalized RC channel values. `radio_armed()` returns the arm switch state.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()` return normalized RC channel values. `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation.
+
+Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
 
 `motor_output_write()` selects DShot 600 or standard servo PWM (1000–2000 µs) based on the `MOTOR_PROTOCOL` define in `PWM.hpp`. The MotorMixer and ControlThread always produce 0–1000 normalized commands and are unaffected by this choice.
+
+---
+
+## MAVLink — TELEM2 (`MAVLink.hpp/.cpp`)
+
+Parses MAVLink on the TELEM2 UART. Currently used solely to ingest motion-capture position/velocity into `g_mocap`:
+
+| Message | Writes | Flag set |
+|---|---|---|
+| `VISION_POSITION_ESTIMATE` | `g_mocap.{x,y,z}` | `has_new_pos` |
+| `VISION_SPEED_ESTIMATE` | `g_mocap.{vx,vy,vz}` | `has_new_vel` |
+
+The two are handled independently (separate MAVLink messages, not guaranteed to arrive together or at the same rate) — see `StateManager::update()`'s comment on why position and velocity mocap fusion are gated separately rather than combined into one call.
+
+---
+
+## CalFlash (`CalFlash.hpp/.cpp`)
+
+Persistent IMU calibration storage — per-IMU gyro and accelerometer bias, written to STM32H743 internal flash Bank2 sector 7 (`0x081E0000`) via a direct register-level flash driver (bypasses ChibiOS's `HAL_USE_EFL`). Validated with a magic number, version field, and CRC32 on load; `cal_load()`/`cal_save()`/`cal_clear()` are the public entry points. `SPIThread` loads this at boot (before IMU init) and falls back to zero biases if the stored data is absent or fails validation.

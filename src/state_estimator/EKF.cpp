@@ -344,6 +344,37 @@ void EKF::update_position(const float xyz[3], float R_var)
     _update(3, H, R_diag, innov);
 }
 
+void EKF::update_altitude(float alt_up_m, float R_var)
+{
+    if (!_initialized) return;
+
+    // ── NED sign convention ────────────────────────────────────────────────
+    // EKF iZ is NED (down-positive). Barometric height above the boot-time
+    // reference is up-positive (see MS5611::init warm-up capture). Explicit
+    // flip here, matching update_gravity's explicit NED sign handling
+    // (EKF.cpp:84) rather than pushing the sign convention onto callers.
+    const float z_meas = -alt_up_m;
+    const float innov   = z_meas - _x[iZ];
+
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // Single scalar observation of iZ directly (H is one-hot), so S is just
+    // that state's P diagonal + R — same simplification as update_position's
+    // per-axis gate. Guards against a baro glitch (prop wash / gust pressure
+    // transient / SPI corruption) snapping Z and, via cross-covariance,
+    // corrupting W / accel bias from a single bad sample.
+    {
+        const float S = _P[iZ][iZ] + R_var;
+        const float gate_sq = BARO_CHI2_GATE * BARO_CHI2_GATE;
+        if (S < 1e-10f || innov * innov > S * gate_sq) return;
+    }
+
+    float H[1][N] = {};
+    H[0][iZ] = 1.0f;
+    const float R_diag[1]    = { R_var };
+    const float innov_arr[1] = { innov };
+    _update(1, H, R_diag, innov_arr);
+}
+
 void EKF::update_ned_vel(const float vel_ned[3], float R_var)
 {
     if (!_initialized) return;

@@ -27,5 +27,5 @@ private:
     PID _pitch_rate;
     PID _yaw_rate;
 
-    static constexpr float YAW_STICK_GAIN = 1.5f;
+    static constexpr float YAW_STICK_GAIN = 2.5f;
 };

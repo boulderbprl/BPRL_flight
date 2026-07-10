@@ -48,13 +48,29 @@ static const SPIConfig imu3_fast = {
     nullptr, nullptr
 };
 
+// ── BARO1: MS5611 — SPI1  CS=PD7  MODE3 ──────────────────────────────────────
+static const SPIConfig baro1_init = {
+    false, nullptr, GPIOD, 7U,
+    SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,   // MODE3
+    nullptr, nullptr
+};
+static const SPIConfig baro1_fast = {
+    false, nullptr, GPIOD, 7U,
+    SPI_CFG1_MBR_DIV4 | SPI_CFG1_DSIZE_VALUE(7),   // 50MHz/4=12.5MHz (<20MHz max)
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
 ICM45686 imu1;
 ICM45686 imu2;
 ICM45686 imu3;
+MS5611   baro1;
 
 void spi_drv_init(void)
 {
     imu1.init(&SPID1, &imu1_init, &imu1_fast);
     imu2.init(&SPID4, &imu2_init, &imu2_fast);
     imu3.init(&SPID4, &imu3_init, &imu3_fast);
+    baro1.init(&SPID1, &baro1_init, &baro1_fast);
 }

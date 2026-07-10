@@ -62,6 +62,6 @@ namespace InputIdx {
     constexpr int ROLL_TGT    = 1; // roll  setpoint [-1, 1]
     constexpr int PITCH_TGT   = 2; // pitch setpoint [-1, 1]
     constexpr int YAW_RATE    = 3; // yaw rate demand [-1, 1]
-    constexpr int FLIGHT_MODE = 4; // flight mode switch [-1,1]; <0=STABILIZE, ≥0=INDI
+    constexpr int FLIGHT_MODE = 4; // flight mode switch [-1,1]; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
     constexpr int N_INPUTS    = 5;
 }

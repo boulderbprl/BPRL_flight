@@ -53,7 +53,7 @@ void StateManager::init()
  * Main update — called at 500 Hz from StateEstThread
  * ══════════════════════════════════════════════════════════════════════════ */
 
-void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap)
+void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro)
 {
     if (!_initialized) return;
 
@@ -110,6 +110,22 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         for (int i = 0; i < NUM_LANES; ++i) {
             if (!_lanes[i].is_valid()) continue;
             _lanes[i].update_ned_vel(vel, R_MOCAP_VEL);
+        }
+    }
+
+    // ── 5.6. Barometric altitude fusion (all lanes, when available) ────────
+    // Gated on has_new the same way mocap pos/vel are — avoids re-fusing a
+    // stale sample on ticks where SPIThread hasn't completed a new P+T pair
+    // (baro updates at ~100+ Hz into a 500 Hz EKF loop).
+    //
+    // Suppressed while mocap is connected — mocap directly measures a more
+    // accurate absolute position, and baro's boot-time zero reference isn't
+    // reconciled with mocap's world origin, so fusing both would fight rather
+    // than average. Falls back to baro automatically on mocap disconnect.
+    if (baro.valid && baro.has_new && !mocap.valid) {
+        for (int i = 0; i < NUM_LANES; ++i) {
+            if (!_lanes[i].is_valid()) continue;
+            _lanes[i].update_altitude(baro.alt_m, R_BARO_POS);
         }
     }
 
@@ -193,10 +209,10 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _wd_filt = lowpass(_blended_wd, _wd_filt, alpha_uvw);
 
     // ── 8. Angular acceleration: differentiate blended rates + lowpass ─────
-    const float alpha_pqr = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
-    _pdot_filt = lowpass(derivative(_blended_p, _prev_p, dt), _pdot_filt, alpha_pqr);
-    _qdot_filt = lowpass(derivative(_blended_q, _prev_q, dt), _qdot_filt, alpha_pqr);
-    _rdot_filt = lowpass(derivative(_blended_r, _prev_r, dt), _rdot_filt, alpha_pqr);
+    const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
+    _pdot_filt = lowpass(derivative(_blended_p, _prev_p, dt), _pdot_filt, alpha_pqr_dot);
+    _qdot_filt = lowpass(derivative(_blended_q, _prev_q, dt), _qdot_filt, alpha_pqr_dot);
+    _rdot_filt = lowpass(derivative(_blended_r, _prev_r, dt), _rdot_filt, alpha_pqr_dot);
 
     _prev_p = _blended_p;
     _prev_q = _blended_q;

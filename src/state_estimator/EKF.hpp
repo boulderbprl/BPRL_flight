@@ -52,6 +52,11 @@ public:
     void update_position(const float xyz[3], float R_var);
     void update_ned_vel (const float vel[3], float R_var);
 
+    // Barometric altitude fusion — active when g_baro.valid.
+    // alt_up_m: altitude above the driver's boot-time reference, POSITIVE UP
+    // (NOT NED — the sign flip to NED-down happens inside this method).
+    void update_altitude(float alt_up_m, float R_var);
+
     // Accessors
     const float* state()          const { return _x; }
     float        innovation_norm() const { return _innov_norm; }
@@ -117,6 +122,12 @@ private:
     // diagonal here (each row observes exactly one state directly), so
     // S_ii is just that state's P diagonal + R — no matrix product needed.
     static constexpr float MOCAP_CHI2_GATE = 5.0f;
+
+    // ── Barometric altitude measurement update parameters ──────────────────
+    // Same joint chi-squared gate pattern as MOCAP_CHI2_GATE; kept as its own
+    // constant (not reused) because baro noise character (thermal drift,
+    // prop-wash pressure transients) differs enough to want independent tuning.
+    static constexpr float BARO_CHI2_GATE = 5.0f;
 
     // ── Covariance variance floors and ceilings (ConstrainVariances) ──────
     // Gyro bias: floor prevents collapse, ceiling = 0.5 rad/s 1σ

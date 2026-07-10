@@ -13,7 +13,7 @@ AttitudeINDI::AttitudeINDI()
 void AttitudeINDI::update(const float euler[3], const float state_full[],
                           const float input[], const float current_torque[2],
                           const Unmixer &unmixer, float out_cmds[3],
-                          float delta_torque[2])
+                          float delta_torque[2], float accel_cmd[2])
 {
     // ── Outer loop: angle error → rate target ─────────────────────────────
     const float roll_rate_tgt  = _roll_att.update(input[1] - euler[0]);
@@ -26,6 +26,9 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     // ── Inner loop: rate error → commanded angular acceleration (rad/s²) ──
     const float accel_cmd_roll  = _roll_rate.update(roll_rate_tgt  - p);
     const float accel_cmd_pitch = _pitch_rate.update(pitch_rate_tgt - q);
+
+    accel_cmd[0] = accel_cmd_roll;
+    accel_cmd[1] = accel_cmd_pitch;
 
     // ── INDI step: incremental torque from acceleration error ──────────────
     const float p_dot_meas = state_full[StateIdx::P_DOT];

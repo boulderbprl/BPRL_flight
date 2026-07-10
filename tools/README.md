@@ -14,15 +14,18 @@ pip install pyserial rich
 
 | Script | Subcommands | DEBUG build? |
 |---|---|---|
-| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare` | Required |
+| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel` | Required |
 | `motor_test.py` | `motor-test` | No |
 | `calibrate.py` | `calibrate` | Required |
-| `can_tools.py` | `can-status`, `can-scan` | No |
+| `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
 | `strain_rate.py` | `strain-rate` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
+| `i2c_tools.py` | `i2c-scan` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
+
+`dshot_decode_test.py` is a standalone dev/test script (no argparse subcommands) — not part of the main CLI family above.
 
 All scripts accept `--port /dev/ttyACMx` and `--baud N` global options.
 
@@ -39,11 +42,13 @@ Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
 | `telemetry` | Live attitude/rate/RPM/IMU/CAN dashboard |
 | `ekf-status` | Per-lane EKF roll/pitch/yaw/p/q/r table (all three onboard lanes + IMX5) |
 | `imu-compare` | Side-by-side raw accel and gyro from all three onboard IMUs |
+| `pos-vel` | Live XYZ position/velocity vs. mocap ground truth |
 
 ```bash
 python3 tools/telemetry.py telemetry
 python3 tools/telemetry.py ekf-status
 python3 tools/telemetry.py imu-compare
+python3 tools/telemetry.py pos-vel
 ```
 
 ---
@@ -91,10 +96,14 @@ Place the drone level on a flat surface before running. The script collects `--d
 | Subcommand | Description |
 |---|---|
 | `can-status` | Read FDCAN1 PSR / ECR / RXF0S registers and decode error flags |
+| `can-diag` | `msg_lost` (RxFIFO0 overflow count) and `reinit_count` (Bus_Off recoveries so far) |
+| `can-regdump` | Full FDCAN1 register dump |
 | `can-scan [--duration N]` | Record all CAN IDs seen for N seconds, display Hz breakdown |
 
 ```bash
 python3 tools/can_tools.py can-status
+python3 tools/can_tools.py can-diag
+python3 tools/can_tools.py can-regdump
 python3 tools/can_tools.py can-scan --duration 2
 ```
 
@@ -116,6 +125,20 @@ python3 tools/mav_tools.py mav-diag --watch --interval 1
 ```
 
 Diagnoses the RX side of the MAVLink/TELEM2 link independent of the radio and any ground-side bridge — tells you whether bytes are reaching SD3 at all, whether frames are failing CRC (dialect mismatch), and whether `VISION_POSITION_ESTIMATE`/`VISION_SPEED_ESTIMATE` specifically are showing up.
+
+---
+
+## i2c_tools.py
+
+> Works on any firmware build.
+
+| Subcommand | Description |
+|---|---|
+| `i2c-scan` | Probe all I2C addresses and display a grid of responding devices (also the default with no subcommand) |
+
+```bash
+python3 tools/i2c_tools.py i2c-scan
+```
 
 ---
 
@@ -171,14 +194,19 @@ python3 tools/logs.py log-status
 
 `logs decode` is offline — no serial port needed. It reads the ArduPilot DataFlash schema from the file header (FMT records) and writes one CSV per message type:
 
-| CSV file | Rate | Contents |
-|---|---|---|
-| `<stem>_att.csv` | 50 Hz | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
-| `<stem>_lin.csv` | 50 Hz | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
-| `<stem>_rcin.csv` | 50 Hz | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), Armed |
-| `<stem>_outp.csv` | 50 Hz | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
-| `<stem>_rpms.csv` | 50 Hz | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
-| `<stem>_strn.csv` | 50 Hz | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| CSV file | Contents |
+|---|---|
+| `<stem>_att.csv` | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
+| `<stem>_lin.csv` | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
+| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), Armed |
+| `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
+| `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
+| `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
+| `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel) |
+| `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
+
+All 11 message types log at the fixed 50 Hz `LogThread` period — there's no per-record rate field.
 
 The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 
@@ -205,9 +233,8 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 ## Quick reference
 
 ```bash
-# Flash
-make flash CubeOrangePlus  
-defalut:(BOARD=CubeBlueH7)
+# Flash (default board: BOARD=CubeBlueH7)
+make flash BOARD=CubeOrangePlus
 
 # Debug build + flash
 make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeOrangePlus
