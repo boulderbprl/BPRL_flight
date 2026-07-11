@@ -8,9 +8,12 @@
  *
  * alt_hold cascade:
  *   stick (pilot_thr [0,1]) → stick_to_climb_rate() → rate_tgt [m/s]
- *       rate error → _climb_rate_pid → accel_tgt [m/s²]
- *       accel error → _accel_pid    → delta_thr
+ *       rate error → _climb_rate_pid (target+error filtered @ 5 Hz)  → accel_tgt [m/s²]
+ *       accel error → _accel_pid    (target+error filtered @ 20 Hz) → delta_thr
  *       thr_cmd = constrain(THR_MID - delta_thr, 0, 1)
+ *
+ * Target/error filter cutoffs match ArduPilot's AC_PosControl defaults
+ * (POSCONTROL_VEL_Z_FILT_HZ = 5 Hz, POSCONTROL_ACC_Z_FILT_HZ = 20 Hz).
  *
  * Vertical axis uses body-frame W velocity (positive = descend), consistent
  * with the NED D convention used by PosControl (vel_tgt[2] > 0 = descend).

@@ -19,10 +19,25 @@ float constrain_float(float v, float lo, float hi);
 /* ── Signal processing ───────────────────────────────────────────────────── */
 
 // Compute IIR lowpass coefficient: alpha = dt / (dt + 1 / (2*pi*fc))
+// fc_hz <= 0 disables filtering (returns alpha = 1, i.e. passthrough).
 float lowpass_alpha(float fc_hz, float dt_s);
 
 // First-order IIR lowpass: y_k = alpha * x_k + (1-alpha) * y_{k-1}
 float lowpass(float input, float prev_out, float alpha);
+
+// State for the 2nd-order Butterworth biquad direct-form-II bilinear-transform delay elements, 
+// matching ArduPilot's DigitalBiquadFilter.
+struct Biquad2pState {
+    float delay1      = 0.0f;
+    float delay2      = 0.0f;
+    bool  initialised = false;
+};
+
+// Second-order (2-pole) Butterworth IIR lowpass — ~-40 dB/decade roll-off
+// above fc_hz, vs. ~-20 dB/decade for lowpass() above. Coefficients are
+// recomputed from fc_hz/dt_s every call (same variable-dt tolerance as
+// lowpass_alpha()). fc_hz <= 0 disables filtering (returns input unchanged).
+float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s);
 
 // Backward-difference numerical derivative
 float derivative(float current, float prev, float dt_s);

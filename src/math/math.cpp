@@ -17,6 +17,7 @@ float degreesToRadians(float deg) {
 
 float lowpass_alpha(float fc_hz, float dt_s)
 {
+    if (fc_hz <= 0.0f) return 1.0f;  // disabled -> passthrough
     // alpha = dt / (dt + 1/(2*pi*fc))
     const float tau = 1.0f / (6.2831853f * fc_hz);
     return dt_s / (dt_s + tau);
@@ -25,6 +26,40 @@ float lowpass_alpha(float fc_hz, float dt_s)
 float lowpass(float input, float prev_out, float alpha)
 {
     return alpha * input + (1.0f - alpha) * prev_out;
+}
+
+float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)
+{
+    if (fc_hz <= 0.0f || dt_s <= 0.0f) return input;  // disabled -> passthrough
+
+    const float sample_freq = 1.0f / dt_s;
+    const float cutoff      = fminf(fc_hz, sample_freq * 0.4f);  // stay under Nyquist
+
+    // Bilinear-transform Butterworth biquad (Q = cos(pi/4)), same formula as
+    // ArduPilot's DigitalBiquadFilter::compute_params.
+    static constexpr float COS_PI_4 = 0.70710678f;
+    const float fr  = sample_freq / cutoff;
+    const float ohm = tanf(3.14159265f / fr);
+    const float c   = 1.0f + 2.0f * COS_PI_4 * ohm + ohm * ohm;
+
+    const float b0 = ohm * ohm / c;
+    const float b1 = 2.0f * b0;
+    const float b2 = b0;
+    const float a1 = 2.0f * (ohm * ohm - 1.0f) / c;
+    const float a2 = (1.0f - 2.0f * COS_PI_4 * ohm + ohm * ohm) / c;
+
+    if (!state.initialised) {
+        state.delay1 = state.delay2 = input * (1.0f / (1.0f + a1 + a2));
+        state.initialised = true;
+    }
+
+    const float delay0 = input - state.delay1 * a1 - state.delay2 * a2;
+    const float output = delay0 * b0 + state.delay1 * b1 + state.delay2 * b2;
+
+    state.delay2 = state.delay1;
+    state.delay1 = delay0;
+
+    return output;
 }
 
 float derivative(float current, float prev, float dt_s)

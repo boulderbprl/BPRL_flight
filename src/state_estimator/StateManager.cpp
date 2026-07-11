@@ -42,6 +42,7 @@ void StateManager::init()
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
     _p_filt       = _q_filt       = _r_filt       = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
+    _ud_filt_state = _vd_filt_state = _wd_filt_state = Biquad2pState{};
 
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
@@ -202,11 +203,12 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _blended_wd += w[i] * (imu[i].accel[2] - st[iBaz] + g_body[2] - oxv[2]);
     }
 
-    // Lowpass filter uvw_dot (recompute alpha in case dt varies)
-    const float alpha_uvw = lowpass_alpha(STATEMGR_LP_UVWDOT_HZ, dt);
-    _ud_filt = lowpass(_blended_ud, _ud_filt, alpha_uvw);
-    _vd_filt = lowpass(_blended_vd, _vd_filt, alpha_uvw);
-    _wd_filt = lowpass(_blended_wd, _wd_filt, alpha_uvw);
+    // 2nd-order (Butterworth) lowpass filter uvw_dot — matches ArduPilot's
+    // INS-level LowPassFilter2p on raw accelerometer samples, steeper
+    // roll-off than the 1st-order lowpass() used elsewhere in this file.
+    _ud_filt = lowpass2p(_blended_ud, _ud_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
+    _vd_filt = lowpass2p(_blended_vd, _vd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
+    _wd_filt = lowpass2p(_blended_wd, _wd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
 
     // ── 8. Angular acceleration: differentiate blended rates + lowpass ─────
     const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);

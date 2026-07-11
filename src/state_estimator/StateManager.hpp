@@ -4,7 +4,7 @@
 #include "src/threads.hpp"   // IMURaw, CANIMURaw, MocapRaw
 
 // Lowpass cutoff frequencies for derived derivative states (Hz)
-#define STATEMGR_LP_UVWDOT_HZ     30.0f   // cutoff for u_dot/v_dot/w_dot
+#define STATEMGR_LP_UVWDOT_HZ     20.0f   // cutoff for u_dot/v_dot/w_dot (2nd-order; matches ArduPilot INS_ACCEL_FILTER default)
 #define STATEMGR_LP_PQRDOT_HZ     20.0f   // cutoff for p_dot/q_dot/r_dot
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID 
@@ -32,7 +32,9 @@
  * 1/innovation_norm, giving partial noise averaging with fault isolation.
  *
  * u_dot/v_dot/w_dot: gravity+Coriolis-corrected IMU accel, blended by the
- * same innovation-norm weights, then lowpass filtered at STATEMGR_LP_UVWDOT_HZ.
+ * same innovation-norm weights, then 2nd-order lowpass filtered at
+ * STATEMGR_LP_UVWDOT_HZ (matches ArduPilot's INS-level LowPassFilter2p on
+ * raw accelerometer samples).
  *
  * p_dot/q_dot/r_dot: differentiated from blended p/q/r, lowpass filtered at
  * STATEMGR_LP_PQRDOT_HZ.
@@ -98,8 +100,9 @@ private:
     // Lowpass-filtered p/q/r fed to the rate PID (vibration rejection)
     float _p_filt, _q_filt, _r_filt;
 
-    // Lowpass-filtered uvw_dot output
+    // Lowpass-filtered uvw_dot output (2nd-order Butterworth)
     float _ud_filt, _vd_filt, _wd_filt;
+    Biquad2pState _ud_filt_state, _vd_filt_state, _wd_filt_state;
 
     // Per-lane bias-corrected angular rates (updated each update() call)
     float _lane_p[NUM_LANES], _lane_q[NUM_LANES], _lane_r[NUM_LANES];

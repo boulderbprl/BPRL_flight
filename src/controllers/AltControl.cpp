@@ -4,8 +4,8 @@
 #include <algorithm>
 
 AltControl::AltControl()
-    : _climb_rate_pid(2.0f, 0.5f, 0.0f, 2.0f, 20.0f)
-    , _accel_pid     (0.05f, 0.01f, 0.0f, 0.3f, 20.0f)
+    : _climb_rate_pid(2.0f, 0.5f, 0.0f, 2.0f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/5.0f, /*filt_d_hz=*/20.0f)
+    , _accel_pid     (0.05f, 0.01f, 0.0f, 0.3f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/20.0f, /*filt_d_hz=*/20.0f)
 {}
 
 float AltControl::compute_throttle(float roll, float pitch, float thr_in) const
@@ -33,9 +33,9 @@ float AltControl::stick_to_climb_rate(float pilot_thr) const
 
 float AltControl::run_cascade(float rate_tgt, float vD, float vD_dot)
 {
-    const float accel_tgt = _climb_rate_pid.update(rate_tgt - vD);
+    const float accel_tgt = _climb_rate_pid.update(rate_tgt, vD);
     // Positive accel_tgt = want to accelerate downward → reduce throttle
-    const float delta_thr = _accel_pid.update(accel_tgt - vD_dot);
+    const float delta_thr = _accel_pid.update(accel_tgt, vD_dot);
     return constrain_float(THR_MID - delta_thr, 0.0f, 1.0f);
 }
 
