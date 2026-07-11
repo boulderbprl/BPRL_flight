@@ -31,8 +31,8 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     accel_cmd[1] = accel_cmd_pitch;
 
     // ── INDI step: incremental torque from acceleration error ──────────────
-    const float p_dot_meas = state_full[StateIdx::P_DOT]
-    const float q_dot_meas = state_full[StateIdx::Q_DOT] 
+    const float p_dot_meas = state_full[StateIdx::P_DOT] * 0.25f; // hacky fix for bad gains
+    const float q_dot_meas = state_full[StateIdx::Q_DOT] * 0.25f;
 
     const float delta_torque_roll  = (accel_cmd_roll  - p_dot_meas) * INDI_GAIN_ROLL;
     const float delta_torque_pitch = (accel_cmd_pitch - q_dot_meas) * INDI_GAIN_PITCH;
