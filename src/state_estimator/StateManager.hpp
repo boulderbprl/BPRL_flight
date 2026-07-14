@@ -41,7 +41,8 @@
  * raw accelerometer samples).
  *
  * p_dot/q_dot/r_dot: differentiated from the filtered p/q/r (post STATEMGR_LP_PQ_HZ/
- * STATEMGR_LP_R_HZ), then lowpass filtered again at STATEMGR_LP_PQRDOT_HZ.
+ * STATEMGR_LP_R_HZ 2nd-order Butterworth), then lowpass filtered again at
+ * STATEMGR_LP_PQRDOT_HZ.
  *
  * Assembles the full 19-element StateIdx state vector for g_state[].
  */
@@ -118,8 +119,11 @@ private:
     float _prev_p,    _prev_q,    _prev_r;
     float _pdot_filt, _qdot_filt, _rdot_filt;
 
-    // Lowpass-filtered p/q/r fed to the rate PID (vibration rejection)
+    // Lowpass-filtered p/q/r fed to the rate PID (vibration rejection,
+    // 2nd-order Butterworth — matches ArduPilot's INS-level LowPassFilter2p
+    // on gyro, steeper rolloff than a 1-pole filter at the same cutoff)
     float _p_filt, _q_filt, _r_filt;
+    Biquad2pState _p_filt_state, _q_filt_state, _r_filt_state;
 
     // Lowpass-filtered uvw_dot output (2nd-order Butterworth)
     float _ud_filt, _vd_filt, _wd_filt;

@@ -20,6 +20,8 @@ private:
     uint8_t reg_read(uint8_t reg);
     void    reg_write(uint8_t reg, uint8_t val);
     void    burst_read(uint8_t reg, uint8_t *buf, size_t n);
+    uint8_t reg_read_bank(uint8_t bank, uint8_t reg);
+    void    reg_write_bank(uint8_t bank, uint8_t reg, uint8_t val);
 
     SPIDriver       *_spid     = nullptr;
     const SPIConfig *_cfg_init = nullptr;

@@ -50,6 +50,7 @@ void StateManager::init()
     _ud_filt_state = _vd_filt_state = _wd_filt_state = Biquad2pState{};
     _u_filt       = _v_filt       = _w_filt       = 0.0f;
     _u_filt_state  = _v_filt_state  = _w_filt_state  = Biquad2pState{};
+    _p_filt_state  = _q_filt_state  = _r_filt_state  = Biquad2pState{};
 
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
@@ -236,12 +237,12 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
     // ── 8. Lowpass the blended rates themselves before they reach the rate
     // PID — rejects vibration-band noise that would otherwise pass through unfiltered.
-    // Yaw (r) gets a heavier cutoff than roll/pitch (p/q).
-    const float alpha_pq_out = lowpass_alpha(STATEMGR_LP_PQ_HZ, dt);
-    const float alpha_r_out  = lowpass_alpha(STATEMGR_LP_R_HZ, dt);
-    _p_filt = lowpass(_blended_p, _p_filt, alpha_pq_out);
-    _q_filt = lowpass(_blended_q, _q_filt, alpha_pq_out);
-    _r_filt = lowpass(_blended_r, _r_filt, alpha_r_out);
+    // 2nd-order Butterworth (12 dB/octave) — steeper rolloff than a 1-pole filter
+    // at the same cutoff, matching ArduPilot's INS-level gyro filter. Yaw (r)
+    // gets a heavier cutoff than roll/pitch (p/q).
+    _p_filt = lowpass2p(_blended_p, _p_filt_state, STATEMGR_LP_PQ_HZ, dt);
+    _q_filt = lowpass2p(_blended_q, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);
+    _r_filt = lowpass2p(_blended_r, _r_filt_state, STATEMGR_LP_R_HZ, dt);
 
     // ── 9. Angular acceleration: differentiate the filtered rates + lowpass ─
     const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);

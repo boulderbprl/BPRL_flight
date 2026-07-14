@@ -20,6 +20,11 @@ private:
     void    reg_write(uint8_t reg, uint8_t val);
     void    burst_read(uint8_t reg, uint8_t *buf, size_t n);
 
+    // Indirect IPREG bank access (16-bit addressed config space used for the
+    // gyro/accel anti-alias-filter enable bits, not directly memory-mapped).
+    uint8_t ireg_read(uint16_t bank_addr, uint16_t reg);
+    void    ireg_write(uint16_t bank_addr, uint16_t reg, uint8_t val);
+
     SPIDriver       *_spid     = nullptr;
     const SPIConfig *_cfg_init = nullptr;
     const SPIConfig *_cfg_fast = nullptr;

@@ -14,6 +14,15 @@ static constexpr uint8_t REG_FIFO_CONFIG3  = 0x21;  // GYRO_EN | ACCEL_EN | FIFO
 static constexpr uint8_t REG_FIFO_COUNTH   = 0x12;  // 2-byte record count (LE in register layout)
 static constexpr uint8_t REG_FIFO_DATA     = 0x14;  // FIFO burst read register
 
+// Indirect IPREG register access (16-bit addressed config banks)
+static constexpr uint8_t REG_IREG_ADDRH    = 0x7C;
+static constexpr uint8_t REG_IREG_ADDRL    = 0x7D;
+static constexpr uint8_t REG_IREG_DATA     = 0x7E;
+static constexpr uint8_t REG_MISC2         = 0x7F;  // bit0 = IREG_DATA ready
+
+static constexpr uint16_t BANK_IPREG_SYS1_ADDR = 0xA400;  // GYRO_SRC_CTRL  lives at +0xA6
+static constexpr uint16_t BANK_IPREG_SYS2_ADDR = 0xA500;  // ACCEL_SRC_CTRL lives at +0x7B
+
 // ICM-45686 FS_SEL=1 → ±2000 dps / ±16 g (matches ICM-42688 at FS_SEL=0)
 static constexpr float GYRO_SCALE  = (1.0f / 16.4f)  * (3.14159265f / 180.0f);
 static constexpr float ACCEL_SCALE = (1.0f / 2048.0f) * 9.80665f;
@@ -38,6 +47,16 @@ bool ICM45686::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     reg_write(REG_GYRO_CONFIG0,  FS_ODR_CFG);
     reg_write(REG_ACCEL_CONFIG0, FS_ODR_CFG);
     chThdSleepMilliseconds(20);  // accel needs 20 ms after enable
+
+    // Enable the hardware interpolator + anti-alias filter on gyro and accel.
+    // Without this the AAF path is bypassed and vibration energy above the
+    // digital filter cutoff aliases straight into the sampled data before any
+    // downstream software filter can act on it.
+    uint8_t src_ctrl = ireg_read(BANK_IPREG_SYS1_ADDR, 0xA6);   // GYRO_SRC_CTRL [6:5]
+    ireg_write(BANK_IPREG_SYS1_ADDR, 0xA6, (src_ctrl & ~(0x3 << 5)) | (0x2 << 5));
+
+    src_ctrl = ireg_read(BANK_IPREG_SYS2_ADDR, 0x7B);           // ACCEL_SRC_CTRL [1:0]
+    ireg_write(BANK_IPREG_SYS2_ADDR, 0x7B, (src_ctrl & ~0x3) | 0x2);
 
     // Flush FIFO, then configure streaming
     reg_write(REG_FIFO_CONFIG3, 0x00);   // disable FIFO
@@ -129,4 +148,29 @@ void ICM45686::burst_read(uint8_t reg, uint8_t *buf, size_t n)
     spiReleaseBus(_spid);
     cacheBufferInvalidate(_rxbuf, 32);
     memcpy(buf, _rxbuf + 1, n);
+}
+
+uint8_t ICM45686::ireg_read(uint16_t bank_addr, uint16_t reg)
+{
+    const uint16_t addr = bank_addr + reg;
+    reg_write(REG_IREG_ADDRH, static_cast<uint8_t>(addr >> 8));
+    reg_write(REG_IREG_ADDRL, static_cast<uint8_t>(addr & 0xFF));
+
+    for (uint8_t i = 0; i < 10; ++i) {
+        if (reg_read(REG_MISC2) & 0x01) break;
+        chThdSleepMicroseconds(10);  // min 4us gap between IREG accesses
+    }
+    return reg_read(REG_IREG_DATA);
+}
+
+void ICM45686::ireg_write(uint16_t bank_addr, uint16_t reg, uint8_t val)
+{
+    const uint16_t addr = bank_addr + reg;
+    reg_write(REG_IREG_ADDRH, static_cast<uint8_t>(addr >> 8));
+    reg_write(REG_IREG_ADDRL, static_cast<uint8_t>(addr & 0xFF));
+    reg_write(REG_IREG_DATA,  val);
+
+    if (!(reg_read(REG_MISC2) & 0x01)) {
+        chThdSleepMicroseconds(10);  // min 4us gap between IREG accesses
+    }
 }
