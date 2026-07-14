@@ -28,7 +28,7 @@ public:
 
 private:
     void compute_lean_angles(float yaw_rad, float accel_N_tgt, float accel_E_tgt,
-                             float dt_s, float &roll_tgt, float &pitch_tgt);
+                             float &roll_tgt, float &pitch_tgt);
 
     static uint32_t now_us();
 
@@ -38,15 +38,16 @@ private:
     PID _vel_N;
     PID _vel_E;
 
-    // 2nd-order LPF on the lean-angle targets (see compute_lean_angles).
-    Biquad2pState _roll_tgt_filt;
-    Biquad2pState _pitch_tgt_filt;
-    uint32_t      _last_lean_t_us  = 0;
-    bool          _lean_filt_valid = false;
+    // 2nd-order LPF on the NE accel targets, in the inertial frame (before
+    // the yaw rotation + atan2 in compute_lean_angles).
+    Biquad2pState _accel_N_filt;
+    Biquad2pState _accel_E_filt;
+    uint32_t      _last_accel_t_us  = 0;
+    bool          _accel_filt_valid = false;
 
-    static constexpr float MAX_VEL_NE   = 5.0f;
-    static constexpr float MAX_VEL_D    = 3.0f;
-    static constexpr float MAX_LEAN_deg = 30.0f;
-    static constexpr float GRAVITY_MSS  = 9.80665f;
-    static constexpr float LEAN_FILT_HZ = 5.0f;   // lean-angle target LPF cutoff
+    static constexpr float MAX_VEL_NE    = 5.0f;
+    static constexpr float MAX_VEL_D     = 3.0f;
+    static constexpr float MAX_LEAN_deg  = 30.0f;
+    static constexpr float GRAVITY_MSS   = 9.80665f;
+    static constexpr float ACCEL_FILT_HZ = 5.0f;   // accel-target LPF cutoff
 };
