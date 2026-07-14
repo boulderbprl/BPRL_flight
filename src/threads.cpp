@@ -41,6 +41,7 @@ float   g_input[5]           = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 
@@ -373,6 +374,9 @@ static THD_FUNCTION(ControlThread, arg)
         float indi_diag[8];
         flight_sm.get_indi_diag(indi_diag);
 
+        float ctun_diag[12];
+        flight_sm.get_ctun_diag(ctun_diag);
+
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
@@ -385,6 +389,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[2] = torque_cmds[2];
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
+        memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode = (int)flight_sm.mode();
         chMtxUnlock(&state_mtx);
@@ -1184,7 +1189,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8], ctun_diag[12];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1192,6 +1197,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(inp,       g_input,     sizeof(inp));
         memcpy(ctrl,      g_ctrl,      sizeof(ctrl));
         memcpy(indi_diag, g_indi_diag, sizeof(indi_diag));
+        memcpy(ctun_diag, g_ctun_diag, sizeof(ctun_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -1210,6 +1216,12 @@ static THD_FUNCTION(LogThread, arg)
         chMtxLock(&baro_mtx);
         baro_snap_log = g_baro;
         chMtxUnlock(&baro_mtx);
+
+        /* ── Mocap snapshot ──────────────────────────────────────────── */
+        MocapRaw mocap_snap_log = {};
+        chMtxLock(&mocap_mtx);
+        mocap_snap_log = g_mocap;
+        chMtxUnlock(&mocap_mtx);
 
         /* ── IMU snapshot ────────────────────────────────────────────── */
         IMURaw imu_snap_log[3];
@@ -1288,6 +1300,27 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_INDI, msg);
         }
 
+#if LOG_CTUN_ENABLED
+        /* ── CTUN — TEMP pos-hold NE tuning diagnostics ───────────────── */
+        {
+            LogMsgCTUN msg = {};
+            msg.time_us   = t_us;
+            msg.pos_n_tgt = ctun_diag[0];
+            msg.pos_n_err = ctun_diag[1];
+            msg.pos_e_tgt = ctun_diag[2];
+            msg.pos_e_err = ctun_diag[3];
+            msg.vel_n_tgt = ctun_diag[4];
+            msg.vel_n_err = ctun_diag[5];
+            msg.vel_e_tgt = ctun_diag[6];
+            msg.vel_e_err = ctun_diag[7];
+            msg.roll_tgt  = ctun_diag[8];
+            msg.pitch_tgt = ctun_diag[9];
+            msg.climb_rate_tgt = ctun_diag[10];
+            msg.climb_rate_err = ctun_diag[11];
+            logger.write(LOG_MSG_CTUN, msg);
+        }
+#endif
+
         /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
         {
             LogMsgRPMS msg = {};
@@ -1337,6 +1370,20 @@ static THD_FUNCTION(LogThread, arg)
             msg.alt_m       = baro_snap_log.alt_m;
             msg.valid       = (uint8_t)baro_snap_log.valid;
             logger.write(LOG_MSG_BARO, msg);
+        }
+
+        /* ── MOCP — raw mocap position/velocity estimate, pre-EKF ─────── */
+        {
+            LogMsgMOCP msg = {};
+            msg.time_us = t_us;
+            msg.x       = mocap_snap_log.x;
+            msg.y       = mocap_snap_log.y;
+            msg.z       = mocap_snap_log.z;
+            msg.vx      = mocap_snap_log.vx;
+            msg.vy      = mocap_snap_log.vy;
+            msg.vz      = mocap_snap_log.vz;
+            msg.valid   = (uint8_t)mocap_snap_log.valid;
+            logger.write(LOG_MSG_MOCP, msg);
         }
 
         logger.flush();

@@ -1,6 +1,7 @@
 #include "StateManager.hpp"
 #include "src/math/math.hpp"
 #include <cfloat>
+#include <cmath>
 
 static constexpr float GRAVITY = 9.80665f;
 
@@ -17,6 +18,7 @@ static constexpr int iBgx=13, iBgy=14, iBgz=15;
 
 StateManager::StateManager()
     : _primary(0), _initialized(false),
+      _yaw_zero_captured(false), _yaw_offset_q{1.0f, 0.0f, 0.0f, 0.0f},
       _blended_p(0.0f), _blended_q(0.0f), _blended_r(0.0f),
       _blended_x(0.0f), _blended_y(0.0f), _blended_z(0.0f),
       _blended_u(0.0f), _blended_v(0.0f), _blended_w(0.0f),
@@ -25,6 +27,7 @@ StateManager::StateManager()
       _pdot_filt(0.0f), _qdot_filt(0.0f), _rdot_filt(0.0f),
       _p_filt(0.0f), _q_filt(0.0f), _r_filt(0.0f),
       _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f),
+      _u_filt(0.0f), _v_filt(0.0f), _w_filt(0.0f),
       _lane_p{}, _lane_q{}, _lane_r{}
 {}
 
@@ -33,7 +36,9 @@ void StateManager::init()
     for (int i = 0; i < NUM_LANES; ++i)
         _lanes[i].init(i);
 
-    _primary      = 0;
+    _primary           = 0;
+    _yaw_zero_captured = false;
+    _yaw_offset_q      = { 1.0f, 0.0f, 0.0f, 0.0f };
     _blended_p    = _blended_q    = _blended_r    = 0.0f;
     _blended_x    = _blended_y    = _blended_z    = 0.0f;
     _blended_u    = _blended_v    = _blended_w    = 0.0f;
@@ -43,6 +48,8 @@ void StateManager::init()
     _p_filt       = _q_filt       = _r_filt       = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
     _ud_filt_state = _vd_filt_state = _wd_filt_state = Biquad2pState{};
+    _u_filt       = _v_filt       = _w_filt       = 0.0f;
+    _u_filt_state  = _v_filt_state  = _w_filt_state  = Biquad2pState{};
 
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
@@ -74,6 +81,18 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // IMX5 quaternion is body→NED (verified: Euler angles match physical attitude).
     if (can_imu.valid && can_imu.has_new_quat) {
         Quat q_meas = { can_imu.q0, can_imu.q1, can_imu.q2, can_imu.q3 };
+
+        // Capture a boot-time heading-zero offset from the first valid IMX5
+        // quaternion: a pure world-frame yaw rotation that cancels whatever
+        // absolute heading IMX5 reports at power-on. See _yaw_offset_q.
+        if (!_yaw_zero_captured) {
+            float ro, pi, ya;
+            quat_to_euler(q_meas, ro, pi, ya);
+            _yaw_offset_q      = { cosf(-ya * 0.5f), 0.0f, 0.0f, sinf(-ya * 0.5f) };
+            _yaw_zero_captured = true;
+        }
+        q_meas = quat_norm(quat_mul(_yaw_offset_q, q_meas));
+
         for (int i = 0; i < NUM_LANES; ++i)
             _lanes[i].update_quaternion(q_meas, R_QUAT);
     }
@@ -148,6 +167,11 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _blended_w += w[i] * st[iW];
     }
 
+    // 2nd-order (Butterworth) lowpass filter blended u/v/w
+    _u_filt = lowpass2p(_blended_u, _u_filt_state, STATEMGR_LP_UVW_HZ, dt);
+    _v_filt = lowpass2p(_blended_v, _v_filt_state, STATEMGR_LP_UVW_HZ, dt);
+    _w_filt = lowpass2p(_blended_w, _w_filt_state, STATEMGR_LP_UVW_HZ, dt);
+
     // ── 6. Soft-blend p/q/r: bias-corrected gyros + IMX5 blend ──
     _blended_p = _blended_q = _blended_r = 0.0f;
     for (int i = 0; i < NUM_LANES; ++i) {
@@ -210,17 +234,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _vd_filt = lowpass2p(_blended_vd, _vd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
     _wd_filt = lowpass2p(_blended_wd, _wd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
 
-    // ── 8. Angular acceleration: differentiate blended rates + lowpass ─────
-    const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
-    _pdot_filt = lowpass(derivative(_blended_p, _prev_p, dt), _pdot_filt, alpha_pqr_dot);
-    _qdot_filt = lowpass(derivative(_blended_q, _prev_q, dt), _qdot_filt, alpha_pqr_dot);
-    _rdot_filt = lowpass(derivative(_blended_r, _prev_r, dt), _rdot_filt, alpha_pqr_dot);
-
-    _prev_p = _blended_p;
-    _prev_q = _blended_q;
-    _prev_r = _blended_r;
-
-    // ── 9. Lowpass the blended rates themselves before they reach the rate
+    // ── 8. Lowpass the blended rates themselves before they reach the rate
     // PID — rejects vibration-band noise that would otherwise pass through unfiltered.
     // Yaw (r) gets a heavier cutoff than roll/pitch (p/q).
     const float alpha_pq_out = lowpass_alpha(STATEMGR_LP_PQ_HZ, dt);
@@ -228,6 +242,16 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _p_filt = lowpass(_blended_p, _p_filt, alpha_pq_out);
     _q_filt = lowpass(_blended_q, _q_filt, alpha_pq_out);
     _r_filt = lowpass(_blended_r, _r_filt, alpha_r_out);
+
+    // ── 9. Angular acceleration: differentiate the filtered rates + lowpass ─
+    const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
+    _pdot_filt = lowpass(derivative(_p_filt, _prev_p, dt), _pdot_filt, alpha_pqr_dot);
+    _qdot_filt = lowpass(derivative(_q_filt, _prev_q, dt), _qdot_filt, alpha_pqr_dot);
+    _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_pqr_dot);
+
+    _prev_p = _p_filt;
+    _prev_q = _q_filt;
+    _prev_r = _r_filt;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -266,10 +290,10 @@ void StateManager::get_state(float out[StateIdx::N]) const
     out[StateIdx::Y]     = _blended_y;
     out[StateIdx::Z_POS] = _blended_z;
 
-    // Body velocity — soft-blended across lanes (see _blended_u/v/w)
-    out[StateIdx::U] = _blended_u;
-    out[StateIdx::V] = _blended_v;
-    out[StateIdx::W] = _blended_w;
+    // Body velocity — soft-blended across lanes + lowpass filtered (see _u_filt/v/w)
+    out[StateIdx::U] = _u_filt;
+    out[StateIdx::V] = _v_filt;
+    out[StateIdx::W] = _w_filt;
 
     // Body acceleration (blended + lowpass filtered) → out[6–8]
     out[StateIdx::U_DOT] = _ud_filt;

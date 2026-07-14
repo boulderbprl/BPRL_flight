@@ -87,8 +87,7 @@ void FlightStateMachine::mode_alt_hold(const float ctrl_state6[],
     run_attitude(ctrl_state6, euler, state_full, input, rpm, out_cmds);
 
     const float vD     = state_full[StateIdx::W];
-    const float vD_dot = state_full[StateIdx::W_DOT];
-    thrust_out = _alt.alt_hold_from_stick(input[InputIdx::THRUST], vD, vD_dot);
+    thrust_out = _alt.alt_hold_from_stick(input[InputIdx::THRUST], vD);
 }
 
 // ── Mode: POS_HOLD ──────────────────────────────────────────────────────────
@@ -253,6 +252,31 @@ void FlightStateMachine::mode_pos_hold(const float ctrl_state6[],
     float att_cmds[2];
     _pos.NE_rate_update(pos_state9, vel_NE, att_cmds);
 
+    // ── CTUN shadow diagnostics: outer pos-loop + inner vel-loop targets/errors
+    // and the lean angle pos-hold would have sent to the attitude controller.
+    // Populated every tick regardless of CTUN_POSHOLD_SHADOW.
+    _ctun_diag[0] = pos_tgt[0];          // pos_n_tgt
+    _ctun_diag[1] = pos_tgt[0] - cur_N;  // pos_n_err
+    _ctun_diag[2] = pos_tgt[1];          // pos_e_tgt
+    _ctun_diag[3] = pos_tgt[1] - cur_E;  // pos_e_err
+    _ctun_diag[4] = vel_tgt[0];          // vel_n_tgt
+    _ctun_diag[5] = vel_tgt[0] - vN;     // vel_n_err
+    _ctun_diag[6] = vel_tgt[1];          // vel_e_tgt
+    _ctun_diag[7] = vel_tgt[1] - vE;     // vel_e_err
+    _ctun_diag[8]  = att_cmds[0];        // roll_tgt  (shadow)
+    _ctun_diag[9]  = att_cmds[1];        // pitch_tgt (shadow)
+    _ctun_diag[10] = vel_tgt[2];         // climb_rate_tgt (D-axis output of NED_update; shadow — alt-hold cascade isn't driving flight while CTUN_POSHOLD_SHADOW is set)
+    _ctun_diag[11] = vel_tgt[2] - vD;    // climb_rate_err
+
+    if (CTUN_POSHOLD_SHADOW) {
+        // TEMP (CTUN tuning): fly hands-off STABILIZE — direct stick to
+        // attitude and throttle — while the pos-hold cascade above runs
+        // shadow-only. See CTUN_POSHOLD_SHADOW.
+        run_attitude(ctrl_state6, euler, state_full, input, rpm, out_cmds);
+        thrust_out = _alt.compute_throttle(euler[0], euler[1], input[InputIdx::THRUST]);
+        return;
+    }
+
     // ── Attitude controller with position-derived lean targets ────────────────
     float pos_input[InputIdx::N_INPUTS];
     memcpy(pos_input, input, sizeof(pos_input));
@@ -260,9 +284,8 @@ void FlightStateMachine::mode_pos_hold(const float ctrl_state6[],
     pos_input[InputIdx::PITCH_TGT] = att_cmds[1];
     run_attitude(ctrl_state6, euler, state_full, pos_input, rpm, out_cmds);
 
-    // ── Altitude: inner loops only (climb rate from NED_update D) ─────────────
-    const float vD_dot = state_full[StateIdx::W_DOT];
-    thrust_out = _alt.alt_hold_from_rate(vel_tgt[2], vD, vD_dot);
+    // ── Altitude: inner loop only (climb rate from NED_update D) ──────────────
+    thrust_out = _alt.alt_hold_from_rate(vel_tgt[2], vD);
 }
 
 // ── Main update ──────────────────────────────────────────────────────────────

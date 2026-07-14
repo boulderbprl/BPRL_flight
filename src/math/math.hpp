@@ -16,6 +16,9 @@ float degreesToRadians(float deg);
 
 float constrain_float(float v, float lo, float hi);
 
+// Wrap an angle (radians) into [-pi, pi].
+float wrap_pi(float rad);
+
 /* ── Signal processing ───────────────────────────────────────────────────── */
 
 // Compute IIR lowpass coefficient: alpha = dt / (dt + 1 / (2*pi*fc))

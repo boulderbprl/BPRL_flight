@@ -5,6 +5,7 @@
 
 // Lowpass cutoff frequencies for derived derivative states (Hz)
 #define STATEMGR_LP_UVWDOT_HZ     20.0f   // cutoff for u_dot/v_dot/w_dot (2nd-order; matches ArduPilot INS_ACCEL_FILTER default)
+#define STATEMGR_LP_UVW_HZ        15.0f   // cutoff for blended u/v/w fed to the controllers (2nd-order)
 #define STATEMGR_LP_PQRDOT_HZ     20.0f   // cutoff for p_dot/q_dot/r_dot
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID 
@@ -31,13 +32,16 @@
  * p/q/r output: soft-blended across all valid lanes weighted by
  * 1/innovation_norm, giving partial noise averaging with fault isolation.
  *
+ * u/v/w output: soft-blended as above, then 2nd-order lowpass filtered at
+ * STATEMGR_LP_UVW_HZ. 
+ *
  * u_dot/v_dot/w_dot: gravity+Coriolis-corrected IMU accel, blended by the
  * same innovation-norm weights, then 2nd-order lowpass filtered at
  * STATEMGR_LP_UVWDOT_HZ (matches ArduPilot's INS-level LowPassFilter2p on
  * raw accelerometer samples).
  *
- * p_dot/q_dot/r_dot: differentiated from blended p/q/r, lowpass filtered at
- * STATEMGR_LP_PQRDOT_HZ.
+ * p_dot/q_dot/r_dot: differentiated from the filtered p/q/r (post STATEMGR_LP_PQ_HZ/
+ * STATEMGR_LP_R_HZ), then lowpass filtered again at STATEMGR_LP_PQRDOT_HZ.
  *
  * Assembles the full 19-element StateIdx state vector for g_state[].
  */
@@ -46,10 +50,10 @@ public:
     static constexpr int NUM_LANES = 3;
 
     // IMX5 / mocap / gravity measurement noise variances — tunable.
-    static constexpr float R_QUAT      = 1e-3f;   // IMX5 quaternion component variance
+    static constexpr float R_QUAT      = 1e-2f;   // IMX5 quaternion component variance
     static constexpr float R_GRAVITY   = 0.5f;    // accel gravity-vector variance (m/s²)²
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
-    static constexpr float R_MOCAP_VEL = 1e-2f;   // mocap NED velocity variance (m/s)²
+    static constexpr float R_MOCAP_VEL = 1e-4f;   // mocap NED velocity variance (m/s)²
     static constexpr float R_BARO_POS  = 0.5f;    // baro altitude variance (m²) — tune from bench log noise
 
     StateManager();
@@ -83,6 +87,23 @@ private:
     int  _primary;
     bool _initialized;
 
+    // Boot-time heading zero: IMX5 reports an absolute (uncalibrated) heading
+    // that doesn't start at 0 on power-up. Captured once from the first valid
+    // IMX5 quaternion after init() and applied as a constant world-frame yaw
+    // rotation to every subsequent quaternion measurement before fusion, so
+    // the fused attitude (and therefore euler[2]/yaw() everywhere) reads ~0
+    // heading at whatever orientation the vehicle powered on in.
+    //
+    // NOTE: this makes yaw boot-relative, not aligned to the mocap world
+    // frame's N/E axes. PosControl::compute_lean_angles() and the body->NED
+    // velocity rotation in FlightStateMachine::mode_pos_hold() both assume
+    // yaw is the true angle to the mocap frame's North — with this offset
+    // applied, position hold will rotate its corrections by a constant error
+    // equal to whatever heading the vehicle was facing at power-on, unless
+    // the vehicle is always powered on facing the mocap frame's North.
+    bool _yaw_zero_captured;
+    Quat _yaw_offset_q;
+
     // Soft-blended angular rates (weighted by 1/innovation_norm across valid lanes)
     float _blended_p, _blended_q, _blended_r;
 
@@ -103,6 +124,10 @@ private:
     // Lowpass-filtered uvw_dot output (2nd-order Butterworth)
     float _ud_filt, _vd_filt, _wd_filt;
     Biquad2pState _ud_filt_state, _vd_filt_state, _wd_filt_state;
+
+    // Lowpass-filtered u/v/w output (2nd-order Butterworth, post-blend)
+    float _u_filt, _v_filt, _w_filt;
+    Biquad2pState _u_filt_state, _v_filt_state, _w_filt_state;
 
     // Per-lane bias-corrected angular rates (updated each update() call)
     float _lane_p[NUM_LANES], _lane_q[NUM_LANES], _lane_r[NUM_LANES];

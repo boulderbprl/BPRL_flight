@@ -13,6 +13,13 @@ float constrain_float(float v, float lo, float hi)
 float degreesToRadians(float deg) {
     return deg * (M_PI / 180.0);
 }
+
+float wrap_pi(float rad)
+{
+    while (rad > (float)M_PI)  rad -= 2.0f * (float)M_PI;
+    while (rad < -(float)M_PI) rad += 2.0f * (float)M_PI;
+    return rad;
+}
 /* ── Signal processing ───────────────────────────────────────────────────── */
 
 float lowpass_alpha(float fc_hz, float dt_s)

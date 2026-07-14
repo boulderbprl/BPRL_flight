@@ -20,7 +20,7 @@ FlightStateMachine  (400 Hz)
      ├─ -0.33 ≤ FLIGHT_MODE ≤ +0.33 ─► ALT_HOLD                        │
      │    Attitude                                                        │
      │    AltControl::alt_hold_from_stick()                              │
-     │      stick → climb_rate_pid → accel_pid → thrust_out              │
+     │      stick → climb_rate_pid → thrust_out                         │
      │                                                                    │
      └─ FLIGHT_MODE > +0.33  ───► POS_HOLD                              │
           PosControl::NED_update()   (pos error → vel targets)           │
@@ -164,7 +164,7 @@ thrust    = constrain(thr_exp × boost, 0, 1)
 
 The boost compensates for reduced vertical thrust when banked.
 
-### ALT_HOLD cascade — `alt_hold_from_stick()`
+### ALT_HOLD loop — `alt_hold_from_stick()`
 
 ```
 pilot_thr [0,1]
@@ -174,13 +174,17 @@ pilot_thr [0,1]
     │   deadband = 0.05 of half-range
     │   rate_tgt = ±MAX_CLIMB_RATE (3 m/s) outside deadband
     │
-    ▼ climb_rate_pid (rate error → accel_tgt)
-    ▼ accel_pid     (accel error → delta_thr)
+    ▼ climb_rate_pid (rate error → delta_thr)
     │
     thrust_out = constrain(THR_MID − delta_thr, 0, 1)
 ```
 
 `THR_MID = 0.4`. Stick centred → hold current altitude (rate_tgt = 0).
+
+The loop used to cascade through a second, inner acceleration PID fed by
+the differentiated (noisy) body-frame accel estimate. That loop was removed
+because the noise drove throttle changes fast enough to overheat the
+motors — `climb_rate_pid` now commands throttle directly from rate error.
 
 ### POS_HOLD — `alt_hold_from_rate()`
 
@@ -190,8 +194,9 @@ Skips the outer stick-to-rate conversion. Called with the D-axis velocity target
 
 | Loop | Kp | Ki | Kd | D-filter | Imax |
 |---|---|---|---|---|---|
-| Climb rate | 2.0 | 0.5 | 0 | 20 Hz | 2.0 |
-| Accel | 0.05 | 0.01 | 0 | 20 Hz | 0.3 |
+| Climb rate | 0.15 | 0.05 | 0 | 20 Hz | 0.3 |
+
+Starting-point gains only — not yet re-tuned in flight since the accel loop was removed.
 
 ---
 

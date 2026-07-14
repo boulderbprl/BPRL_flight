@@ -21,6 +21,11 @@
  *   3. Snapshot the data and call logger.write(LOG_MSG_*, msg) in LogThread.
  */
 
+/* ── Controller-tuning log (CTUN) ────────────────────────────────────────────
+ * Temporary, gain-tuning-only message. Flip to 0 to strip it out of the
+ * schema header and LogThread writes entirely once tuning is done. */
+#define LOG_CTUN_ENABLED 1
+
 /* ── Message IDs ─────────────────────────────────────────────────────────── */
 constexpr uint8_t LOG_MSG_FMT  = 0x80U;  // schema header — written once at file open
 constexpr uint8_t LOG_MSG_ATT  = 0x09U;  // angular states: attitude + rates + angular accel
@@ -34,6 +39,8 @@ constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of _use_indi)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
+constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
+constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -142,6 +149,37 @@ struct __attribute__((packed)) LogMsgBARO {
 };
 // Format: "QfffB"   Body: 8+3×4+1 = 21 B   Record: 24 B
 
+#if LOG_CTUN_ENABLED
+struct __attribute__((packed)) LogMsgCTUN {
+    uint64_t time_us;
+    float    pos_n_tgt;   // m    outer pos-hold loop N target (shadow — POS_HOLD flies as STABILIZE while tuning)
+    float    pos_n_err;   // m    outer loop N error, target - measured
+    float    pos_e_tgt;   // m    outer pos-hold loop E target (shadow)
+    float    pos_e_err;   // m    outer loop E error
+    float    vel_n_tgt;   // m/s  inner vel loop N target (shadow)
+    float    vel_n_err;   // m/s  inner loop N error, target - measured
+    float    vel_e_tgt;   // m/s  inner vel loop E target (shadow)
+    float    vel_e_err;   // m/s  inner loop E error
+    float    roll_tgt;    // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
+    float    pitch_tgt;   // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
+    float    climb_rate_tgt; // m/s  alt-hold climb rate target (positive = descend), D-axis output of NED_update
+    float    climb_rate_err; // m/s  climb rate error, target - measured (state[W])
+};
+// Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B
+#endif
+
+struct __attribute__((packed)) LogMsgMOCP {
+    uint64_t time_us;
+    float    x;      // m    NED position, raw from VISION_POSITION_ESTIMATE
+    float    y;      // m
+    float    z;      // m
+    float    vx;     // m/s  NED velocity, raw from VISION_SPEED_ESTIMATE
+    float    vy;     // m/s
+    float    vz;     // m/s
+    uint8_t  valid;  // 1 once mocap link is connected and receiving (g_mocap.valid)
+};
+// Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -218,6 +256,25 @@ constexpr LogDef kLogDefs[] = {
       "QfffB",
       "TimeUS,Press,Temp,Alt,Valid",
       sizeof(LogMsgBARO) },
+
+#if LOG_CTUN_ENABLED
+    { LOG_MSG_CTUN,
+      "CTUN",
+      "Qffffffffffff",
+      // labels[] is a fixed 64-byte FMT field (63 usable chars after the null
+      // terminator, see Logger.cpp's LogFmtHdr) — the descriptive names used
+      // in the struct comments above don't fit; strncpy silently truncates
+      // past the limit, which is why UAV Log Viewer previously only showed
+      // fields up to VelETgt. Keep this under 63 chars.
+      "TimeUS,PNT,PNE,PET,PEE,VNT,VNE,VET,VEE,RolT,PitT,ClbT,ClbE",
+      sizeof(LogMsgCTUN) },
+#endif
+
+    { LOG_MSG_MOCP,
+      "MOCP",
+      "QffffffB",
+      "TimeUS,X,Y,Z,VX,VY,VZ,Valid",
+      sizeof(LogMsgMOCP) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

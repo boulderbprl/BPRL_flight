@@ -4,8 +4,10 @@
 #include <algorithm>
 
 AltControl::AltControl()
-    : _climb_rate_pid(2.0f, 0.5f, 0.0f, 2.0f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/5.0f, /*filt_d_hz=*/20.0f)
-    , _accel_pid     (0.05f, 0.01f, 0.0f, 0.3f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/20.0f, /*filt_d_hz=*/20.0f)
+    // TODO: retune now that this loop commands throttle directly instead of
+    // an intermediate accel target — gains below are a conservative starting
+    // point, not a validated tune.
+    : _climb_rate_pid(0.15f, 0.05f, 0.0f, 0.3f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/5.0f, /*filt_d_hz=*/20.0f)
 {}
 
 float AltControl::compute_throttle(float roll, float pitch, float thr_in) const
@@ -31,26 +33,24 @@ float AltControl::stick_to_climb_rate(float pilot_thr) const
     return 0.0f;
 }
 
-float AltControl::run_cascade(float rate_tgt, float vD, float vD_dot)
+float AltControl::run_loop(float rate_tgt, float vD)
 {
-    const float accel_tgt = _climb_rate_pid.update(rate_tgt, vD);
-    // Positive accel_tgt = want to accelerate downward → reduce throttle
-    const float delta_thr = _accel_pid.update(accel_tgt, vD_dot);
+    // Positive delta_thr = want to accelerate downward → reduce throttle
+    const float delta_thr = _climb_rate_pid.update(rate_tgt, vD);
     return constrain_float(THR_MID - delta_thr, 0.0f, 1.0f);
 }
 
-float AltControl::alt_hold_from_stick(float pilot_thr, float vD, float vD_dot)
+float AltControl::alt_hold_from_stick(float pilot_thr, float vD)
 {
-    return run_cascade(stick_to_climb_rate(pilot_thr), vD, vD_dot);
+    return run_loop(stick_to_climb_rate(pilot_thr), vD);
 }
 
-float AltControl::alt_hold_from_rate(float rate_tgt, float vD, float vD_dot)
+float AltControl::alt_hold_from_rate(float rate_tgt, float vD)
 {
-    return run_cascade(rate_tgt, vD, vD_dot);
+    return run_loop(rate_tgt, vD);
 }
 
 void AltControl::reset_all()
 {
     _climb_rate_pid.reset();
-    _accel_pid.reset();
 }

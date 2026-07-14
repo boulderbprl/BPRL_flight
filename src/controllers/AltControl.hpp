@@ -6,21 +6,24 @@
  *
  * compute_throttle(): manual throttle with expo shaping and tilt boost.
  *
- * alt_hold cascade:
+ * alt_hold loop:
  *   stick (pilot_thr [0,1]) → stick_to_climb_rate() → rate_tgt [m/s]
- *       rate error → _climb_rate_pid (target+error filtered @ 5 Hz)  → accel_tgt [m/s²]
- *       accel error → _accel_pid    (target+error filtered @ 20 Hz) → delta_thr
+ *       rate error → _climb_rate_pid (target+error filtered @ 5 Hz) → delta_thr
  *       thr_cmd = constrain(THR_MID - delta_thr, 0, 1)
  *
- * Target/error filter cutoffs match ArduPilot's AC_PosControl defaults
- * (POSCONTROL_VEL_Z_FILT_HZ = 5 Hz, POSCONTROL_ACC_Z_FILT_HZ = 20 Hz).
+ * The former inner acceleration loop (fed by the differentiated, noisy
+ * body-frame accel estimate) has been removed: it drove throttle changes
+ * fast enough to overheat the motors. The climb-rate PID now commands
+ * throttle directly.
+ *
+ * Target/error filter cutoff matches ArduPilot's AC_PosControl default
+ * (POSCONTROL_VEL_Z_FILT_HZ = 5 Hz).
  *
  * Vertical axis uses body-frame W velocity (positive = descend), consistent
  * with the NED D convention used by PosControl (vel_tgt[2] > 0 = descend).
  *
  * Conventions:
  *   vD       current body-frame W velocity [m/s]   (positive = descending)
- *   vD_dot   body-frame W_DOT acceleration [m/s²]  (positive = accelerating down)
  *   rate_tgt climb rate target [m/s]                (positive = descending)
  */
 class AltControl {
@@ -31,20 +34,19 @@ public:
     // AttitudePID/AttitudeINDI.
     float compute_throttle(float roll, float pitch, float thr_in) const;
 
-    // Full cascade: stick → climb rate → accel → throttle (ALT_HOLD mode).
-    float alt_hold_from_stick(float pilot_thr, float vD, float vD_dot);
+    // Full loop: stick → climb rate → throttle (ALT_HOLD mode).
+    float alt_hold_from_stick(float pilot_thr, float vD);
 
-    // Inner two loops only: rate → accel → throttle (POS_HOLD mode).
-    float alt_hold_from_rate(float rate_tgt, float vD, float vD_dot);
+    // Inner loop only: rate → throttle (POS_HOLD mode).
+    float alt_hold_from_rate(float rate_tgt, float vD);
 
     void reset_all();
 
 private:
     float stick_to_climb_rate(float pilot_thr) const;
-    float run_cascade(float rate_tgt, float vD, float vD_dot);
+    float run_loop(float rate_tgt, float vD);
 
-    PID _climb_rate_pid;  // rate error   → accel target [m/s²]
-    PID _accel_pid;       // accel error  → throttle delta
+    PID _climb_rate_pid;  // rate error → throttle delta
 
     static constexpr float THR_MID        = 0.4f;
     static constexpr float MAX_CLIMB_RATE = 3.0f;   // m/s

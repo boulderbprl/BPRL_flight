@@ -53,6 +53,7 @@ extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw tar
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
 extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 

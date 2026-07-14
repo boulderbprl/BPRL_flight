@@ -1,13 +1,14 @@
 #include "PosControl.hpp"
 #include "src/math/math.hpp"
+#include "ch.h"
 #include <cmath>
 
 PosControl::PosControl()
     : _pos_N(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
     , _pos_E(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
     , _pos_D(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
-    , _vel_N(2.0f, 1.0f, 0.500f, 0.0f, 0.0f, 0.0f, 20.0f)
-    , _vel_E(2.0f, 1.0f, 0.500f, 0.0f, 0.0f, 0.0f, 20.0f)
+    , _vel_N(2.0f, 1.0f, 0.500f, 2.0f, 0.0f, 20.0f, 20.0f) // 20 Hz filter on error, 20 Hz filter on derivative
+    , _vel_E(2.0f, 1.0f, 0.500f, 2.0f, 0.0f, 20.0f, 20.0f)
 {}
 
 void PosControl::NED_update(const float state[], const float pos_tgt[3],
@@ -28,10 +29,15 @@ void PosControl::NE_rate_update(const float state[], const float vel_NE_tgt[2],
     const float accel_N_tgt = _vel_N.update(vel_NE_tgt[0], state[6]);
     const float accel_E_tgt = _vel_E.update(vel_NE_tgt[1], state[7]);
 
+    const uint32_t now = now_us();
+    const float dt_s = _lean_filt_valid ? (float)(now - _last_lean_t_us) * 1.0e-6f : 0.0f;
+    _last_lean_t_us  = now;
+    _lean_filt_valid = true;
+
     const float yaw_rad = state[5];
     float roll_tgt  = 0.0f;
     float pitch_tgt = 0.0f;
-    compute_lean_angles(yaw_rad, accel_N_tgt, accel_E_tgt, roll_tgt, pitch_tgt);
+    compute_lean_angles(yaw_rad, accel_N_tgt, accel_E_tgt, dt_s, roll_tgt, pitch_tgt);
 
     att_cmds[0] = constrain_float(roll_tgt,  -degreesToRadians(MAX_LEAN_deg),
                                                degreesToRadians(MAX_LEAN_deg));
@@ -40,18 +46,32 @@ void PosControl::NE_rate_update(const float state[], const float vel_NE_tgt[2],
 }
 
 void PosControl::compute_lean_angles(float yaw_rad, float accel_N_tgt,
-                                     float accel_E_tgt,
+                                     float accel_E_tgt, float dt_s,
                                      float &roll_tgt, float &pitch_tgt)
 {
     const float accel_N_body =  cosf(yaw_rad) * accel_N_tgt + sinf(yaw_rad) * accel_E_tgt;
     const float accel_E_body = -sinf(yaw_rad) * accel_N_tgt + cosf(yaw_rad) * accel_E_tgt;
 
     roll_tgt  = atan2f(-accel_N_body, GRAVITY_MSS);
-    pitch_tgt = atan2f( accel_E_body * cosf(roll_tgt), GRAVITY_MSS);  // fixed: was accel_E_tgt
+    pitch_tgt = atan2f( accel_E_body * cosf(roll_tgt), GRAVITY_MSS);
+
+    // Heavily filter the lean-angle targets (2nd-order, -40 dB/decade) so
+    // stick/velocity-loop noise doesn't chatter into the attitude controller.
+    roll_tgt  = lowpass2p(roll_tgt,  _roll_tgt_filt,  LEAN_FILT_HZ, dt_s);
+    pitch_tgt = lowpass2p(pitch_tgt, _pitch_tgt_filt, LEAN_FILT_HZ, dt_s);
 }
 
 void PosControl::reset_all()
 {
     _pos_N.reset(); _pos_E.reset(); _pos_D.reset();
     _vel_N.reset(); _vel_E.reset();
+
+    _roll_tgt_filt  = Biquad2pState();
+    _pitch_tgt_filt = Biquad2pState();
+    _lean_filt_valid = false;
+}
+
+uint32_t PosControl::now_us()
+{
+    return (uint32_t)TIME_I2US(chVTGetSystemTimeX());
 }

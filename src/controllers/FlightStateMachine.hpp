@@ -31,6 +31,11 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *   -0.33..0.33 → ALT_HOLD (attitude + altitude hold cascade)
  *   > +0.33  → POS_HOLD   (position hold + attitude + altitude hold)
  *
+ * TEMP (CTUN tuning, see CTUN_POSHOLD_SHADOW): while true, POS_HOLD actually
+ * flies hands-off STABILIZE — the pos-hold NE cascade still runs every tick
+ * but only in shadow, feeding get_ctun_diag() for the CTUN log. Flip that
+ * flag to false to restore closed-loop pos-hold flight.
+ *
  * Both AttitudePID and AttitudeINDI run every tick (shadow mode), so INDI's
  * internal controller state stays live and its output is always directly
  * comparable to whichever one actually flew (see get_indi_diag()). Only the
@@ -64,6 +69,13 @@ public:
     // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
     // Always populated from AttitudeINDI, regardless of _use_indi (shadow-mode logging).
     void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
+
+    // TEMP (CTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
+    // vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt,
+    // climb_rate_tgt, climb_rate_err].
+    // Populated by mode_pos_hold's outer pos + inner vel + climb-rate loops
+    // every tick that mode is POS_HOLD, regardless of CTUN_POSHOLD_SHADOW.
+    void get_ctun_diag(float diag[12]) const { memcpy(diag, _ctun_diag, sizeof(_ctun_diag)); }
 
     void reset_all();
 
@@ -104,6 +116,12 @@ private:
     static constexpr float    STICK_DEADBAND = 0.10f; // normalised [-1,1]
     static constexpr float    MAX_VEL_NE     = 5.0f;  // m/s
 
+    // TEMP (CTUN tuning): while true, POS_HOLD flies hands-off like STABILIZE
+    // (direct stick → attitude/throttle) and the pos-hold NE cascade runs
+    // shadow-only, populating _ctun_diag / get_ctun_diag() for CTUN logging.
+    // Flip to false to restore closed-loop pos-hold flight.
+    static constexpr bool CTUN_POSHOLD_SHADOW = true;
+
     // ── Ground-idle state machine ────────────────────────────────────────────
     uint32_t _takeoff_debounce_ticks = 0;
     uint32_t _landed_debounce_ticks  = 0;
@@ -115,7 +133,7 @@ private:
     // climb-rate command centered on a hold-altitude deadband, so intent-to-fly
     // means crossing past that center.
     static constexpr float    TAKEOFF_THR_THRESHOLD_STABILIZE = 0.10f;
-    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.50f;  // ALT_HOLD / POS_HOLD
+    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD ////////////////////change back to 0.5 before re-enabling pso hold
     static constexpr uint32_t TAKEOFF_DEBOUNCE_TICKS = 100;   // 0.25 s @ 400 Hz sustained push
     static constexpr float    LANDED_THR_THRESHOLD   = 0.15f; // commanded thrust considered "at rest"
     static constexpr float    LANDED_VEL_THRESHOLD   = 0.2f;  // m/s, vertical speed considered "at rest"
@@ -129,6 +147,9 @@ private:
 
     // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
     float _indi_diag[8] = {};
+
+    // TEMP (CTUN tuning) — see get_ctun_diag()
+    float _ctun_diag[12] = {};
 
     AttitudePID  _pid;
     AttitudeINDI _indi;
