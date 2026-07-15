@@ -59,6 +59,25 @@ void StateManager::init()
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
+ * Mocap yaw re-anchoring
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+// _yaw_offset_q is a pure world-frame yaw rotation; pre-multiplying raw_q by
+// it shifts raw_q's yaw by the offset's own yaw with no effect on roll/pitch
+// (see the boot-zero capture above, which sets the offset to cancel raw_q's
+// yaw exactly). To land on an arbitrary target yaw instead of zero, the
+// offset's angle just needs to be the delta between the target and raw_q's
+// current yaw.
+void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw_q)
+{
+    float ro, pi, raw_yaw;
+    quat_to_euler(raw_q, ro, pi, raw_yaw);
+
+    const float delta = mocap_yaw_rad - raw_yaw;
+    _yaw_offset_q = { cosf(delta * 0.5f), 0.0f, 0.0f, sinf(delta * 0.5f) };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
  * Main update — called at 500 Hz from StateEstThread
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -92,6 +111,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
             _yaw_offset_q      = { cosf(-ya * 0.5f), 0.0f, 0.0f, sinf(-ya * 0.5f) };
             _yaw_zero_captured = true;
         }
+
+        // Re-anchor to mocap's absolute heading whenever a fresh sample
+        // arrives, so yaw stays aligned to the mocap frame's North instead
+        // of drifting back to the boot-relative zero above.
+        if (mocap.valid && mocap.has_new_yaw)
+            _reoffset_yaw_from_mocap(mocap.yaw, q_meas);
+
         q_meas = quat_norm(quat_mul(_yaw_offset_q, q_meas));
 
         for (int i = 0; i < NUM_LANES; ++i)

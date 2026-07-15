@@ -17,6 +17,9 @@
  *   ch[2] = Pitch (elevator) → [-1, 1]
  *   ch[3] = Yaw (rudder)     → [-1, 1]
  *   ch[4] = Arm switch       → >992 = armed
+ *   ch[6] = Flight mode switch (3-position) → [-1, 1]
+ *   ch[7] = INDI/PID attitude controller switch (3-position) → [-1, 1];
+ *           only the 3rd (highest) position selects INDI, positions 1–2 = PID
  *
  * Both SBUS and CRSF use the same 11-bit value range: 172–1811, centre 992.
  */
@@ -32,3 +35,4 @@ float radio_pitch()       { return -norm_axis(PARSER.channel(2)); }
 float radio_yaw()         { return norm_axis(PARSER.channel(3)); }
 bool  radio_armed()       { return PARSER.channel(4) > 992u;    }
 float radio_flight_mode() { return norm_axis(PARSER.channel(6)); }
+bool  radio_use_indi()    { return norm_axis(PARSER.channel(7)) > 0.33f; }

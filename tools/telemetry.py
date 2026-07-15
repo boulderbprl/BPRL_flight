@@ -24,7 +24,7 @@ from typing import Optional
 
 from bprl_common import (
     console, open_port, add_port_args, SerialReader,
-    TelState, parse_tel_line, flight_mode_name,
+    TelState, parse_tel_line, flight_mode_name, attitude_ctrl_name,
     ImuSample, parse_imu_line,
     EkfLaneState, parse_ekfl_line,
     PosVelState, parse_pos_line,
@@ -53,6 +53,8 @@ def build_telemetry_panel(s: TelState) -> Panel:
     arm_text = Text("● ARMED  ", style="bold red") if s.armed \
                else Text("● DISARMED", style="bold green")
     mode_tag = f"[bold cyan]{flight_mode_name(s.flight_mode)}[/bold cyan]"
+    ctrl_style = "bold magenta" if s.use_indi else "bold yellow"
+    ctrl_tag = f"[{ctrl_style}]{attitude_ctrl_name(s.use_indi)}[/{ctrl_style}]"
     t_sec = s.time_ms / 1000.0
 
     grid = Table.grid(padding=(0, 2))
@@ -105,7 +107,7 @@ def build_telemetry_panel(s: TelState) -> Panel:
     else:
         stale_note = ""
     diag  = f"  [dim]lines_rx={s.lines_rx}[/dim]"
-    title = (f"BPRL Debug  {arm_text}  {mode_tag}    t={t_sec:8.1f} s{stale_note}{diag}")
+    title = (f"BPRL Debug  {arm_text}  {mode_tag}  {ctrl_tag}    t={t_sec:8.1f} s{stale_note}{diag}")
 
     from rich.columns import Columns
     body = Table.grid()

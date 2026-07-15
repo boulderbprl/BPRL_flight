@@ -43,6 +43,13 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *   false → AttitudePID cascade
  *   true  → AttitudeINDI (incremental NDI; roll/pitch INDI, yaw PID)
  *
+ * _use_indi is set every tick by ControlThread from the radio's INDI/PID
+ * switch (channel 7, see radio_use_indi()) via set_use_indi() — it is not a
+ * flight-mode-linked choice, so the pilot can flip attitude controllers in
+ * any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change. Channel 7 is a
+ * 3-position switch; only the 3rd (highest) position selects INDI, the
+ * other two both mean PID.
+ *
  * Output (out_cmds[3], thrust_out) feeds the unchanged MotorMixer.
  */
 class FlightStateMachine {

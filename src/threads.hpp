@@ -31,8 +31,10 @@ struct CANIMURaw {
 struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
+    float yaw;        // NED heading (rad) — absolute, mocap-frame-referenced
     bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
     bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by StateEstThread
+    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
     bool  valid;       // mocap link connected and receiving
 };
 
@@ -56,6 +58,7 @@ extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, de
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+extern bool    g_use_indi;           // attitude controller switch from radio (false=PID, true=INDI)
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602

@@ -44,6 +44,7 @@ float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, de
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+bool    g_use_indi           = false; // attitude controller switch from radio (false=PID, true=INDI)
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -284,6 +285,7 @@ static THD_FUNCTION(StateEstThread, arg)
         mocap_snap = g_mocap;
         g_mocap.has_new_pos = false;
         g_mocap.has_new_vel = false;
+        g_mocap.has_new_yaw = false;
         chMtxUnlock(&mocap_mtx);
 
         BaroRaw baro_snap;
@@ -354,12 +356,16 @@ static THD_FUNCTION(ControlThread, arg)
         float euler[3];
         float input[InputIdx::N_INPUTS];
         bool  armed;
+        bool  use_indi;
         chMtxLock(&state_mtx);
         memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
         memcpy(euler,     g_euler,  sizeof(euler));
         memcpy(input,     g_input,  sizeof(input));
-        armed = g_armed;
+        armed    = g_armed;
+        use_indi = g_use_indi;
         chMtxUnlock(&state_mtx);
+
+        flight_sm.set_use_indi(use_indi);
 
         ESCTelemetry sm_telem[4];
         dshot_get_telemetry(sm_telem);
@@ -417,7 +423,8 @@ static THD_FUNCTION(RadioThread, arg)
         g_input[InputIdx::PITCH_TGT]   = radio_pitch();
         g_input[InputIdx::YAW_RATE]    = radio_yaw();
         g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
-        g_armed = radio_armed();
+        g_armed    = radio_armed();
+        g_use_indi = radio_use_indi();
         chMtxUnlock(&state_mtx);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -879,7 +886,8 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <rc_roll>,<rc_pitch>,<rc_yaw>,<armed>,
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
- *        <flight_mode>          ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+ *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+ *        <use_indi>             ← active attitude controller (0=PID, 1=INDI)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -913,6 +921,7 @@ static THD_FUNCTION(DebugThread, arg)
         int   primary_lane;
         bool  armed;
         int   flight_mode;
+        bool  use_indi;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
         pitch    = g_euler[1];
@@ -932,6 +941,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
         flight_mode = g_flight_mode;
+        use_indi = g_use_indi;
         for (int li = 0; li < 3; ++li) {
             lane_roll[li]  = s_lane_roll[li];
             lane_pitch[li] = s_lane_pitch[li];
@@ -1025,7 +1035,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.3f,%.3f,%.3f,%.3f,%d,"
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
-                "%d\r\n",
+                "%d,%d\r\n",
                 (uint32_t)TIME_I2MS(chVTGetSystemTime()),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
@@ -1038,7 +1048,7 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode);
+                flight_mode, (int)use_indi);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1053,7 +1063,7 @@ static THD_FUNCTION(DebugThread, arg)
          *         <roll0°>,<pitch0°>,<yaw0°>,<p0>,<q0>,<r0>,
          *         <roll1°>,<pitch1°>,<yaw1°>,<p1>,<q1>,<r1>,
          *         <roll2°>,<pitch2°>,<yaw2°>,<p2>,<q2>,<r2>,
-         *         0,0,0,0,0,0          ← IMX5 INS (placeholder)
+         *         <can_roll°>,<can_pitch°>,<can_yaw°>,<can_p>,<can_q>,<can_r>  ← IMX5 INS (raw, from g_can_imu)
          */
         {
             static char ekfl_buf[256];

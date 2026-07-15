@@ -63,8 +63,10 @@ static void handle_vision_position(const mavlink_message_t *msg)
     g_mocap.x           = m.x;
     g_mocap.y           = m.y;
     g_mocap.z           = m.z;
+    g_mocap.yaw         = m.yaw;
     g_mocap.valid       = true;
     g_mocap.has_new_pos = true;
+    g_mocap.has_new_yaw = true;
     chMtxUnlock(&mocap_mtx);
 }
 

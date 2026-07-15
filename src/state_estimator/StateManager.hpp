@@ -95,15 +95,20 @@ private:
     // the fused attitude (and therefore euler[2]/yaw() everywhere) reads ~0
     // heading at whatever orientation the vehicle powered on in.
     //
-    // NOTE: this makes yaw boot-relative, not aligned to the mocap world
-    // frame's N/E axes. PosControl::compute_lean_angles() and the body->NED
-    // velocity rotation in FlightStateMachine::mode_pos_hold() both assume
-    // yaw is the true angle to the mocap frame's North — with this offset
-    // applied, position hold will rotate its corrections by a constant error
-    // equal to whatever heading the vehicle was facing at power-on, unless
-    // the vehicle is always powered on facing the mocap frame's North.
+    // This boot-relative zero is NOT aligned to the mocap world frame's N/E
+    // axes. PosControl::compute_lean_angles() and the body->NED velocity
+    // rotation in FlightStateMachine::mode_pos_hold() both assume yaw is the
+    // true angle to the mocap frame's North, so update() re-anchors
+    // _yaw_offset_q (see _reoffset_yaw_from_mocap()) every time a fresh mocap
+    // yaw arrives (MocapRaw::has_new_yaw), overriding the boot-relative zero
+    // once mocap is connected.
     bool _yaw_zero_captured;
     Quat _yaw_offset_q;
+
+    // Recompute _yaw_offset_q so that rotating `raw_q` (the latest raw IMX5
+    // quaternion, pre-offset) by it yields a fused yaw equal to
+    // `mocap_yaw_rad`. Called from update() whenever mocap.has_new_yaw.
+    void _reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw_q);
 
     // Soft-blended angular rates (weighted by 1/innovation_norm across valid lanes)
     float _blended_p, _blended_q, _blended_r;
