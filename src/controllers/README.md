@@ -8,7 +8,7 @@ Called at 400 Hz from `ControlThread` in `src/threads.cpp`.
 ## Architecture
 
 ```
-RC input[5]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
+RC input[6]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
      │
      ▼
 FlightStateMachine  (400 Hz)
@@ -94,17 +94,19 @@ pitch_tgt [rad] ──► outer P ──► rate_tgt [rad/s] ──► inner PID
 yaw_rate_tgt ───────────────────────────────────────► rate PID  ──► out_cmds[2]
 ```
 
-All derivative terms use a 30 Hz first-order low-pass filter. Integrators are anti-windup clamped to ±0.5.
+Each loop's target/error/derivative filtering matches ArduPilot's `AC_PID` structure (target LPF → error = filtered target − measurement → error LPF → derivative of filtered error → D LPF); the rate loops' target-filter (`FLTT`) and yaw's error-filter (`FLTE`) are set to match `AC_AttitudeControl_Multi`'s actual defaults — see the D-filter/T-filter/E-filter columns below. Integrators are anti-windup clamped to ±0.5.
 
 ### Gains
 
-| Loop | Kp | Ki | Kd | D-filter | Imax |
-|---|---|---|---|---|---|
-| Roll attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
-| Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
-| Roll rate | 0.09 | 0.075 | 0.001 | 30 Hz | 0.5 |
-| Pitch rate | 0.13 | 0.100 | 0.002 | 30 Hz | 0.5 |
-| Yaw rate | 0.18 | 0.018 | 0 | 5 Hz | 0.5 |
+| Loop | Kp | Ki | Kd | T-filter | E-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|---|
+| Roll attitude | 3.50 | 0 | 0 | off | off | 30 Hz | 0.5 |
+| Pitch attitude | 3.50 | 0 | 0 | off | off | 30 Hz | 0.5 |
+| Roll rate | 0.09 | 0.075 | 0.001 | 20 Hz | off | 30 Hz | 0.5 |
+| Pitch rate | 0.13 | 0.100 | 0.002 | 20 Hz | off | 30 Hz | 0.5 |
+| Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 2.5 Hz | 5 Hz | 0.5 |
+
+T-filter/E-filter are the target/error low-pass stages ahead of the derivative (`PID`'s `filt_target_hz`/`filt_error_hz`); "off" means disabled (passthrough), matching ArduPilot's own default for that specific gain (e.g. roll/pitch rate `FLTE=0`, but all rate axes get `FLTT=20Hz`, and yaw alone gets `FLTE=2.5Hz`).
 
 `YAW_STICK_GAIN = 2.5` scales the yaw rate target before the rate PID — not the same constant as `AttitudeINDI::YAW_GAIN` (1.5); see the note in the AttitudeINDI section below.
 
@@ -314,21 +316,29 @@ All motors output 0 when disarmed or when |roll| or |pitch| exceeds ~80°.
 
 ## PID base class (`PID.hpp/.cpp`)
 
-All controllers use the same `PID` class with derivative filtering and anti-windup.
+All controllers use the same `PID` class. Filtering matches ArduPilot's `AC_PID` structure — target and error each get their own optional low-pass stage ahead of the derivative, not just a single D-term filter:
 
 ```cpp
-PID(float kp, float ki, float kd, float imax, float fcut_hz = 30.0f);
-float update(float error);
+PID(float kp, float ki, float kd, float imax,
+    float filt_target_hz = 0.0f, float filt_error_hz = 0.0f, float filt_d_hz = 20.0f);
+float update(float target, float measurement);
 void  reset();
 void  set_gains(float kp, float ki, float kd);
 ```
 
-There is **no explicit `dt` parameter** — `update()` derives it internally from `chVTGetSystemTimeX()` between calls. Two edge cases are handled specially:
+```
+target  --[1st-order LPF @ filt_target_hz]--> target_filt
+error   = target_filt - measurement
+error   --[1st-order LPF @ filt_error_hz]--> error_filt   (feeds P and I)
+derivative of error_filt --[1st-order LPF @ filt_d_hz]--> feeds D
+```
+
+`filt_target_hz`/`filt_error_hz` default to `0` (disabled → passthrough), matching ArduPilot's `FLTT`/`FLTE` default-off behaviour; each `AttitudePID` rate loop overrides these explicitly (see the AttitudePID gains table above). There is **no explicit `dt` parameter** — `update()` derives it internally from `chVTGetSystemTimeX()` between calls. Two edge cases are handled specially:
 
 - **First sample** (`_deriv_valid == false`): returns `kp * error` only (no I or D term), and latches the timestamp — avoids a derivative spike from an undefined previous error.
 - **Stale input** (gap since the last call `> 200 ms`, `STALE_TIMEOUT_US`): calls `reset()` (zeroes the integrator and derivative state) and returns `kp * error` only, same as the first-sample case — protects against a large derivative/integral kick if a caller stops calling `update()` for a while and then resumes.
 
-Derivative is filtered with a first-order IIR at `fcut_hz` (default 30 Hz). The integrator is clamped to `±imax`.
+The integrator is clamped to `±imax`.
 
 ---
 

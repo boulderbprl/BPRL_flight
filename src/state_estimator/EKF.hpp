@@ -114,8 +114,11 @@ private:
     // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
     static constexpr float GRAV_R_VIBE    = 0.25f;  // dimensionless scale
 
-    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 500 Hz
-    static constexpr float GRAV_VIBE_ALPHA = 0.02f;
+    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 800 Hz
+    // (update_gravity() runs once per StateEstThread tick with no dt parameter,
+    // so this is a fixed-rate IIR alpha, not a lowpass_alpha(fc,dt) one — keep
+    // it in sync with StateEstThread's rate in main.cpp if that ever changes.)
+    static constexpr float GRAV_VIBE_ALPHA = 0.0125f;
 
     // ── Mocap position/velocity measurement update parameters ─────────────
     // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is

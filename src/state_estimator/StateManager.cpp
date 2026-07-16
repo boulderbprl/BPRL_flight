@@ -28,7 +28,7 @@ StateManager::StateManager()
       _p_filt(0.0f), _q_filt(0.0f), _r_filt(0.0f),
       _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f),
       _u_filt(0.0f), _v_filt(0.0f), _w_filt(0.0f),
-      _lane_p{}, _lane_q{}, _lane_r{}
+      _lane_p{}, _lane_q{}, _lane_r{}, _lane_weight_filt{}
 {}
 
 void StateManager::init()
@@ -51,9 +51,13 @@ void StateManager::init()
     _u_filt       = _v_filt       = _w_filt       = 0.0f;
     _u_filt_state  = _v_filt_state  = _w_filt_state  = Biquad2pState{};
     _p_filt_state  = _q_filt_state  = _r_filt_state  = Biquad2pState{};
+    _notch_freq_hz = 0.0f;
+    _p_notch_state = _q_notch_state = _r_notch_state = Biquad2pState{};
 
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
+    for (int i = 0; i < NUM_LANES; ++i)
+        _lane_weight_filt[i] = 0.0f;
 
     _initialized = true;
 }
@@ -78,10 +82,10 @@ void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * Main update — called at 500 Hz from StateEstThread
+ * Main update — called at 800 Hz from StateEstThread
  * ══════════════════════════════════════════════════════════════════════════ */
 
-void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro)
+void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us)
 {
     if (!_initialized) return;
 
@@ -99,7 +103,14 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
     // ── 2. IMX5 quaternion update on all lanes (200 Hz, asynchronous) ─────
     // IMX5 quaternion is body→NED (verified: Euler angles match physical attitude).
-    if (can_imu.valid && can_imu.has_new_quat) {
+    // Gated on age rather than fused as if current: a CAN sample older than
+    // STATEMGR_CAN_QUAT_STALE_US is skipped outright (treated as a missed
+    // update, not stale-but-usable); anything younger is forward-propagated
+    // per-lane by its age (using that lane's own bias-corrected gyro) before
+    // fusing, so a few-ms-old quaternion doesn't get fused as if it were
+    // measured at the current instant.
+    const uint32_t quat_age_us = now_us - can_imu.quat_timestamp_us;
+    if (can_imu.valid && can_imu.has_new_quat && quat_age_us <= STATEMGR_CAN_QUAT_STALE_US) {
         Quat q_meas = { can_imu.q0, can_imu.q1, can_imu.q2, can_imu.q3 };
 
         // Capture a boot-time heading-zero offset from the first valid IMX5
@@ -120,18 +131,41 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
         q_meas = quat_norm(quat_mul(_yaw_offset_q, q_meas));
 
-        for (int i = 0; i < NUM_LANES; ++i)
-            _lanes[i].update_quaternion(q_meas, R_QUAT);
+        const float age_s = static_cast<float>(quat_age_us) * 1.0e-6f;
+        for (int i = 0; i < NUM_LANES; ++i) {
+            Quat q_prop = q_meas;
+            if (age_s > 0.0f && imu[i].valid) {
+                const float* st = _lanes[i].state();
+                const float gyro_corr[3] = {
+                    imu[i].gyro[0] - st[iBgx],
+                    imu[i].gyro[1] - st[iBgy],
+                    imu[i].gyro[2] - st[iBgz]
+                };
+                // Same first-order quaternion integration EKF::predict() uses,
+                // just run forward by the measurement's age instead of dt.
+                const Quat dq = { 1.0f, 0.5f*gyro_corr[0]*age_s, 0.5f*gyro_corr[1]*age_s, 0.5f*gyro_corr[2]*age_s };
+                q_prop = quat_norm(quat_mul(q_meas, dq));
+            }
+            _lanes[i].update_quaternion(q_prop, R_QUAT);
+        }
     }
 
     // ── 3. Select primary lane ────────────────────────────────────────────
     _primary = _select_primary();
 
     // ── 4. Compute innovation-norm weights ────────────────────────────────
+    // The raw 1/innovation_norm value is derived from a noisy instantaneous
+    // quantity (especially under vibration), so low-pass it before
+    // renormalizing rather than using it directly every tick — otherwise the
+    // blend ratio itself becomes a fast-changing signal layered on top of
+    // whatever noise the blend is trying to average out.
     float w[NUM_LANES] = {}, w_sum = 0.0f;
+    const float w_alpha = lowpass_alpha(STATEMGR_LP_BLENDW_HZ, dt);
     for (int i = 0; i < NUM_LANES; ++i) {
-        if (!_lanes[i].is_valid()) continue;
-        w[i] = 1.0f / (1e-4f + _lanes[i].innovation_norm());
+        if (!_lanes[i].is_valid()) { _lane_weight_filt[i] = 0.0f; continue; }
+        const float w_raw = 1.0f / (1e-4f + _lanes[i].innovation_norm());
+        _lane_weight_filt[i] = lowpass(w_raw, _lane_weight_filt[i], w_alpha);
+        w[i] = _lane_weight_filt[i];
         w_sum += w[i];
     }
     if (w_sum > 1e-10f) {
@@ -163,7 +197,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // ── 5.6. Barometric altitude fusion (all lanes, when available) ────────
     // Gated on has_new the same way mocap pos/vel are — avoids re-fusing a
     // stale sample on ticks where SPIThread hasn't completed a new P+T pair
-    // (baro updates at ~100+ Hz into a 500 Hz EKF loop).
+    // (baro updates at ~100+ Hz into an 800 Hz EKF loop).
     //
     // Suppressed while mocap is connected — mocap directly measures a more
     // accurate absolute position, and baro's boot-time zero reference isn't
@@ -218,8 +252,11 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _blended_q += w[i] * lq;
         _blended_r += w[i] * lr;
     }
-    if (can_imu.valid) {
-        // IMX5 p/q/r blending
+    // IMX5 p/q/r blending — skipped when the CAN rate sample is older than
+    // STATEMGR_CAN_RATES_STALE_US rather than blended in as if current; a
+    // stale held rate wouldn't reduce noise, only inject a delayed value.
+    const uint32_t rates_age_us = now_us - can_imu.rates_timestamp_us;
+    if (can_imu.valid && rates_age_us <= STATEMGR_CAN_RATES_STALE_US) {
         _blended_p = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_p + STATEMGR_IMX5_RATE_WEIGHT*can_imu.p;
         _blended_q = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_q + STATEMGR_IMX5_RATE_WEIGHT*can_imu.q;
         _blended_r = (1.0f-STATEMGR_IMX5_RATE_WEIGHT)*_blended_r + STATEMGR_IMX5_RATE_WEIGHT*can_imu.r;
@@ -261,14 +298,21 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _vd_filt = lowpass2p(_blended_vd, _vd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
     _wd_filt = lowpass2p(_blended_wd, _wd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
 
-    // ── 8. Lowpass the blended rates themselves before they reach the rate
-    // PID — rejects vibration-band noise that would otherwise pass through unfiltered.
-    // 2nd-order Butterworth (12 dB/octave) — steeper rolloff than a 1-pole filter
-    // at the same cutoff, matching ArduPilot's INS-level gyro filter. Yaw (r)
-    // gets a heavier cutoff than roll/pitch (p/q).
-    _p_filt = lowpass2p(_blended_p, _p_filt_state, STATEMGR_LP_PQ_HZ, dt);
-    _q_filt = lowpass2p(_blended_q, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);
-    _r_filt = lowpass2p(_blended_r, _r_filt_state, STATEMGR_LP_R_HZ, dt);
+    // ── 8. Notch out motor vibration, then lowpass the blended rates before
+    // they reach the rate PID — rejects vibration-band noise that would
+    // otherwise pass through unfiltered. Notch first, LPF last, matching
+    // ArduPilot's order (apply the low-pass last "to attenuate any notch
+    // induced noise"). 2nd-order Butterworth LPF (12 dB/octave) — steeper
+    // rolloff than a 1-pole filter at the same cutoff, matching ArduPilot's
+    // INS-level gyro filter. Yaw (r) gets a heavier cutoff than roll/pitch (p/q).
+    _update_notch_freq(rpm);
+    const float p_notched = notch(_blended_p, _p_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
+    const float q_notched = notch(_blended_q, _q_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
+    const float r_notched = notch(_blended_r, _r_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
+
+    _p_filt = lowpass2p(p_notched, _p_filt_state, STATEMGR_LP_PQ_HZ, dt);
+    _q_filt = lowpass2p(q_notched, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);
+    _r_filt = lowpass2p(r_notched, _r_filt_state, STATEMGR_LP_R_HZ, dt);
 
     // ── 9. Angular acceleration: differentiate the filtered rates + lowpass ─
     const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
@@ -299,6 +343,34 @@ int StateManager::_select_primary() const
         }
     }
     return best;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * Motor vibration notch — center frequency tracking
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+void StateManager::_update_notch_freq(const uint32_t rpm[4])
+{
+    uint32_t sum = 0;
+    int      n   = 0;
+    for (int i = 0; i < 4; ++i) {
+        if (rpm[i] > 0) { sum += rpm[i]; ++n; }
+    }
+    const float target_hz = (n > 0)
+        ? (static_cast<float>(sum) / static_cast<float>(n)) / 60.0f  // mean RPM -> Hz
+        : 0.0f;
+
+    // Jump straight to/from disabled rather than slew-limiting through it —
+    // notch() re-arms its biquad state from a clean zero whenever the center
+    // frequency is <= 0, so there's no filter transient risk either way.
+    if (_notch_freq_hz <= 0.0f || target_hz <= 0.0f) {
+        _notch_freq_hz = target_hz;
+        return;
+    }
+
+    const float max_step = _notch_freq_hz * STATEMGR_NOTCH_MAX_SLEW_FRAC;
+    const float delta    = constrain_float(target_hz - _notch_freq_hz, -max_step, max_step);
+    _notch_freq_hz += delta;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

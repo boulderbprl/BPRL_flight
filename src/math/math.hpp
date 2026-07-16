@@ -42,8 +42,32 @@ struct Biquad2pState {
 // lowpass_alpha()). fc_hz <= 0 disables filtering (returns input unchanged).
 float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s);
 
+// Second-order notch (RBJ biquad form), tracking a moving center frequency —
+// e.g. a motor's blade-pass frequency. Reuses Biquad2pState for delay memory,
+// same direct-form-II structure as lowpass2p(). bandwidth_hz sets notch width
+// (Q = center_hz/bandwidth_hz); coefficients are recomputed fresh every call
+// from center_hz/dt_s, so the caller drives frequency tracking (and should
+// slew-limit center_hz itself between calls to avoid a filter transient on a
+// sudden frequency jump). center_hz <= 0 or bandwidth_hz <= 0 disables
+// filtering (returns input unchanged).
+float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_hz, float dt_s);
+
 // Backward-difference numerical derivative
 float derivative(float current, float prev, float dt_s);
+
+// State for rpm_gate() below.
+struct RpmGateState {
+    uint32_t last_good  = 0;
+    bool     seen_valid = false;
+};
+
+// RPM plausibility gate: motors never legitimately report spinning below
+// ~100 RPM while armed, so a reading below that threshold — after having
+// once seen a real (>100 RPM) reading — is treated as a missed telemetry
+// frame rather than a real drop to near-zero, and the last good value is
+// held instead. Before the first >100 RPM reading (pre-spool-up / disarmed),
+// raw_rpm is returned unchanged since there's nothing valid to hold yet.
+uint32_t rpm_gate(RpmGateState& state, uint32_t raw_rpm);
 
 // Trapezoidal integration (stateless helper — caller owns the accumulator)
 float integrate(float value, float dt_s);

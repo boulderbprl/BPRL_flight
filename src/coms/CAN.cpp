@@ -191,13 +191,15 @@ static void imx5_can_cb(const CANRxFrame &f, void *ctx)
         g_can_imu.q1 = le16s(&f.data8[2]) * (1.0f / 10000.0f);  // X
         g_can_imu.q2 = le16s(&f.data8[4]) * (1.0f / 10000.0f);  // Y
         g_can_imu.q3 = le16s(&f.data8[6]) * (1.0f / 10000.0f);  // Z
-        g_can_imu.has_new_quat = true;
+        g_can_imu.has_new_quat     = true;
+        g_can_imu.quat_timestamp_us = TIME_I2US(chVTGetSystemTimeX());
         g_can_imu.valid        = true;
         break;
     case 0x02:
         g_can_imu.p  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
         g_can_imu.ax = le16s(&f.data8[2]) * (1.0f / 100.0f);
-        g_can_imu.has_new_rates = true;
+        g_can_imu.has_new_rates      = true;
+        g_can_imu.rates_timestamp_us = TIME_I2US(chVTGetSystemTimeX());
         g_can_imu.valid         = true;
         break;
     case 0x03:

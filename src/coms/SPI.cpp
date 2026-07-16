@@ -5,8 +5,11 @@
  *   SPI1 = PLL1_Q = 50 MHz   (STM32_SPI123SEL_PLL1_Q_CK, DIVQ=16)
  *   SPI4 = PCLK2  = 100 MHz  (STM32_SPI45SEL_PCLK2,  D2PPRE2=/2)
  *
- * ICM-45686 (SPI1): MODE0 (CPOL=0, CPHA=0).  Init ~781 kHz, fast 6.25 MHz.
- * ICM-42688 (SPI4): MODE3 (CPOL=1, CPHA=1).  Init ~781 kHz, fast 6.25 MHz.
+ * All three IMU slots on this board are ICM-45686, MODE0 (CPOL=0, CPHA=0):
+ *   SPI1 (imu1):  init ~781 kHz, fast 6.25 MHz.
+ *   SPI4 (imu2/3): init ~781 kHz, fast 6.25 MHz.
+ * (ICM-42688 needs MODE3 (CPOL=1, CPHA=1) — only relevant on hardware
+ * variants that actually populate imu2/3 with that part; see SPI.hpp.)
  *
  * SPIConfig v1 field order: {circular, end_cb, ssport, sspad, cfg1, cfg2,
  *                            dummytx, dummyrx}

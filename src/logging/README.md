@@ -69,7 +69,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 |----|------|--------|
 | 0x09 | ATT  | time_us, roll, pitch, yaw, p, q, r, p_dot, q_dot, r_dot |
 | 0x0A | LIN  | time_us, x, y, z, u, v, w, u_dot, v_dot, w_dot |
-| 0x05 | RCIN | time_us, roll_stk, pitch_stk, yaw_stk, thr_stk, flight_mode, armed |
+| 0x05 | RCIN | time_us, roll_stk, pitch_stk, yaw_stk, thr_stk, flight_mode, indi_stk, armed |
 | 0x06 | OUTP | time_us, roll_tq, pitch_tq, yaw_tq, throttle |
 | 0x07 | RPMS | time_us, rpm0–rpm3 |
 | 0x08 | STRN | time_us, s0–s3, valid |
@@ -78,6 +78,8 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
 
 No message carries a rate field — every one logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
+
+Each `kLogDefs[]` entry's `name`/`fmt`/`labels` strings must fit the FMT record's fixed fields (`name` ≤4 chars, `fmt` ≤15, `labels` ≤63 — one byte short of the declared 4/16/64-byte fields since `strncpy` reserves a byte for the null terminator). A `static_assert` right after the table checks every entry at build time, so an over-length string fails the build instead of being silently truncated by `strncpy` at runtime (which happened once before the check existed).
 
 ## Robustness
 

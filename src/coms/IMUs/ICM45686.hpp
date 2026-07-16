@@ -5,7 +5,9 @@
  * Driver for TDK/InvenSense ICM-45686 (6-DOF accel/gyro, SPI Mode 0).
  * On CubeOrangePlus FMUv5x: SPI1, CS = PG1 (ICM45686_CS).   instance 2
  *
- * Uses FIFO-based data output (16 bytes per packet).
+ * Uses FIFO-based data output (16 bytes per packet) at a ~3.2kHz fast-sampling
+ * ODR — read() drains and averages every packet queued since the last call,
+ * so the 1kHz caller gets a decimated/averaged sample, not an aliased one.
  * Call init() once from spi_drv_init() (inside SPIThread).
  * Call read() every SPIThread tick (1 kHz); returns false when FIFO is empty.
  */
