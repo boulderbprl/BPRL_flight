@@ -4,6 +4,7 @@
  * Build:   make BOARD=CubeBlueH7          (or CubeOrangePlus)
  * Flash:   make flash BOARD=CubeBlueH7  PORT=/dev/ttyACM0
  * Debug:   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
+ * Timing:  make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING   (see src/diagnostics/ThreadTiming.hpp)
  *
  * ── What lives where ────────────────────────────────────────────────────────
  *
@@ -90,7 +91,7 @@ int main(void)
      * ══════════════════════════════════════════════════════════════════════ */
     static const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
-        /* .est     = */ TIME_US2I(2000),
+        /* .est     = */ TIME_US2I(1600),  // TEMP BISECTION TEST (uncommitted): 625 Hz (16 ticks at the 100us/10kHz system tick — nearest achievable above 600 Hz) — was 1700 (~588 Hz), 2500 (400 Hz), 2000 (500 Hz), originally 1250 (800 Hz)
         /* .i2c     = */ TIME_US2I(2000),  // 500 Hz — matches Teensy ADC sample rate
         /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),

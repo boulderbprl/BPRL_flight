@@ -234,7 +234,7 @@ void EKF::update_gravity(const float accel[3], float R_var)
 
     // ── Vibration filter: IIR estimate of (|a|-g)² ────────────────────────
     // Mirrors ArduPilot's velDotNEDfilt = velDotNED*α + filt*(1-α).
-    // Time constant τ ≈ 1/GRAV_VIBE_ALPHA steps = 50 updates = 0.1 s at 500 Hz.
+    // Time constant τ ≈ 1/GRAV_VIBE_ALPHA steps = 80 updates = 0.1 s at 800 Hz.
     float dev = norm - GRAVITY;
     _vibe_filt = GRAV_VIBE_ALPHA * (dev * dev) + (1.0f - GRAV_VIBE_ALPHA) * _vibe_filt;
 

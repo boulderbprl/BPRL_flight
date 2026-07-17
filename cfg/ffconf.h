@@ -14,7 +14,7 @@
 #define FF_USE_FIND         0
 #define FF_USE_MKFS         0       /* No f_mkfs — card pre-formatted FAT32 */
 #define FF_USE_FASTSEEK     0
-#define FF_USE_EXPAND       0
+#define FF_USE_EXPAND       1       /* f_expand — pre-allocate log file contiguously (see Logger::init) */
 #define FF_USE_CHMOD        0
 #define FF_USE_LABEL        0
 #define FF_USE_FORWARD      0

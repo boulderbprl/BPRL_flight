@@ -3,7 +3,11 @@
 
 /*
  * Driver for TDK/InvenSense ICM-42688-P (6-DOF accel/gyro, SPI Mode 3).
- * On CubeOrangePlus FMUv5x: SPI4, two instances:
+ *
+ * Not instantiated on this board's SPI.cpp — this board populates all three
+ * IMU slots with ICM-45686 instead. This driver exists to support the other
+ * CubeOrangePlus hardware variant, which populates imu2/imu3 (SPI4) with
+ * ICM-42688 rather than ICM-45686 (see SPI.hpp). On that variant:
  *   imu2 — CS = PC15 (ACCEL_EXT_CS)   instance 0
  *   imu3 — CS = PC13 (GYRO_EXT_CS)    instance 1
  *

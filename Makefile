@@ -11,6 +11,11 @@
 #   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
 #   (Disable before flight — adds a 10 Hz print thread)
 #
+# Thread timing / CPU utilization instrumentation (schedulability testing):
+#   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING
+#   (Testing/bench only — query over USB with "TIM,status" / "TIM,reset".
+#   Zero-cost when the flag is absent; see src/diagnostics/ThreadTiming.hpp)
+#
 
 ##############################################################################
 # Board selection
@@ -41,7 +46,7 @@ OPENOCD_CFG     := -f interface/stlink.cfg -f target/stm32h7x.cfg
 #
 
 ifeq ($(USE_OPT),)
-  USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16
+  USE_OPT = -O3 -ggdb -fomit-frame-pointer -falign-functions=16
 endif
 
 ifeq ($(USE_COPT),)
@@ -165,7 +170,8 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/CRSF.cpp \
          src/coms/MAVLink.cpp \
          src/usb_serial.cpp \
-         src/logging/Logger.cpp
+         src/logging/Logger.cpp \
+         src/diagnostics/ThreadTiming.cpp
 
 ASMSRC  = $(ALLASMSRC)
 ASMXSRC = $(ALLXASMSRC)

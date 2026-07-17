@@ -35,6 +35,8 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
 | `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the **default** interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the override |
 
+`imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).
+
 ### Adding a device
 
 ```cpp
@@ -95,15 +97,15 @@ Two SPI buses drive the three on-board IMUs plus the barometer.
 | Bus | Peripheral | CS pin | Device | Role |
 |---|---|---|---|---|
 | SPI1 | SPID1 | PG1  | ICM-45686 | Primary IMU (`imu1`) |
-| SPI4 | SPID4 | PC15 | ICM-42688 (probed/read as ICM-45686) | External IMU (`imu2`) |
-| SPI4 | SPID4 | PC13 | ICM-42688 (probed/read as ICM-45686) | Backup IMU (`imu3`) |
+| SPI4 | SPID4 | PC15 | ICM-45686 | External IMU (`imu2`) |
+| SPI4 | SPID4 | PC13 | ICM-45686 | Backup IMU (`imu3`) |
 | SPI1 | SPID1 | PD7  | MS5611 | Barometer (`baro1`) |
 
-All three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `imu2`/`imu3` are physically ICM-42688 chips, but that driver reads them too because the two parts share a compatible WHOAMI/register/FIFO layout at the settings used here. The separate `ICM42688.hpp/.cpp` class exists in the tree but is never instantiated (dead code), as are the older `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` classes from an earlier hardware revision.
+All three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — confirmed all three slots on this board are physically populated with ICM-45686 (each passes its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 — the separate `ICM42688.hpp/.cpp` class exists in the tree to support that variant (not instantiated here since this board doesn't have that part on those slots), while `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` are genuinely unused, leftover from an earlier (CubeBlueH7-class) hardware revision.
 
 `spi_drv_init()` must run inside `SPIThread` (power-on/reset sequences use `chThdSleepMilliseconds`). `imu2`/`imu3` share SPI4, and `imu1`/`baro1` share SPI1, each with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
 
-SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider). The IMU driver uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
+SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider). The IMU driver runs the chip at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
 
 ---
 
@@ -126,7 +128,7 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
-`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()` return normalized RC channel values. `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation. `radio_use_indi()` is `radio_indi() > 0.33f` — a thresholded bool built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection.
 
 Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
 

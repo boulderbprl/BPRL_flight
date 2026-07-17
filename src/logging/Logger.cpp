@@ -102,6 +102,17 @@ bool Logger::init()
         return false;
     }
 
+    // Reserve a contiguous cluster chain now, while a stall is harmless (motors
+    // aren't spinning yet), instead of letting f_write() grow the FAT chain
+    // incrementally during flight. Must run before any write — f_expand()
+    // requires an empty (objsize == 0) file. Best-effort: if the card can't
+    // offer a contiguous PRE_ALLOC_SIZE run (e.g. a fragmented/nearly-full
+    // card), logging still works via FatFS's normal incremental growth, just
+    // with the periodic FAT-write stalls this was meant to avoid — check
+    // expand_err() (surfaced via "LOG,status" over USB) rather than assuming
+    // pre-allocation actually happened.
+    _expand_err = (uint8_t)f_expand(&s_file, PRE_ALLOC_SIZE, 1);
+
     _last_init_err = 5;
     _open = true;
     strncpy(_current_path, path, sizeof(_current_path) - 1);
@@ -137,6 +148,10 @@ void Logger::close()
 {
     if (!_open) return;
     flush();
+    // Shrink the file from the f_expand()-reserved 128 MB back to the actual
+    // bytes written (f_truncate() cuts at the current write position, which
+    // is exactly the real logged size since s_file is never seeked).
+    f_truncate(&s_file);
     f_sync(&s_file);
     f_close(&s_file);
     f_mount(nullptr, "/", 0);

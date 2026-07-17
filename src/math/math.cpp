@@ -69,6 +69,52 @@ float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)
     return output;
 }
 
+NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s)
+{
+    if (center_hz <= 0.0f || bandwidth_hz <= 0.0f || dt_s <= 0.0f) {
+        return NotchCoeffs{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
+    }
+
+    const float sample_freq = 1.0f / dt_s;
+    const float f0 = fminf(center_hz, sample_freq * 0.48f);  // stay under Nyquist
+    const float Q  = f0 / bandwidth_hz;
+
+    const float w0    = 6.2831853f * f0 / sample_freq;
+    const float alpha = sinf(w0) / (2.0f * Q);
+    const float cosw0 = cosf(w0);
+
+    const float a0_inv = 1.0f / (1.0f + alpha);
+    NotchCoeffs c;
+    c.b0 =  a0_inv;
+    c.b1 = -2.0f * cosw0 * a0_inv;
+    c.b2 =  a0_inv;
+    c.a1 = -2.0f * cosw0 * a0_inv;
+    c.a2 = (1.0f - alpha) * a0_inv;
+    c.enabled = true;
+    return c;
+}
+
+float notch_apply(float input, Biquad2pState& state, const NotchCoeffs& coeffs)
+{
+    if (!coeffs.enabled) {
+        state.initialised = false;  // re-arm a clean start if the notch re-enables later
+        return input;
+    }
+
+    if (!state.initialised) {
+        state.delay1 = state.delay2 = 0.0f;
+        state.initialised = true;
+    }
+
+    const float delay0 = input - state.delay1 * coeffs.a1 - state.delay2 * coeffs.a2;
+    const float output = delay0 * coeffs.b0 + state.delay1 * coeffs.b1 + state.delay2 * coeffs.b2;
+
+    state.delay2 = state.delay1;
+    state.delay1 = delay0;
+
+    return output;
+}
+
 float derivative(float current, float prev, float dt_s)
 {
     return (current - prev) / dt_s;
@@ -77,6 +123,21 @@ float derivative(float current, float prev, float dt_s)
 float integrate(float value, float dt_s)
 {
     return value * dt_s;
+}
+
+uint32_t rpm_gate(RpmGateState& state, uint32_t raw_rpm)
+{
+    static constexpr uint32_t RPM_VALID_THRESHOLD = 100;
+
+    if (raw_rpm > RPM_VALID_THRESHOLD) {
+        state.seen_valid = true;
+        state.last_good  = raw_rpm;
+        return raw_rpm;
+    }
+    if (state.seen_valid) {
+        return state.last_good;
+    }
+    return raw_rpm;
 }
 
 /* ── 3-vector helpers ────────────────────────────────────────────────────── */
