@@ -1,6 +1,6 @@
 /*
  * boards/CubeOrangePlus/board.c
- * CubeOrange+ — STM32H743ZI board-level initialisation
+ * CubeOrange+ — STM32H757ZI board-level initialisation
  *
  * Identical PCB to CubeBlue H7 (FMUv5x); only the MCU variant differs.
  */

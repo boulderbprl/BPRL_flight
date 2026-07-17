@@ -1,9 +1,18 @@
 /*
  * boards/CubeOrangePlus/board.h
- * CubeOrange+ — STM32H743ZI, FMUv5x hardware
+ * CubeOrange+ — STM32H757ZI, FMUv5x hardware
  *
  * Identical pin assignments to CubeBlue H7 (same PCB).
- * Only the MCU variant differs: H743 vs H753.
+ * Only the MCU variant differs: H757 vs H753.
+ *
+ * H757 is the dual-core (M7+M4) part; the M4 core is never released from
+ * reset and is unused by this firmware — the M7-side peripheral map,
+ * clock tree, and vector table are identical to the single-core H743/H753.
+ *
+ * The dual-core CMSIS header requires -DCORE_CM7 (set in the top-level
+ * Makefile) to select the M7-side view of the register set; without it
+ * stm32h757xx.h fails to compile (matches ArduPilot's own hwdef.dat,
+ * which sets "define CORE_CM7" for this board).
  */
 
 #ifndef BOARD_H
@@ -11,7 +20,7 @@
 
 /* ── Board identity ────────────────────────────────────────────────────────── */
 #define BOARD_NAME              "CubeOrange+"
-#define BOARD_MCU               "STM32H743ZI"
+#define BOARD_MCU               "STM32H757ZI"
 
 /* ── External crystal ──────────────────────────────────────────────────────── */
 #define STM32_LSECLK            32768U

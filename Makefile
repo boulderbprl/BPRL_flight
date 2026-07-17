@@ -28,7 +28,7 @@ BOARDDIR := boards/$(BOARD)
 ifeq ($(BOARD), CubeBlueH7)
   BOARD_UDEFS = -DSTM32H753xx -DSTM32_ENFORCE_H7_REV_XY
 else ifeq ($(BOARD), CubeOrangePlus)
-  BOARD_UDEFS = -DSTM32H743xx
+  BOARD_UDEFS = -DSTM32H757xx -DCORE_CM7
 else
   $(error Unknown BOARD="$(BOARD)". Valid values: CubeBlueH7, CubeOrangePlus)
 endif
