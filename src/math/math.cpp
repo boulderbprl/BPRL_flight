@@ -76,7 +76,18 @@ NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s)
     }
 
     const float sample_freq = 1.0f / dt_s;
-    const float f0 = fminf(center_hz, sample_freq * 0.48f);  // stay under Nyquist
+
+    // Disable rather than clamp once the tracked frequency reaches Nyquist —
+    // see NOTCH_NYQUIST_CUTOFF's comment in math.hpp. A high-KV motor at
+    // >18000 RPM (300 Hz fundamental) can walk past a low EKF sample rate's
+    // Nyquist frequency; clamping f0 to the cutoff would keep notching a
+    // frequency well below the actual vibration, filtering the wrong band
+    // for no benefit while doing nothing about the real one.
+    if (center_hz >= sample_freq * NOTCH_NYQUIST_CUTOFF) {
+        return NotchCoeffs{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
+    }
+
+    const float f0 = center_hz;
     const float Q  = f0 / bandwidth_hz;
 
     const float w0    = 6.2831853f * f0 / sample_freq;

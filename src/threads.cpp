@@ -270,7 +270,7 @@ static THD_FUNCTION(StateEstThread, arg)
 
     // Ticks since last IMX5 quaternion — clears valid after CAN_TIMEOUT_TICKS.
     uint32_t can_stale_ticks = 0;
-    static constexpr uint32_t CAN_TIMEOUT_TICKS = 625;  // TEMP BISECTION TEST (uncommitted): 1 s at 625 Hz — was 588 (~588 Hz), 400 (400 Hz), 500 (500 Hz), originally 800 (800 Hz)
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 625;  // 1 s at 625 Hz
 
     const int tid = TIMING_REGISTER("est", period);
 
@@ -1507,7 +1507,7 @@ void threads_start(const ThreadRates &rates)
     // Priority ordering (highest first):
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
-    //   StateEstThread  +25  800 Hz EKF
+    //   StateEstThread  +25  625 Hz EKF
     //   ControlThread   +22  400 Hz PID/mixer/DShot
     //   I2CThread       +20  500 Hz aux-sensor polling
     //   RadioThread     +10  100 Hz RC input

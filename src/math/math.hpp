@@ -50,13 +50,23 @@ float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s);
 
 struct NotchCoeffs {
     float b0, b1, b2, a1, a2;
-    bool  enabled;  // false when disabled (center_hz <= 0 or bandwidth_hz <= 0 or dt_s <= 0)
+    bool  enabled;  // false when disabled: center_hz <= 0, bandwidth_hz <= 0, dt_s <= 0,
+                    // or center_hz >= NOTCH_NYQUIST_CUTOFF * (1/dt_s) (see notch_coeffs())
 };
 
 // bandwidth_hz sets notch width (Q = center_hz/bandwidth_hz); coefficients
 // are recomputed fresh every call from center_hz/dt_s, so the caller drives
 // frequency tracking (and should slew-limit center_hz itself between calls
 // to avoid a filter transient on a sudden frequency jump).
+//
+// Matches ArduPilot's HarmonicNotchFilter::set_center_frequency(): once
+// center_hz reaches NOTCH_NYQUIST_CUTOFF (0.48) of the sample rate, the
+// notch is disabled outright rather than clamped to the cutoff — clamping
+// would keep notching at the wrong (stale) frequency once the real one has
+// walked past Nyquist, which is worse than passing the signal through
+// unfiltered. Re-enables automatically once center_hz drops back below the
+// cutoff on a later call.
+static constexpr float NOTCH_NYQUIST_CUTOFF = 0.48f;
 NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s);
 
 // Applies pre-computed notch coefficients to one axis's delay memory (same

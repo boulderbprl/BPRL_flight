@@ -86,7 +86,7 @@ public:
 
     void init();
 
-    // Call once per StateEstThread tick (800 Hz).
+    // Call once per StateEstThread tick (625 Hz).
     // dt: loop period in seconds.
     // imu: snapshot of g_imu[3] (taken under imu_mtx before this call).
     // can_imu: snapshot of g_can_imu (taken under can_imu_mtx before this call).

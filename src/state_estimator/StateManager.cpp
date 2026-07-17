@@ -82,7 +82,7 @@ void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * Main update — called at 800 Hz from StateEstThread
+ * Main update — called at 625 Hz from StateEstThread
  * ══════════════════════════════════════════════════════════════════════════ */
 
 void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us)
@@ -197,7 +197,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // ── 5.6. Barometric altitude fusion (all lanes, when available) ────────
     // Gated on has_new the same way mocap pos/vel are — avoids re-fusing a
     // stale sample on ticks where SPIThread hasn't completed a new P+T pair
-    // (baro updates at ~100+ Hz into an 800 Hz EKF loop).
+    // (baro updates at ~100+ Hz into a 625 Hz EKF loop).
     //
     // Suppressed while mocap is connected — mocap directly measures a more
     // accurate absolute position, and baro's boot-time zero reference isn't
