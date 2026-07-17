@@ -33,7 +33,7 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the **default** interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the override |
+| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
 
 `imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).
 
@@ -115,7 +115,7 @@ SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-d
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Current use: strain rate sensor's I2C **fallback** interface only (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C` override — CAN is the default; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
+Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
 
 ### Adding a device
 
