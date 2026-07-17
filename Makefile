@@ -2,17 +2,18 @@
 # BPRL Flight Controller — ChibiOS Makefile
 #
 # Usage:
-#   make BOARD=CubeBlueH7          (default)
-#   make BOARD=CubeOrangePlus
-#   make flash  BOARD=CubeBlueH7   PORT=/dev/ttyACM0   (Cube bootloader)
-#   make flash-stlink BOARD=CubeBlueH7                  (ST-Link / OpenOCD)
+#   make                            (default: BOARD=orange, plain flight build)
+#   make BOARD=orange               (CubeOrangePlus, default)
+#   make BOARD=blue                 (CubeBlueH7)
+#   make flash  BOARD=blue   PORT=/dev/ttyACM0   (Cube bootloader)
+#   make flash-stlink BOARD=blue                  (ST-Link / OpenOCD)
 #
 # Debug UART (USART3 @ 115200, Telem1 connector):
-#   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
+#   make BOARD=blue UDEFS_EXTRA=-DBPRL_DEBUG
 #   (Disable before flight — adds a 10 Hz print thread)
 #
 # Thread timing / CPU utilization instrumentation (schedulability testing):
-#   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING
+#   make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING
 #   (Testing/bench only — query over USB with "TIM,status" / "TIM,reset".
 #   Zero-cost when the flag is absent; see src/diagnostics/ThreadTiming.hpp)
 #
@@ -20,18 +21,23 @@
 ##############################################################################
 # Board selection
 #
+# BOARD is the short user-facing name (blue/orange); BOARD_FULL maps it to
+# the boards/<dir> and internal board name used everywhere else (linker
+# scripts, board.h BOARD_NAME, etc.) — that internal naming is unchanged.
 
-BOARD ?= CubeBlueH7
+BOARD ?= orange
 
-BOARDDIR := boards/$(BOARD)
-
-ifeq ($(BOARD), CubeBlueH7)
-  BOARD_UDEFS = -DSTM32H753xx -DSTM32_ENFORCE_H7_REV_XY
-else ifeq ($(BOARD), CubeOrangePlus)
-  BOARD_UDEFS = -DSTM32H757xx -DCORE_CM7
+ifeq ($(BOARD), blue)
+  BOARD_FULL  = CubeBlueH7
+  BOARD_UDEFS = -DSTM32H753xx -DSTM32_ENFORCE_H7_REV_XY -DBPRL_BOARD_CUBEBLUE
+else ifeq ($(BOARD), orange)
+  BOARD_FULL  = CubeOrangePlus
+  BOARD_UDEFS = -DSTM32H757xx -DCORE_CM7 -DBPRL_BOARD_CUBEORANGEPLUS
 else
-  $(error Unknown BOARD="$(BOARD)". Valid values: CubeBlueH7, CubeOrangePlus)
+  $(error Unknown BOARD="$(BOARD)". Valid values: blue, orange)
 endif
+
+BOARDDIR := boards/$(BOARD_FULL)
 
 ##############################################################################
 # Flash / upload targets  (defined after 'all' so bare 'make' builds only)
@@ -127,9 +133,9 @@ include $(CHIBIOS)/os/various/fatfs_bindings/fatfs.mk
 # CubeBlueH7: same flash layout as the generic ChibiOS script (org=0x08000000,
 # no bootloader offset), but with its own .nocache placement fixed to match
 # STM32_NOCACHE_RBAR/RASR in cfg/mcuconf.h — see boards/CubeBlueH7/STM32H743xI.ld.
-ifeq ($(BOARD),CubeOrangePlus)
+ifeq ($(BOARD_FULL),CubeOrangePlus)
     LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
-else ifeq ($(BOARD),CubeBlueH7)
+else ifeq ($(BOARD_FULL),CubeBlueH7)
     LDSCRIPT = $(BOARDDIR)/STM32H743xI.ld
 else
     LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
@@ -157,6 +163,8 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/MotorMixer.cpp \
          src/coms/IMUs/ICM42688.cpp \
          src/coms/IMUs/ICM45686.cpp \
+         src/coms/IMUs/ICM20602.cpp \
+         src/coms/IMUs/ICM20948.cpp \
          src/coms/Baro/MS5611.cpp \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \

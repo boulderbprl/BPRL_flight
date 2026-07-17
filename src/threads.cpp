@@ -150,6 +150,48 @@ static THD_FUNCTION(SPIThread, arg)
         TIMING_TICK_BEGIN(tid);
         float a[3], g[3];
 
+#if defined(BPRL_BOARD_CUBEBLUE)
+        // ── CubeBlueH7 axis rotations: UNVERIFIED PLACEHOLDER ────────────────
+        // The CubeOrangePlus rotations below (ROLL_180_YAW_135 etc.) were
+        // derived for that board's specific ICM-45686 mounting and do NOT
+        // apply here — CubeBlueH7 carries genuinely different, differently
+        // -mounted chips (2x ICM-20948 + 1x ICM-20602). Their actual mounting
+        // rotation relative to vehicle body axes is not derivable from source
+        // and has not been bench-verified, so this passes each chip's native
+        // axes straight through as NED z-down (X-fwd, Y-right, Z-down) with
+        // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
+        // sign or axis mapping will be wrong on this board's lanes — verify
+        // on the bench before flight (e.g. tilt nose-down, confirm pitch
+        // angle sign in $TEL/$IMU telemetry; see tools/bprl.py) and replace
+        // this block with the correct ROTATION_* mapping once known.
+        if (imu1.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = a[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = g[k] - g_cal.gyro_bias[0][k];
+            }
+            g_imu[0].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu2.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = a[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = g[k] - g_cal.gyro_bias[1][k];
+            }
+            g_imu[1].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu3.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[2].accel[k] = a[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = g[k] - g_cal.gyro_bias[2][k];
+            }
+            g_imu[2].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+#else
         if (imu1.read(a, g)) {
             // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
             static constexpr float RS = 0.70710678f;
@@ -187,6 +229,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
+#endif
 
         float baro_p, baro_t, baro_alt;
         if (baro1.read(baro_p, baro_t, baro_alt)) {

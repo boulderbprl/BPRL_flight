@@ -46,8 +46,8 @@ BPRL_flight/
 │   ├── threads.cpp           All thread function bodies + global state definitions
 │   │
 │   ├── coms/                 Peripheral drivers
-│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (ICM-45686 driver class) + MS5611 barometer
-│   │   ├── IMUs/             ICM45686.hpp/.cpp (drives imu1/2/3 on this board), ICM42688.hpp/.cpp (supports the 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated here)
+│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (chip set selected by BOARD, see below) + MS5611 barometer
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (BOARD=orange: drives imu1/2/3), ICM42688.hpp/.cpp (supports a 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (BOARD=blue: drives imu1/2/3)
 │   │   ├── Baro/             MS5611.hpp/.cpp — barometer state-machine driver (SPI1, CS=PD7)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
 │   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface only
@@ -284,7 +284,7 @@ The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BA
 | 3–5 | u, v, w | Primary EKF lane |
 | 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 20 Hz lowpass |
 | 9–12 | q0, q1, q2, q3 | Primary EKF lane |
-| 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix, motor-vibration notch (RPM-tracked), then 20 Hz (roll/pitch) / 5 Hz (yaw) 2nd-order lowpass |
+| 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix, motor-vibration notch (RPM-tracked, auto-disables rather than mis-targets once the tracked frequency reaches Nyquist — see the `STATEMGR_NOTCH_BW_HZ` row below), then 20 Hz (roll/pitch) / 5 Hz (yaw) 2nd-order lowpass |
 | 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 20 Hz lowpass |
 
 Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm`, itself low-passed at `STATEMGR_LP_BLENDW_HZ` (3 Hz) before renormalizing across lanes — the raw instantaneous weight is derived from a noisy quantity, so blending it in unsmoothed would make the blend ratio itself a fast-changing noise source.
@@ -313,7 +313,7 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
 | `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
 | `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
-| `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). |
+| `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At 625 Hz that's ~300 Hz (~18,000 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |
 | `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.05 | Max fractional change in the notch's tracked center frequency per tick (matches ArduPilot's ±5%/update). |
 | `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. |
 | `GRAV_VIBE_ALPHA` | EKF.hpp | 0.016 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at StateEstThread's 625 Hz — rescale if that rate changes, see the comment in EKF.hpp). |
@@ -509,19 +509,20 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ### Build
 
 ```bash
-# Default board (CubeBlue H7)
+# Default board (CubeOrange+, plain flight build — no debug/timing flags)
 make
 
-# Explicitly select board
-make BOARD=CubeBlueH7
-make BOARD=CubeOrangePlus
+# Explicitly select board — short names map to the internal board dirs/macros
+# (boards/CubeBlueH7, -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS)
+make BOARD=blue      # CubeBlue H7
+make BOARD=orange    # CubeOrange+ (default)
 
 # Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
+make BOARD=blue UDEFS_EXTRA=-DBPRL_DEBUG
 
 # Enable thread timing / CPU utilization instrumentation (testing/bench only —
 # see Timing and Utilization below)
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING
+make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING
 
 # Clean build directory
 make clean
@@ -533,13 +534,13 @@ Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler o
 
 **Via Cube USB bootloader:**
 ```bash
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
+make flash BOARD=blue PORT=/dev/ttyACM0
 ```
 `tools/flash_upload.py` handles the protocol.
 
 **Via ST-Link / OpenOCD:**
 ```bash
-make flash-stlink BOARD=CubeBlueH7
+make flash-stlink BOARD=blue
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
@@ -563,6 +564,8 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ### Channel summary
 
+IMU chip set and CS pins are board-conditional (`BOARD=orange` default vs. `BOARD=blue`) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `BOARD=orange` shown here:
+
 | Channel | Driver | Device(s) | Status |
 |---|---|---|---|
 | SPI1 | `SPI.hpp/.cpp` | imu1 (ICM-45686, CS=PG1), baro1 (MS5611, CS=PD7) | Working |
@@ -577,25 +580,35 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ## 8. IMU Drivers
 
-The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed:
+The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set is board-conditional** — `BOARD=orange` (CubeOrangePlus, default) and `BOARD=blue` (CubeBlueH7) populate `imu1/2/3` with genuinely different parts, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` (set by the Makefile from `BOARD=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
 
-| Index | Variable | Sensor | Bus | DOF |
+| Index | Variable | `BOARD=orange` sensor/bus | `BOARD=blue` sensor/bus | DOF |
 |---|---|---|---|---|
-| 0 | `g_imu[0]` | ICM-45686 | SPI1, CS=PG1 | 6 (accel + gyro) |
-| 1 | `g_imu[1]` | ICM-45686 | SPI4, CS=PC15 | 6 (accel + gyro) |
-| 2 | `g_imu[2]` | ICM-45686 | SPI4, CS=PC13 | 6 (accel + gyro) |
-| — | `g_can_imu` | IMX5 (INS) | FDCAN1 | attitude + rates |
-| — | `g_baro` | MS5611 | SPI1, CS=PD7 | pressure + temperature |
+| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | 6 (accel + gyro) |
+| 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | 6 (accel + gyro) |
+| 2 | `g_imu[2]` | ICM-45686, SPI4 CS=PC13 | ICM-20602, SPI4 CS=PC13 | 6 (accel + gyro) |
+| — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
+| — | `g_baro` | MS5611, SPI1 CS=PD7 | MS5611, SPI1 CS=PD7 (same pin both boards) | pressure + temperature |
 
-### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`)
+### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `BOARD=orange`
 
-InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs on this board** — all three slots (`imu1/2/3`) are confirmed populated with real ICM-45686 parts (verified by each successfully passing its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 rather than ICM-45686 — `ICM42688.hpp/.cpp` exists in the tree to support that variant, not because it's dead code, it just isn't instantiated on this board's `SPI.cpp`. `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` are genuinely unused leftovers from an earlier (CubeBlueH7-class) hardware revision.
+InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs on this board** — all three slots (`imu1/2/3`) are confirmed populated with real ICM-45686 parts (verified by each successfully passing its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 rather than ICM-45686 — `ICM42688.hpp/.cpp` exists in the tree to support that variant, not because it's dead code, it just isn't instantiated on this board's `SPI.cpp`.
 
 - **Configured ranges:** ±16 g accelerometer, ±2000 °/s gyroscope
 - **Outputs:** accel in m/s², gyro in rad/s
 - **Read rate:** 1 kHz from SPIThread; internal ODR ~1.6 kHz fast-sampling. `read()` drains and averages every FIFO packet queued since the last call (capped at 8 packets), so the 1 kHz caller gets a decimated/averaged sample rather than picking one aliased sample out of several — this is a deliberate oversample-then-filter design, not just a rate bump. Chosen as a middle ground: noise reduction from averaging scales with `1/√N` samples, so the first doubling (800 Hz→1.6 kHz, matching the chip's native base ODR to ~2 samples/tick) captures roughly the first ~21% of the available noise reduction; a further doubling to ArduPilot's own 3.2 kHz default for this chip only adds another ~23% on top for double the packet count — this trades some of that additional benefit for a much smaller `SPIThread` budget (measured ~9% utilization vs. ~20% at 3.2 kHz, both well within the 1 kHz budget either way).
+- **Hardware anti-alias filter:** enabled (interpolator + AAF bits set via the chip's indirect IPREG bank) but left at its ASIC default corner — the driver doesn't program a custom DELT/DELTSQR/BITSHIFT cutoff the way `ICM42688.cpp` does for that chip family (~258 Hz gyro / ~213 Hz accel at 1 kHz ODR). This matches ArduPilot's own `AP_InertialSensor_Invensensev3` driver for the ICM-456xx family, which does the same thing — not an oversight here.
 - **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
 - **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
+
+### ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `BOARD=blue`
+
+Classic InvenSense MPU-9250-family parts — register-based digital low-pass filter (DLPF) rather than the 45686/42688's analog anti-alias filter stage, and no FIFO/oversampling (single sample per `SPIThread` tick).
+
+- **ICM-20948** (`imu1`/`imu2`, 9-DOF part used here as 6-DOF): ±16 g / ±2000 °/s, ~1.125 kHz ODR. `GYRO_CFG1`/`ACCEL_CFG` enable the DLPF but leave `DLPFCFG=0` — the chip's widest/default bandwidth, not deliberately narrowed.
+- **ICM-20602** (`imu3`): ±16 g / ±2000 °/s, 1 kHz ODR, DLPF **explicitly** configured — `DLPF_CFG=1` (~184 Hz gyro bandwidth), `A_DLPF_CFG=1` (99 Hz accel bandwidth).
+- **SPI mode:** MODE3 (CPOL=1, CPHA=1) for both — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
+- **Axis rotation:** ⚠️ **unverified placeholder.** `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) currently passes each chip's native axes straight through with no rotation — the CubeOrangePlus rotation constants above were derived for that board's specific ICM-45686 mounting and do not apply to these different, differently-mounted chips. The real mounting orientation isn't derivable from source; **bench-verify before flight** (e.g. tilt nose-down, confirm pitch sign in `$TEL`/`$IMU` telemetry via `tools/telemetry.py`) and update the rotation math once known. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
 
 ### MS5611 Barometer
 
@@ -643,7 +656,7 @@ The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs nat
 
 3. **Clone the repo and build** — the Makefile works unchanged:
    ```bash
-   make BOARD=CubeBlueH7
+   make BOARD=blue
    ```
 
 ### Flashing from WSL2
@@ -658,9 +671,9 @@ usbipd attach --wsl --busid <ID>
 ```
 Then in WSL2:
 ```bash
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
+make flash BOARD=blue PORT=/dev/ttyACM0
 # or
-make flash-stlink BOARD=CubeBlueH7
+make flash-stlink BOARD=blue
 ```
 
 **Option B — STM32CubeProgrammer (no usbipd needed):**

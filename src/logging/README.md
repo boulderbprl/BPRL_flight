@@ -13,9 +13,10 @@ Binary flight-data logger using FatFS over ChibiOS SDMMC1.
 | SDMMC1_CK | PC12 | AF12 |
 | SDMMC1_CMD | PD2 | AF12 |
 
-Card format: **FAT32**, any capacity.  The CubeOrangePlus microSD slot has no
-card-detect or write-protect signals wired to the MCU — presence is determined
-by whether `sdcConnect()` succeeds.
+Card format: **FAT32**, any capacity.  The Cube microSD slot (same PCB on
+both `BOARD=orange` and `BOARD=blue`) has no card-detect or write-protect
+signals wired to the MCU — presence is determined by whether `sdcConnect()`
+succeeds.
 
 ## Clock configuration
 

@@ -222,10 +222,10 @@ Per-thread execution-time and CPU-utilization instrumentation, added to check wh
 Build and flash:
 
 ```bash
-make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_TIMING
-make flash BOARD=CubeOrangePlus
+make BOARD=orange UDEFS_EXTRA=-DBPRL_TIMING
+make flash BOARD=orange
 # combine with debug telemetry if needed:
-make BOARD=CubeBlueH7 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
+make BOARD=blue UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
 ```
 
 There's no dedicated `tools/*.py` wrapper yet — query the two commands directly over the USB serial port, e.g. with pyserial's bundled terminal:
@@ -285,8 +285,8 @@ Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using t
 
 ```bash
 # Recommended: use Makefile targets
-make flash BOARD=CubeBlueH7
-make flash BOARD=CubeOrangePlus PORT=/dev/ttyACM0
+make flash BOARD=blue
+make flash BOARD=orange PORT=/dev/ttyACM0
 
 # Or directly
 python3 tools/flash_upload.py build/BPRL.bin
@@ -300,11 +300,11 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 ## Quick reference
 
 ```bash
-# Flash (default board: BOARD=CubeBlueH7)
-make flash BOARD=CubeOrangePlus
+# Flash (default board: BOARD=orange)
+make flash BOARD=orange
 
 # Debug build + flash
-make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeOrangePlus
+make BOARD=orange UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=orange
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
@@ -324,6 +324,6 @@ python3 tools/can_tools.py can-scan --duration 2
 python3 tools/calibrate.py calibrate
 
 # Timing/schedulability build + query (see Timing section above)
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING && make flash BOARD=CubeBlueH7
+make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING && make flash BOARD=blue
 python3 -m serial.tools.miniterm /dev/ttyACM0 115200   # then type: TIM,status
 ```
