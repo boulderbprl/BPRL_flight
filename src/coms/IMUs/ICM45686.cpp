@@ -27,15 +27,16 @@ static constexpr uint16_t BANK_IPREG_SYS2_ADDR = 0xA500;  // ACCEL_SRC_CTRL live
 static constexpr float GYRO_SCALE  = (1.0f / 16.4f)  * (3.14159265f / 180.0f);
 static constexpr float ACCEL_SCALE = (1.0f / 2048.0f) * 9.80665f;
 
-// TEMP BISECTION TEST (uncommitted) — reverted to the pre-7ec81ff ODR/read()
-// path to isolate whether the 3.2kHz fast-sampling + multi-packet FIFO drain
-// is causing SPIThread (highest priority in the system) to run over its 1kHz
-// budget and starve everything below it, leading to the IWDG watchdog reset
-// loop. `git checkout -- src/coms/IMUs/ICM45686.cpp` restores the committed
-// (averaging) version once this test is done either way.
-//
-// GYRO_CONFIG0 / ACCEL_CONFIG0: FS_SEL=1 (second entry = ±2000dps / ±16g), ODR=0x06 (~800 Hz)
-static constexpr uint8_t FS_ODR_CFG = (0x1 << 4) | 0x06;
+// GYRO_CONFIG0 / ACCEL_CONFIG0: FS_SEL=1 (second entry = ±2000dps / ±16g), ODR=0x05 (~1600 Hz)
+// TEMP BISECTION TEST (uncommitted): halfway point between the original
+// 800Hz (0x06, no oversampling) and the full 3200Hz (0x04, ~4x oversampling)
+// fast-sampling config. Noise reduction scales with 1/sqrt(N) averaged
+// samples — 800->1600Hz (~1x -> ~1.6x samples/tick) captures roughly the
+// first ~21% of the available noise reduction; the second doubling to
+// 3200Hz only adds another ~23% on top for double the packet count and SPI
+// cost (measured ~202us avg exec at 3200Hz vs ~12us un-oversampled) — this
+// is meant to keep most of the benefit for a fraction of the SPIThread cost.
+static constexpr uint8_t FS_ODR_CFG = (0x1 << 4) | 0x05;
 
 bool ICM45686::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig *cfg_fast)
 {
@@ -93,24 +94,48 @@ bool ICM45686::read(float accel_ms2[3], float gyro_rads[3])
     uint16_t n = static_cast<uint16_t>(cnt[0]) | (static_cast<uint16_t>(cnt[1]) << 8);
     if (n == 0) { return false; }
 
-    // Burst-read one 16-byte FIFO packet
-    // Layout: header(1) + accel[3]×int16_LE(6) + gyro[3]×int16_LE(6) + temp(1) + ts(2)
-    uint8_t pkt[16];
-    burst_read(REG_FIFO_DATA, pkt, 16);
-
-    // Validate header: bit[6]=ACCEL_EN and bit[5]=GYRO_EN must both be set
-    if ((pkt[0] & 0x60) != 0x60) { return false; }
+    // At the ~3.2kHz fast-sampling ODR configured in init(), more than one
+    // packet accumulates per 1kHz SPIThread tick. Drain and average every
+    // queued packet (capped defensively) rather than a single sample, so the
+    // stream gets genuine decimation-by-averaging instead of aliasing by
+    // picking one sample out of several.
+    static constexpr uint16_t MAX_PACKETS_PER_READ = 8;
+    if (n > MAX_PACKETS_PER_READ) { n = MAX_PACKETS_PER_READ; }
 
     auto le16 = [](const uint8_t *p) -> int16_t {
         return static_cast<int16_t>(static_cast<uint16_t>(p[0]) | (static_cast<uint16_t>(p[1]) << 8));
     };
 
-    accel_ms2[0] = le16(pkt + 1)  * ACCEL_SCALE;
-    accel_ms2[1] = le16(pkt + 3)  * ACCEL_SCALE;
-    accel_ms2[2] = le16(pkt + 5)  * ACCEL_SCALE;
-    gyro_rads[0] = le16(pkt + 7)  * GYRO_SCALE;
-    gyro_rads[1] = le16(pkt + 9)  * GYRO_SCALE;
-    gyro_rads[2] = le16(pkt + 11) * GYRO_SCALE;
+    int32_t accel_sum[3] = {0, 0, 0};
+    int32_t gyro_sum[3]  = {0, 0, 0};
+    uint16_t n_valid = 0;
+
+    // Layout per packet: header(1) + accel[3]×int16_LE(6) + gyro[3]×int16_LE(6) + temp(1) + ts(2)
+    for (uint16_t i = 0; i < n; ++i) {
+        uint8_t pkt[16];
+        burst_read(REG_FIFO_DATA, pkt, 16);
+
+        // Validate header: bit[6]=ACCEL_EN and bit[5]=GYRO_EN must both be set
+        if ((pkt[0] & 0x60) != 0x60) { continue; }
+
+        accel_sum[0] += le16(pkt + 1);
+        accel_sum[1] += le16(pkt + 3);
+        accel_sum[2] += le16(pkt + 5);
+        gyro_sum[0]  += le16(pkt + 7);
+        gyro_sum[1]  += le16(pkt + 9);
+        gyro_sum[2]  += le16(pkt + 11);
+        ++n_valid;
+    }
+
+    if (n_valid == 0) { return false; }
+
+    const float inv_n = 1.0f / static_cast<float>(n_valid);
+    accel_ms2[0] = static_cast<float>(accel_sum[0]) * inv_n * ACCEL_SCALE;
+    accel_ms2[1] = static_cast<float>(accel_sum[1]) * inv_n * ACCEL_SCALE;
+    accel_ms2[2] = static_cast<float>(accel_sum[2]) * inv_n * ACCEL_SCALE;
+    gyro_rads[0] = static_cast<float>(gyro_sum[0]) * inv_n * GYRO_SCALE;
+    gyro_rads[1] = static_cast<float>(gyro_sum[1]) * inv_n * GYRO_SCALE;
+    gyro_rads[2] = static_cast<float>(gyro_sum[2]) * inv_n * GYRO_SCALE;
     return true;
 }
 

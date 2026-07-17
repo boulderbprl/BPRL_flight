@@ -69,11 +69,10 @@ float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)
     return output;
 }
 
-float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_hz, float dt_s)
+NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s)
 {
     if (center_hz <= 0.0f || bandwidth_hz <= 0.0f || dt_s <= 0.0f) {
-        state.initialised = false;  // re-arm a clean start if the notch re-enables later
-        return input;
+        return NotchCoeffs{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false};
     }
 
     const float sample_freq = 1.0f / dt_s;
@@ -85,19 +84,30 @@ float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_
     const float cosw0 = cosf(w0);
 
     const float a0_inv = 1.0f / (1.0f + alpha);
-    const float b0 =  a0_inv;
-    const float b1 = -2.0f * cosw0 * a0_inv;
-    const float b2 =  a0_inv;
-    const float a1 = -2.0f * cosw0 * a0_inv;
-    const float a2 = (1.0f - alpha) * a0_inv;
+    NotchCoeffs c;
+    c.b0 =  a0_inv;
+    c.b1 = -2.0f * cosw0 * a0_inv;
+    c.b2 =  a0_inv;
+    c.a1 = -2.0f * cosw0 * a0_inv;
+    c.a2 = (1.0f - alpha) * a0_inv;
+    c.enabled = true;
+    return c;
+}
+
+float notch_apply(float input, Biquad2pState& state, const NotchCoeffs& coeffs)
+{
+    if (!coeffs.enabled) {
+        state.initialised = false;  // re-arm a clean start if the notch re-enables later
+        return input;
+    }
 
     if (!state.initialised) {
         state.delay1 = state.delay2 = 0.0f;
         state.initialised = true;
     }
 
-    const float delay0 = input - state.delay1 * a1 - state.delay2 * a2;
-    const float output = delay0 * b0 + state.delay1 * b1 + state.delay2 * b2;
+    const float delay0 = input - state.delay1 * coeffs.a1 - state.delay2 * coeffs.a2;
+    const float output = delay0 * coeffs.b0 + state.delay1 * coeffs.b1 + state.delay2 * coeffs.b2;
 
     state.delay2 = state.delay1;
     state.delay1 = delay0;

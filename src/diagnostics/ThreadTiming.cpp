@@ -8,7 +8,7 @@
 ThreadTimingStats g_timing_stats[TIMING_MAX_THREADS] = {};
 int               g_timing_count = 0;
 
-int timing_register(const char *name, sysinterval_t period_ticks)
+int timing_register(const char *name, sysinterval_t period_ticks, bool hard_rt)
 {
     if (g_timing_count >= TIMING_MAX_THREADS) {
         return -1;  // out of slots — increase TIMING_MAX_THREADS
@@ -17,6 +17,7 @@ int timing_register(const char *name, sysinterval_t period_ticks)
     ThreadTimingStats &s = g_timing_stats[id];
     s.name          = name;
     s.period_ticks  = period_ticks;
+    s.hard_rt       = hard_rt;
     s.exec_min_us   = UINT32_MAX;
     s.exec_max_us   = 0;
     s.exec_sum_us   = 0;
@@ -55,6 +56,19 @@ float timing_total_utilization_pct()
     for (int i = 0; i < g_timing_count; i++) {
         const ThreadTimingStats &s = g_timing_stats[i];
         if (s.period_ticks == 0 || s.sample_count == 0) continue;
+        const float avg_us   = (float)s.exec_sum_us / (float)s.sample_count;
+        const float period_us = (float)TIME_I2US(s.period_ticks);
+        if (period_us > 0.0f) total += 100.0f * avg_us / period_us;
+    }
+    return total;
+}
+
+float timing_hrt_utilization_pct()
+{
+    float total = 0.0f;
+    for (int i = 0; i < g_timing_count; i++) {
+        const ThreadTimingStats &s = g_timing_stats[i];
+        if (!s.hard_rt || s.period_ticks == 0 || s.sample_count == 0) continue;
         const float avg_us   = (float)s.exec_sum_us / (float)s.sample_count;
         const float period_us = (float)TIME_I2US(s.period_ticks);
         if (period_us > 0.0f) total += 100.0f * avg_us / period_us;
@@ -101,8 +115,9 @@ size_t timing_format_report(char *buf, size_t buflen)
         }
     }
 
-    chprintf(out, "$CPU,util_pct=%.1f,n_threads=%d\r\n",
-             (double)timing_total_utilization_pct(), g_timing_count);
+    chprintf(out, "$CPU,util_pct=%.1f,util_pct_hrt=%.1f,n_threads=%d\r\n",
+             (double)timing_total_utilization_pct(),
+             (double)timing_hrt_utilization_pct(), g_timing_count);
 
     return ms.eos;
 }

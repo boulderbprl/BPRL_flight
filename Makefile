@@ -46,7 +46,7 @@ OPENOCD_CFG     := -f interface/stlink.cfg -f target/stm32h7x.cfg
 #
 
 ifeq ($(USE_OPT),)
-  USE_OPT = -O2 -ggdb -fomit-frame-pointer -falign-functions=16
+  USE_OPT = -O3 -ggdb -fomit-frame-pointer -falign-functions=16
 endif
 
 ifeq ($(USE_COPT),)

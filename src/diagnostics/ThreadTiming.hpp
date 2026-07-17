@@ -51,6 +51,7 @@ constexpr int TIMING_MAX_THREADS = 12;
 struct ThreadTimingStats {
     const char    *name;          // nullptr = unused slot
     sysinterval_t  period_ticks;  // 0 = event-driven, excluded from utilization sum
+    bool           hard_rt;       // false = soft-deadline/I/O-bound (e.g. log) — excluded from timing_hrt_utilization_pct()
     uint32_t       exec_min_us;
     uint32_t       exec_max_us;
     uint64_t       exec_sum_us;   // divide by sample_count for the running average
@@ -66,7 +67,13 @@ extern int               g_timing_count;
 // a small integer id used by TIMING_TICK_BEGIN/END. Not thread-safe against
 // concurrent registration, but all registrations happen during
 // threads_start()-adjacent startup code before the scheduler is under load.
-int timing_register(const char *name, sysinterval_t period_ticks);
+// hard_rt=false marks a soft-deadline, I/O-bound thread (e.g. LogThread) whose
+// worst-case execution time is inherently unbounded (SD-card wear-leveling
+// stalls, etc.) rather than a CPU-scheduling property — excluded from
+// timing_hrt_utilization_pct() so that figure reflects only threads a classic
+// RM/Liu-Layland analysis actually applies to. Still included in
+// timing_total_utilization_pct() and the per-thread report either way.
+int timing_register(const char *name, sysinterval_t period_ticks, bool hard_rt = true);
 
 void timing_tick_begin(int id);
 void timing_tick_end(int id);
@@ -79,6 +86,12 @@ void timing_tick_end(int id);
 // rate-monotonic (see the priority-ordering note in threads_start()).
 float timing_total_utilization_pct();
 
+// Same as timing_total_utilization_pct() but skips every thread registered
+// with hard_rt=false (see ThreadTimingStats::hard_rt above) — a truer figure
+// for "is the hard-real-time part of this task set schedulable" when the
+// task set also includes soft-deadline I/O-bound threads like LogThread.
+float timing_hrt_utilization_pct();
+
 // Resets all collected stats (min/max/avg/misses) without unregistering.
 void timing_reset();
 
@@ -88,12 +101,14 @@ void timing_reset();
 size_t timing_format_report(char *buf, size_t buflen);
 
 #define TIMING_REGISTER(name, period) timing_register((name), (period))
+#define TIMING_REGISTER_SOFT(name, period) timing_register((name), (period), false)
 #define TIMING_TICK_BEGIN(id) timing_tick_begin(id)
 #define TIMING_TICK_END(id)   timing_tick_end(id)
 
 #else // !BPRL_TIMING
 
 #define TIMING_REGISTER(name, period) (0)
+#define TIMING_REGISTER_SOFT(name, period) (0)
 #define TIMING_TICK_BEGIN(id) ((void)(id))
 #define TIMING_TICK_END(id)   ((void)(id))
 

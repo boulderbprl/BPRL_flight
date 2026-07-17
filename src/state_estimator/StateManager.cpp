@@ -306,9 +306,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // rolloff than a 1-pole filter at the same cutoff, matching ArduPilot's
     // INS-level gyro filter. Yaw (r) gets a heavier cutoff than roll/pitch (p/q).
     _update_notch_freq(rpm);
-    const float p_notched = notch(_blended_p, _p_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
-    const float q_notched = notch(_blended_q, _q_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
-    const float r_notched = notch(_blended_r, _r_notch_state, _notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
+    // p/q/r all track the same motor-vibration center frequency, so the
+    // coefficients (and their sinf()/cosf() cost) are computed once here and
+    // reused across all three axes instead of once per axis.
+    const NotchCoeffs notch_c = notch_coeffs(_notch_freq_hz, STATEMGR_NOTCH_BW_HZ, dt);
+    const float p_notched = notch_apply(_blended_p, _p_notch_state, notch_c);
+    const float q_notched = notch_apply(_blended_q, _q_notch_state, notch_c);
+    const float r_notched = notch_apply(_blended_r, _r_notch_state, notch_c);
 
     _p_filt = lowpass2p(p_notched, _p_filt_state, STATEMGR_LP_PQ_HZ, dt);
     _q_filt = lowpass2p(q_notched, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);

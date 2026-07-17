@@ -236,7 +236,7 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 500 Hz  NORMALPRIO+22
+ * I2CThread — 500 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
@@ -256,7 +256,7 @@ static THD_FUNCTION(I2CThread, arg)
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * StateEstThread — 800 Hz  NORMALPRIO+25
+ * StateEstThread — 625 Hz  NORMALPRIO+25
  * Runs the 3-lane EKF, fuses g_imu[] and g_can_imu, writes g_state[].
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(StateEstThread, arg)
@@ -270,7 +270,7 @@ static THD_FUNCTION(StateEstThread, arg)
 
     // Ticks since last IMX5 quaternion — clears valid after CAN_TIMEOUT_TICKS.
     uint32_t can_stale_ticks = 0;
-    static constexpr uint32_t CAN_TIMEOUT_TICKS = 800;  // 1 s at 800 Hz — tolerates IMX5 init pauses
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 625;  // TEMP BISECTION TEST (uncommitted): 1 s at 625 Hz — was 588 (~588 Hz), 400 (400 Hz), 500 (500 Hz), originally 800 (800 Hz)
 
     const int tid = TIMING_REGISTER("est", period);
 
@@ -357,7 +357,7 @@ static THD_FUNCTION(StateEstThread, arg)
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * ControlThread — 400 Hz  NORMALPRIO+20
+ * ControlThread — 400 Hz  NORMALPRIO+22
  * Cascade PID → MotorMixer → motor output.
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -685,7 +685,8 @@ static void usb_cmd_dispatch(const char *line)
             chMtxLock(&s_usb_write_mtx);
             if (logger.is_ready()) {
                 chprintf((BaseSequentialStream *)&SDU1,
-                         "LOG,STATUS,ready,file=%s\r\n", logger.current_path());
+                         "LOG,STATUS,ready,file=%s,expand_err=%u\r\n",
+                         logger.current_path(), (unsigned)logger.expand_err());
             } else if (ff != 0) {
                 chprintf((BaseSequentialStream *)&SDU1,
                          "LOG,STATUS,not_ready,last_err=%u(%s),ff=%u\r\n",
@@ -1275,7 +1276,7 @@ static THD_FUNCTION(LogThread, arg)
         chThdSleepMilliseconds(5000);
     }
 
-    const int tid = TIMING_REGISTER("log", rates->period);
+    const int tid = TIMING_REGISTER_SOFT("log", rates->period);
 
     systime_t next = chVTGetSystemTime();
 

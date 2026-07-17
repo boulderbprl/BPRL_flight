@@ -90,6 +90,27 @@ and the schema header is written before `init()` returns `true`.
 **Sync interval**: `f_sync()` is called every 5 flushes (~100 ms at 50 Hz),
 bounding the data lost to an unclean power-off.
 
+**File pre-allocation**: right after the file is created (still empty —
+`f_expand()` requires `objsize == 0`), `init()` calls `f_expand(&s_file,
+PRE_ALLOC_SIZE, 1)` to reserve a contiguous 10 MB cluster chain in one shot.
+This means `f_write()` never needs to grow the FAT chain mid-flight — that
+incremental growth, plus `f_sync()`'s own directory/FAT write, is what was
+causing periodic multi-ms-to-hundreds-of-ms `LogThread` stalls (found via
+`BPRL_TIMING` profiling, see the root README's [Timing and
+Utilization](../../README.md#timing-and-utilization)). `close()` calls
+`f_truncate()` to trim the file back to the actual bytes written before its
+final `f_sync()`, so a short flight doesn't leave a mostly-empty 10 MB file.
+Best-effort: if the card can't offer a contiguous run of that size (fragmented
+or nearly-full card), logging still works via normal incremental growth, just
+with the stalls pre-allocation exists to avoid — check `expand_err()`
+(`FR_OK`/`0` = succeeded) via `LOG,status`'s `expand_err=` field rather than
+assuming it worked. Even with pre-allocation confirmed working, some residual
+stall rate remains: SD cards don't have a bounded worst-case write latency
+(internal wear-leveling/garbage collection), so this mitigates rather than
+eliminates the tail. It's a bounded, non-corrupting cost, though — the 32 KB
+ring buffer absorbs any single stall without losing data, since `LogThread` is
+both the sole producer and sole consumer of its own buffer.
+
 **Runtime recovery**: if a flush fails (write error or card removed), LogThread
 calls `logger.close()`, waits 2 s, and retries `logger.init()`.  Logging
 resumes automatically if the card becomes accessible again.
@@ -104,6 +125,11 @@ resumes automatically if the card becomes accessible again.
 | 3 | `f_mount()` failed (see `last_ff_err` for FatFS `FRESULT`) |
 | 4 | `f_open()` failed |
 | 5 | Success |
+
+`LOG,status` also reports `expand_err=` when the logger is ready — the FatFS
+`FRESULT` from the `f_expand()` pre-allocation call described above (`0` =
+`FR_OK`, succeeded; nonzero, commonly `FR_DENIED`, means it silently fell back
+to incremental growth this boot).
 
 ## Source files
 

@@ -96,13 +96,15 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 800 Hz | Fuse sensors → g_state[] |
-| I2CThread | NORMALPRIO+22 | 500 Hz | Poll I2C devices (strain rate sensor) |
-| ControlThread | NORMALPRIO+20 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| StateEstThread | NORMALPRIO+25 | 625 Hz | Fuse sensors → g_state[] |
+| ControlThread | NORMALPRIO+22 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| I2CThread | NORMALPRIO+20 | 500 Hz | Poll I2C devices (strain rate sensor) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 1 Hz | LED heartbeat |
 | LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (11 message types per tick) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
+
+`ControlThread` sits above `I2CThread` deliberately — the 400 Hz flight-critical control loop shouldn't be delayed by a slower, less critical sensor poll. See [Timing and Utilization](#timing-and-utilization) below for how this priority ordering and the current rates were chosen/verified.
 
 ### Shared state
 
@@ -121,6 +123,18 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
 | `g_baro` | `baro_mtx` | Pressure/temperature/altitude from the MS5611 barometer |
 | `g_rpm_gated[4]` | `esc_mtx` | Fault-gated per-motor mechanical RPM (holds last good value below 100 RPM after having seen a real reading) — published by `ControlThread`, read by `LogThread`/`DebugThread`/`StateManager`'s notch filter |
+
+### Timing and Utilization
+
+Measured with `BPRL_TIMING` (see `tools/README.md`'s [Timing / schedulability](tools/README.md#timing--schedulability-bprl_timing-build) section) at the current rates — 625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control:
+
+| | utilization | misses |
+|---|---|---|
+| Hard-deadline threads (SPI, CAN, StateEst, I2C, Control, Radio, Heartbeat, MAVLink) | ~64% | 0 |
+| LogThread (soft-deadline, SD-card I/O-bound) | ~20–22% | ~4% |
+| **Total** | **~86%** | — |
+
+The hard-deadline figure is what a classic RM/Liu-Layland schedulability analysis actually applies to, and it's comfortably under the ~70% target with real margin. `LogThread` is excluded from that figure by design (`TIM,status`'s `util_pct_hrt` field) because SD-card writes don't have a bounded worst-case latency the way CPU-bound computation does — its residual ~4% miss rate is a bounded, non-corrupting I/O tail (the 32 KB ring buffer absorbs any single stall without data loss), not a scheduling failure. `StateEstThread` at the previous 800 Hz was the opposite story: it regularly missed its own deadline, stayed permanently runnable as the second-highest-priority thread in the system, and starved everything below it — including the watchdog kick in `main()`'s idle loop — causing a reset roughly every 30s. See [State Estimation (EKF)](#3-state-estimation-ekf) and [SD Card Logging](#5-sd-card-logging) for how each was resolved.
 
 ---
 
@@ -206,7 +220,7 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor com
 
 ### Architecture
 
-State estimation runs in `StateEstThread` at 800 Hz — an exact 2:1 ratio with the 400 Hz control loop, chosen specifically to remove the undefined-phase aliasing a non-integer ratio (the previous 500 Hz was 1.25:1) introduces between the two loops. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
+State estimation runs in `StateEstThread` at 625 Hz. This rate was chosen empirically, not for a clean ratio with the 400 Hz control loop — profiling with the `BPRL_TIMING` instrumentation (see [Timing and Utilization](#timing-and-utilization)) showed the notch-filtered, CAN-staleness-gated 3-lane EKF update genuinely could not fit an 800 Hz budget (average execution time alone exceeded the 1250µs period on nearly every tick), which left `StateEstThread` — the second-highest-priority thread in the system — permanently runnable and starved everything below it, including the IWDG watchdog kick in `main()`'s idle loop, causing a reset every ~30s. 625 Hz (the nearest achievable rate to 600 Hz at the system's 100µs tick granularity) leaves real headroom (measured ~55% utilization, zero missed deadlines) after two cheap optimizations — de-duplicating the per-axis notch-filter coefficient computation and building at `-O3` instead of `-O2` — recovered a meaningful chunk of the original 800 Hz budget. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
 
 ```
 g_imu[0] ──► EKF lane 0 ──┐
@@ -231,7 +245,7 @@ Each lane estimates:
 
 p/q/r, u_dot/v_dot/w_dot, and p_dot/q_dot/r_dot are **not** Kalman states, they are computed by `StateManager` and appended to the output vector.
 
-### Predict step (800 Hz)
+### Predict step (625 Hz)
 
 Each lane predicts forward using its own IMU after subtracting the estimated bias:
 
@@ -248,13 +262,13 @@ Updates are applied in order each tick (earlier updates inform later ones):
 
 | Step | Source | Rate | States updated |
 |------|--------|------|----------------|
-| 1.5 | Onboard accel (gravity vector) | 800 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
+| 1.5 | Onboard accel (gravity vector) | 625 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
 | 2 | IMX5 quaternion over CAN | 200 Hz, async, age-gated (skipped if >50ms stale) and forward-propagated by its measured age before fusing | Full quaternion |
 | 5 | Mocap NED position | Async | X, Y, Z |
 | 5 | Mocap NED velocity → body frame | Async | u, v, w |
 | 5.6 | MS5611 barometric altitude | ~100+ Hz, async, **suppressed while mocap is connected** | Z (and, via cross-covariance, w and Z accel bias) |
 
-IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF measurement update) are similarly age-gated — see [Sensor loss behaviour](#sensor-loss-behaviour) and the `STATEMGR_IMX5_RATE_WEIGHT` row below. Unlike the quaternion, the rate blend is a continuous sample-and-hold rather than event-gated: it re-blends whatever `g_can_imu.p/q/r` currently holds every 800 Hz tick (refreshed ~every 10ms), rather than only touching the blend on ticks where a new CAN rate frame actually arrived.
+IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF measurement update) are similarly age-gated — see [Sensor loss behaviour](#sensor-loss-behaviour) and the `STATEMGR_IMX5_RATE_WEIGHT` row below. Unlike the quaternion, the rate blend is a continuous sample-and-hold rather than event-gated: it re-blends whatever `g_can_imu.p/q/r` currently holds every 625 Hz tick (refreshed ~every 10ms), rather than only touching the blend on ticks where a new CAN rate frame actually arrived.
 
 The gravity-vector update (`update_gravity`) hard-rejects samples where `|accel|` is outside `[0.1g, 3g]`, then applies a joint chi-squared gate (`GRAV_CHI2_GATE = 5σ`) over an adaptive measurement noise that grows with a lowpass-filtered vibration estimate (`GRAV_R_VIBE`) — so it's trusted less, not switched off outright, under vibration. Only the Z-axis accel bias is corrected here (X/Y residuals are ambiguous between bias and genuine horizontal acceleration; those are only resolved via mocap velocity fusion's cross-covariance with u/v). Yaw is not observable from gravity alone and requires the IMX5.
 
@@ -302,7 +316,7 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). |
 | `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.05 | Max fractional change in the notch's tracked center frequency per tick (matches ArduPilot's ±5%/update). |
 | `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. |
-| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.0125 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at StateEstThread's 800 Hz — rescale if that rate changes, see the comment in EKF.hpp). |
+| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.016 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at StateEstThread's 625 Hz — rescale if that rate changes, see the comment in EKF.hpp). |
 
 ### Sensor loss behaviour
 
@@ -474,7 +488,9 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ```
 `length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
+
+**File pre-allocation:** `Logger::init()` calls `f_expand()` right after creating the file (10 MB, `PRE_ALLOC_SIZE` in `Logger.hpp`) — a one-time contiguous cluster-chain reservation while a stall is harmless (motors aren't spinning yet), instead of letting `f_write()` grow the FAT chain incrementally during flight. That incremental growth (plus `f_sync()`'s directory/FAT write) was causing `LogThread` periodic multi-ms-to-hundreds-of-ms stalls on the SD card's internal metadata writes — profiling with `BPRL_TIMING` (see [Timing and Utilization](#timing-and-utilization)) is what surfaced this. `Logger::close()` calls `f_truncate()` to trim the file back to the actual bytes written before the final `f_sync()`. Pre-allocation is best-effort: `expand_err()` (surfaced via `LOG,status`'s `expand_err=` field) reports the FatFS `FRESULT` — `0` means it succeeded, nonzero means the card couldn't offer a contiguous 10 MB run and logging fell back to normal incremental growth. Even with pre-allocation confirmed working, some residual stall rate remains — SD cards don't have a bounded worst-case write latency (internal wear-leveling/GC), so this is a mitigated-not-eliminated I/O-latency tail rather than a fixable software bug; see [Timing and Utilization](#timing-and-utilization).
 
 **D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
@@ -503,11 +519,15 @@ make BOARD=CubeOrangePlus
 # Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
 make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
 
+# Enable thread timing / CPU utilization instrumentation (testing/bench only —
+# see Timing and Utilization below)
+make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING
+
 # Clean build directory
 make clean
 ```
 
-Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`.
+Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile).
 
 ### Upload
 
@@ -573,7 +593,7 @@ InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driv
 
 - **Configured ranges:** ±16 g accelerometer, ±2000 °/s gyroscope
 - **Outputs:** accel in m/s², gyro in rad/s
-- **Read rate:** 1 kHz from SPIThread; internal ODR ~3.2 kHz fast-sampling (matches ArduPilot's own default for this chip over SPI). `read()` drains and averages every FIFO packet queued since the last call (capped at 8 packets), so the 1 kHz caller gets a decimated/averaged sample rather than picking one aliased sample out of several — this is a deliberate oversample-then-filter design, not just a rate bump.
+- **Read rate:** 1 kHz from SPIThread; internal ODR ~1.6 kHz fast-sampling. `read()` drains and averages every FIFO packet queued since the last call (capped at 8 packets), so the 1 kHz caller gets a decimated/averaged sample rather than picking one aliased sample out of several — this is a deliberate oversample-then-filter design, not just a rate bump. Chosen as a middle ground: noise reduction from averaging scales with `1/√N` samples, so the first doubling (800 Hz→1.6 kHz, matching the chip's native base ODR to ~2 samples/tick) captures roughly the first ~21% of the available noise reduction; a further doubling to ArduPilot's own 3.2 kHz default for this chip only adds another ~23% on top for double the packet count — this trades some of that additional benefit for a much smaller `SPIThread` budget (measured ~9% utilization vs. ~20% at 3.2 kHz, both well within the 1 kHz budget either way).
 - **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
 - **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
 
@@ -599,7 +619,7 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 | `0x03` | q rate + y accel | same encoding | 100 Hz |
 | `0x04` | r rate + z accel | same encoding | 100 Hz |
 
-When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz — each CAN frame is timestamped on arrival, and `StateManager` skips fusing it if it's more than `STATEMGR_CAN_QUAT_STALE_US` (50ms) stale by the time it's processed, otherwise forward-propagating it by its measured age (using each lane's own gyro) before fusing, rather than treating a few-ms-old sample as if it were instantaneous. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`); this blend is a continuous sample-and-hold rather than event-gated like the quaternion — it re-blends whatever the last-received `g_can_imu.p/q/r` holds on every 800 Hz tick (refreshed ~every 10ms), gated only on the same 50ms staleness check (`STATEMGR_CAN_RATES_STALE_US`), not on whether a new frame arrived this specific tick. The on-board IMUs continue to run and are logged regardless of IMX5 state.
+When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz — each CAN frame is timestamped on arrival, and `StateManager` skips fusing it if it's more than `STATEMGR_CAN_QUAT_STALE_US` (50ms) stale by the time it's processed, otherwise forward-propagating it by its measured age (using each lane's own gyro) before fusing, rather than treating a few-ms-old sample as if it were instantaneous. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`); this blend is a continuous sample-and-hold rather than event-gated like the quaternion — it re-blends whatever the last-received `g_can_imu.p/q/r` holds on every 625 Hz tick (refreshed ~every 10ms), gated only on the same 50ms staleness check (`STATEMGR_CAN_RATES_STALE_US`), not on whether a new frame arrived this specific tick. The on-board IMUs continue to run and are logged regardless of IMX5 state.
 
 ---
 

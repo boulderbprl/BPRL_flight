@@ -248,27 +248,32 @@ time.sleep(0.3)
 print(ser.read(4096).decode(errors="replace"))
 ```
 
-Sample output — one `$THD` line per registered thread, plus a `$CPU` totals line:
+Sample output — one `$THD` line per registered thread, plus a `$CPU` totals line. This is a real capture (625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control, armed/loaded):
 
 ```
-$THD,spi,period_us=1000,exec_avg_us=42,exec_max_us=88,util_pct=4.2,misses=0,n=48213
-$THD,can,exec_avg_us=15,exec_max_us=140,n=612
-$THD,i2c,period_us=2000,exec_avg_us=310,exec_max_us=480,util_pct=15.5,misses=0,n=24106
-$THD,est,period_us=1250,exec_avg_us=610,exec_max_us=980,util_pct=48.8,misses=0,n=38570
-$THD,ctrl,period_us=2500,exec_avg_us=180,exec_max_us=340,util_pct=7.2,misses=0,n=19281
-...
-$CPU,util_pct=78.4,n_threads=11
+$THD,can,period_us=event,exec_avg_us=1,exec_max_us=100,n=39120
+$THD,i2c,period_us=2000,exec_avg_us=0,exec_max_us=100,util_pct=0.0,misses=0,n=39119
+$THD,est,period_us=1600,exec_avg_us=876,exec_max_us=1400,util_pct=54.7,misses=0,n=48899
+$THD,ctrl,period_us=2500,exec_avg_us=7,exec_max_us=100,util_pct=0.3,misses=0,n=31296
+$THD,radio,period_us=10000,exec_avg_us=5,exec_max_us=100,util_pct=0.0,misses=0,n=7824
+$THD,heartbeat,period_us=200000,exec_avg_us=1,exec_max_us=100,util_pct=0.0,misses=0,n=392
+$THD,mavlink,period_us=10000,exec_avg_us=0,exec_max_us=100,util_pct=0.0,misses=0,n=7575
+$THD,usbcmd,period_us=event,exec_avg_us=916,exec_max_us=1900,n=6
+$THD,log,period_us=20000,exec_avg_us=4352,exec_max_us=43700,util_pct=21.7,misses=153,n=3909
+$THD,spi,period_us=1000,exec_avg_us=93,exec_max_us=500,util_pct=9.3,misses=0,n=78167
+$CPU,util_pct=86.2,util_pct_hrt=64.3,n_threads=10
 ```
 
 Reading it:
 
 | Field | Meaning |
 |---|---|
-| `period_us=event` | An event-driven thread (`can`, `usbcmd`) — exec time is still tracked but excluded from `util_pct` since it has no fixed period. |
+| `period_us=event` | An event-driven thread (`can`, `usbcmd`) — exec time is still tracked but excluded from `util_pct`/`util_pct_hrt` since it has no fixed period. |
 | `exec_avg_us` / `exec_max_us` | Running average / worst-case time spent in that thread's per-tick work (excludes the sleep-until-next-period call). |
 | `util_pct` | `exec_avg_us / period_us`, i.e. this thread's slice of CPU time. |
 | `misses` | Ticks where `exec_us` exceeded the thread's own period — a direct sign that thread is not keeping up with its own rate. |
 | `$CPU,util_pct` | Sum of `util_pct` over every rate-tracked thread — the Liu & Layland `Σ(C_i/T_i)` figure. Above ~70% is a soft warning for a task set this size; approaching 100% or `misses>0` anywhere means it's not schedulable as configured. |
+| `$CPU,util_pct_hrt` | Same sum, but skipping threads registered with `TIMING_REGISTER_SOFT` (currently just `log`) — a truer figure for hard-deadline schedulability when the task set also has a soft-deadline, I/O-bound thread whose worst-case latency isn't CPU-bound (see the root README's [Timing and Utilization](../README.md#timing-and-utilization)). In the capture above, `util_pct` is 86.2% but `util_pct_hrt` is 64.3% — `log`'s SD-card-write tail alone accounts for the rest. |
 
 Run it under realistic load (armed, radio connected, CAN/mocap link up) — idle-bench numbers will understate `est`/`ctrl`/`spi` load significantly.
 

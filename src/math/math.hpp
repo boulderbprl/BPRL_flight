@@ -43,14 +43,26 @@ struct Biquad2pState {
 float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s);
 
 // Second-order notch (RBJ biquad form), tracking a moving center frequency —
-// e.g. a motor's blade-pass frequency. Reuses Biquad2pState for delay memory,
-// same direct-form-II structure as lowpass2p(). bandwidth_hz sets notch width
-// (Q = center_hz/bandwidth_hz); coefficients are recomputed fresh every call
-// from center_hz/dt_s, so the caller drives frequency tracking (and should
-// slew-limit center_hz itself between calls to avoid a filter transient on a
-// sudden frequency jump). center_hz <= 0 or bandwidth_hz <= 0 disables
-// filtering (returns input unchanged).
-float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_hz, float dt_s);
+// e.g. a motor's blade-pass frequency. Split into a coefficient step and an
+// apply step so multiple axes sharing the same center_hz/bandwidth_hz/dt_s
+// (e.g. p/q/r all tracking one motor-vibration frequency) pay the sinf()/
+// cosf() cost once per tick rather than once per axis.
+
+struct NotchCoeffs {
+    float b0, b1, b2, a1, a2;
+    bool  enabled;  // false when disabled (center_hz <= 0 or bandwidth_hz <= 0 or dt_s <= 0)
+};
+
+// bandwidth_hz sets notch width (Q = center_hz/bandwidth_hz); coefficients
+// are recomputed fresh every call from center_hz/dt_s, so the caller drives
+// frequency tracking (and should slew-limit center_hz itself between calls
+// to avoid a filter transient on a sudden frequency jump).
+NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s);
+
+// Applies pre-computed notch coefficients to one axis's delay memory (same
+// direct-form-II structure as lowpass2p()). Disabled coefficients return
+// input unchanged and re-arm the state for next time the notch is enabled.
+float notch_apply(float input, Biquad2pState& state, const NotchCoeffs& coeffs);
 
 // Backward-difference numerical derivative
 float derivative(float current, float prev, float dt_s);
