@@ -606,3 +606,11 @@ build/obj/MS5611.o
 build/obj/ThreadTiming.o
 
 tools/__pycache__/bprl_common.cpython-310.pyc
+
+.dep/ICM20602.o.d
+
+.dep/ICM20948.o.d
+
+build/obj/ICM20602.o
+
+build/obj/ICM20948.o
