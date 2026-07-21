@@ -25,6 +25,8 @@
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
 #include "src/coms/MAVLink.hpp"
+#include "src/math/math.hpp"
+#include "src/diagnostics/ThreadTiming.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
@@ -37,13 +39,14 @@
 MUTEX_DECL(state_mtx);
 float   g_state[StateIdx::N] = {};   // 19-element EKF state vector
 float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaternion
-float   g_input[5]           = {};
+float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+bool    g_use_indi           = false; // attitude controller switch from radio (false=PID, true=INDI)
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -61,7 +64,11 @@ MUTEX_DECL(baro_mtx);
 BaroRaw   g_baro    = {};
 
 MUTEX_DECL(esc_mtx);
-ESCTelemetry g_esc_telem[4] = {};
+uint32_t g_rpm_gated[4] = {};
+
+// Persistent per-motor gate state for rpm_gate() — only ControlThread (the
+// site that publishes g_rpm_gated) needs to own this.
+static RpmGateState s_rpm_gate[4];
 
 /* ── Calibration data loaded from flash at boot ──────────────────────────── */
 static CalibData g_cal = {};
@@ -136,10 +143,55 @@ static THD_FUNCTION(SPIThread, arg)
 
     spi_drv_init();   // init all three IMUs (may sleep 100 ms each)
 
+    const int tid = TIMING_REGISTER("spi", period);
+
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         float a[3], g[3];
 
+#if defined(BPRL_BOARD_CUBEBLUE)
+        // ── CubeBlueH7 axis rotations: UNVERIFIED PLACEHOLDER ────────────────
+        // The CubeOrangePlus rotations below (ROLL_180_YAW_135 etc.) were
+        // derived for that board's specific ICM-45686 mounting and do NOT
+        // apply here — CubeBlueH7 carries genuinely different, differently
+        // -mounted chips (2x ICM-20948 + 1x ICM-20602). Their actual mounting
+        // rotation relative to vehicle body axes is not derivable from source
+        // and has not been bench-verified, so this passes each chip's native
+        // axes straight through as NED z-down (X-fwd, Y-right, Z-down) with
+        // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
+        // sign or axis mapping will be wrong on this board's lanes — verify
+        // on the bench before flight (e.g. tilt nose-down, confirm pitch
+        // angle sign in $TEL/$IMU telemetry; see tools/bprl.py) and replace
+        // this block with the correct ROTATION_* mapping once known.
+        if (imu1.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = a[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = g[k] - g_cal.gyro_bias[0][k];
+            }
+            g_imu[0].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu2.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = a[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = g[k] - g_cal.gyro_bias[1][k];
+            }
+            g_imu[1].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu3.read(a, g)) {
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[2].accel[k] = a[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = g[k] - g_cal.gyro_bias[2][k];
+            }
+            g_imu[2].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+#else
         if (imu1.read(a, g)) {
             // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
             static constexpr float RS = 0.70710678f;
@@ -177,6 +229,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
+#endif
 
         float baro_p, baro_t, baro_alt;
         if (baro1.read(baro_p, baro_t, baro_alt)) {
@@ -189,6 +242,7 @@ static THD_FUNCTION(SPIThread, arg)
             chMtxUnlock(&baro_mtx);
         }
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
@@ -206,9 +260,12 @@ static THD_FUNCTION(CANThread, arg)
     (void)arg;
     chRegSetThreadName("can");
 
+    const int tid = TIMING_REGISTER("can", 0);  // event-driven, no fixed period
+
     while (true) {
         bprl_can_wait_rx(TIME_MS2I(200));
 
+        TIMING_TICK_BEGIN(tid);
         CANRxFrame rxf;
         while (bprl_can_poll(rxf)) {
             can_dispatch(rxf);
@@ -217,45 +274,62 @@ static THD_FUNCTION(CANThread, arg)
         if (can_is_bus_off()) {
             can_hw_reinit();
         }
+        TIMING_TICK_END(tid);
     }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 500 Hz  NORMALPRIO+22
+ * I2CThread — 500 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
 {
     chRegSetThreadName("i2c");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+    const int tid = TIMING_REGISTER("i2c", period);
 
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         i2c_poll_all();
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * StateEstThread — 500 Hz  NORMALPRIO+25
+ * StateEstThread — 625 Hz  NORMALPRIO+25
  * Runs the 3-lane EKF, fuses g_imu[] and g_can_imu, writes g_state[].
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(StateEstThread, arg)
 {
     chRegSetThreadName("est");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
-    const float dt = static_cast<float>(period)
-                   / static_cast<float>(CH_CFG_ST_FREQUENCY);
+    const float dt_nominal = static_cast<float>(period)
+                           / static_cast<float>(CH_CFG_ST_FREQUENCY);
 
     state_mgr.init();
 
-    // Ticks since last IMX5 quaternion — clears valid after 100 ticks (200 ms at 500 Hz).
+    // Ticks since last IMX5 quaternion — clears valid after CAN_TIMEOUT_TICKS.
     uint32_t can_stale_ticks = 0;
-    static constexpr uint32_t CAN_TIMEOUT_TICKS = 500;  // 1 s at 500 Hz — tolerates IMX5 init pauses
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 625;  // 1 s at 625 Hz
+
+    const int tid = TIMING_REGISTER("est", period);
 
     systime_t next = chVTGetSystemTime();
+    uint32_t last_tick_us = TIME_I2US(chVTGetSystemTimeX());
     while (true) {
+        TIMING_TICK_BEGIN(tid);
+        // Measured elapsed time since the previous tick, not a fixed nominal
+        // dt — keeps EKF integration correct under scheduler jitter (same
+        // approach PID::update() already uses). Clamped to +/-2x nominal so
+        // a single missed-deadline outlier can't corrupt the integration.
+        const uint32_t now_us = TIME_I2US(chVTGetSystemTimeX());
+        float dt = static_cast<float>(now_us - last_tick_us) * 1.0e-6f;
+        last_tick_us = now_us;
+        dt = constrain_float(dt, dt_nominal * 0.5f, dt_nominal * 2.0f);
+
         // Snapshot CAN IMU and clear consumed-this-tick flags atomically.
         CANIMURaw can_snap;
         chMtxLock(&can_imu_mtx);
@@ -284,6 +358,7 @@ static THD_FUNCTION(StateEstThread, arg)
         mocap_snap = g_mocap;
         g_mocap.has_new_pos = false;
         g_mocap.has_new_vel = false;
+        g_mocap.has_new_yaw = false;
         chMtxUnlock(&mocap_mtx);
 
         BaroRaw baro_snap;
@@ -292,8 +367,13 @@ static THD_FUNCTION(StateEstThread, arg)
         g_baro.has_new = false;
         chMtxUnlock(&baro_mtx);
 
+        uint32_t rpm_snap[4];
+        chMtxLock(&esc_mtx);
+        memcpy(rpm_snap, g_rpm_gated, sizeof(rpm_snap));
+        chMtxUnlock(&esc_mtx);
+
         // Run all EKF lanes and derive outputs.
-        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap);
+        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm_snap, now_us);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
@@ -313,13 +393,14 @@ static THD_FUNCTION(StateEstThread, arg)
 #endif
         chMtxUnlock(&state_mtx);
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * ControlThread — 400 Hz  NORMALPRIO+20
+ * ControlThread — 400 Hz  NORMALPRIO+22
  * Cascade PID → MotorMixer → motor output.
  * ══════════════════════════════════════════════════════════════════════════ */
 
@@ -327,9 +408,11 @@ static THD_FUNCTION(ControlThread, arg)
 {
     chRegSetThreadName("ctrl");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+    const int tid = TIMING_REGISTER("ctrl", period);
 
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         /* ── Motor test bypass: skip PID/mixer, drive ESCs directly ──────── */
         {
             bool    test_active;
@@ -344,6 +427,7 @@ static THD_FUNCTION(ControlThread, arg)
                 chMtxLock(&state_mtx);
                 memset(g_output, 0, sizeof(g_output));
                 chMtxUnlock(&state_mtx);
+                TIMING_TICK_END(tid);
                 next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
                 continue;
             }
@@ -354,18 +438,27 @@ static THD_FUNCTION(ControlThread, arg)
         float euler[3];
         float input[InputIdx::N_INPUTS];
         bool  armed;
+        bool  use_indi;
         chMtxLock(&state_mtx);
         memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
         memcpy(euler,     g_euler,  sizeof(euler));
         memcpy(input,     g_input,  sizeof(input));
-        armed = g_armed;
+        armed    = g_armed;
+        use_indi = g_use_indi;
         chMtxUnlock(&state_mtx);
+
+        flight_sm.set_use_indi(use_indi);
 
         ESCTelemetry sm_telem[4];
         dshot_get_telemetry(sm_telem);
         uint32_t rpm[4];
-        for (int i = 0; i < 4; i++)
-            rpm[i] = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
+        for (int i = 0; i < 4; i++) {
+            const uint32_t raw = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
+            rpm[i] = rpm_gate(s_rpm_gate[i], raw);
+        }
+        chMtxLock(&esc_mtx);
+        memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
+        chMtxUnlock(&esc_mtx);
 
         float torque_cmds[3];
         float thrust;
@@ -394,21 +487,24 @@ static THD_FUNCTION(ControlThread, arg)
         g_flight_mode = (int)flight_sm.mode();
         chMtxUnlock(&state_mtx);
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * RadioThread — 50 Hz  NORMALPRIO+10
+ * RadioThread — 100 Hz  NORMALPRIO+10
  * Reads RC input and writes g_input / g_armed.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(RadioThread, arg)
 {
     chRegSetThreadName("radio");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+    const int tid = TIMING_REGISTER("radio", period);
 
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         radio_input_update();
 
         chMtxLock(&state_mtx);
@@ -417,9 +513,12 @@ static THD_FUNCTION(RadioThread, arg)
         g_input[InputIdx::PITCH_TGT]   = radio_pitch();
         g_input[InputIdx::YAW_RATE]    = radio_yaw();
         g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
-        g_armed = radio_armed();
+        g_input[InputIdx::INDI_STK]    = radio_indi();
+        g_armed    = radio_armed();
+        g_use_indi = radio_use_indi();
         chMtxUnlock(&state_mtx);
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
@@ -444,12 +543,20 @@ static THD_FUNCTION(HeartbeatThread, arg)
      * edges > 0     → ESC is responding with GCR telemetry.
      * tc = 0        → DShot is NOT running (check dshot_init failure).
      */
+    // NB: rates.heartbeat (passed as arg) is unused — this thread hardcodes
+    // its own 200 ms tick below. Registered with that literal so the timing
+    // report's period matches what actually runs, not the configured-but-
+    // ignored rate.
+    const int tid = TIMING_REGISTER("heartbeat", TIME_MS2I(200));
+
     uint32_t tick = 0;
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         /* LED: 200 ms flash every 2 s (every 10th 200 ms tick). */
         if (tick % 10 == 0) palSetLine(LINE_LED_ACTIVITY);
         if (tick % 10 == 1) palClearLine(LINE_LED_ACTIVITY);
+        TIMING_TICK_END(tid);
 
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, TIME_MS2I(200)));
         tick++;
@@ -621,7 +728,8 @@ static void usb_cmd_dispatch(const char *line)
             chMtxLock(&s_usb_write_mtx);
             if (logger.is_ready()) {
                 chprintf((BaseSequentialStream *)&SDU1,
-                         "LOG,STATUS,ready,file=%s\r\n", logger.current_path());
+                         "LOG,STATUS,ready,file=%s,expand_err=%u\r\n",
+                         logger.current_path(), (unsigned)logger.expand_err());
             } else if (ff != 0) {
                 chprintf((BaseSequentialStream *)&SDU1,
                          "LOG,STATUS,not_ready,last_err=%u(%s),ff=%u\r\n",
@@ -841,6 +949,19 @@ static void usb_cmd_dispatch(const char *line)
         }
         chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
         chMtxUnlock(&s_usb_write_mtx);
+#ifdef BPRL_TIMING
+    } else if (strcmp(line, "TIM,status") == 0) {
+        static char rep_buf[1536];
+        size_t len = timing_format_report(rep_buf, sizeof(rep_buf));
+        chMtxLock(&s_usb_write_mtx);
+        chnWriteTimeout((BaseChannel *)&SDU1, (uint8_t *)rep_buf, len, TIME_MS2I(200));
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "TIM,reset") == 0) {
+        timing_reset();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "TIM,OK,reset\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     }
 }
 
@@ -852,6 +973,8 @@ static THD_FUNCTION(USBCmdThread, arg)
     static char   s_line[64];
     static uint8_t s_len = 0;
 
+    const int tid = TIMING_REGISTER("usbcmd", 0);  // event-driven, no fixed period
+
     while (true) {
         msg_t byte = chnGetTimeout((BaseChannel *)&SDU1, TIME_MS2I(50));
         if (byte == MSG_TIMEOUT || byte == MSG_RESET) continue;
@@ -860,7 +983,9 @@ static THD_FUNCTION(USBCmdThread, arg)
         if (c == '\n' || c == '\r') {
             if (s_len > 0) {
                 s_line[s_len] = '\0';
+                TIMING_TICK_BEGIN(tid);
                 usb_cmd_dispatch(s_line);
+                TIMING_TICK_END(tid);
                 s_len = 0;
             }
         } else if (s_len < (uint8_t)(sizeof(s_line) - 1U)) {
@@ -879,7 +1004,8 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <rc_roll>,<rc_pitch>,<rc_yaw>,<armed>,
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
- *        <flight_mode>          ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+ *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+ *        <use_indi>             ← active attitude controller (0=PID, 1=INDI)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -891,8 +1017,11 @@ static THD_FUNCTION(DebugThread, arg)
     uint32_t can_quat_hz   = 0, can_rate_hz   = 0;
     int      rate_tick     = 0;
 
+    const int tid = TIMING_REGISTER("debug", period);
+
     systime_t next = chVTGetSystemTime();
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         /* ── Update CAN INS rate estimate once per second (10 ticks) ───── */
         if (++rate_tick >= 10) {
             uint32_t qc = s_can_quat_cnt;
@@ -913,6 +1042,7 @@ static THD_FUNCTION(DebugThread, arg)
         int   primary_lane;
         bool  armed;
         int   flight_mode;
+        bool  use_indi;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
         pitch    = g_euler[1];
@@ -932,6 +1062,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
         flight_mode = g_flight_mode;
+        use_indi = g_use_indi;
         for (int li = 0; li < 3; ++li) {
             lane_roll[li]  = s_lane_roll[li];
             lane_pitch[li] = s_lane_pitch[li];
@@ -1000,13 +1131,11 @@ static THD_FUNCTION(DebugThread, arg)
         float can_pitch_deg = pitch_r * 57.2958f;
         float can_yaw_deg   = yaw_r   * 57.2958f;
 
-        /* ── Snapshot ESC telemetry ─────────────────────────────────────── */
-        ESCTelemetry telem[4];
-        dshot_get_telemetry(telem);
+        /* ── Snapshot fault-gated RPM (published by ControlThread) ─────── */
         uint32_t rpm[4];
-        for (int i = 0; i < 4; i++) {
-            rpm[i] = telem[i].valid ? telem[i].erpm / 7U : 0U;
-        }
+        chMtxLock(&esc_mtx);
+        memcpy(rpm, g_rpm_gated, sizeof(rpm));
+        chMtxUnlock(&esc_mtx);
 
         /* ── Emit $TEL line over USB ────────────────────────────────────── */
         /* Format into a local buffer first (non-blocking), then send with a
@@ -1025,7 +1154,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.3f,%.3f,%.3f,%.3f,%d,"
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
-                "%d\r\n",
+                "%d,%d\r\n",
                 (uint32_t)TIME_I2MS(chVTGetSystemTime()),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
@@ -1038,7 +1167,7 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode);
+                flight_mode, (int)use_indi);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1053,7 +1182,7 @@ static THD_FUNCTION(DebugThread, arg)
          *         <roll0°>,<pitch0°>,<yaw0°>,<p0>,<q0>,<r0>,
          *         <roll1°>,<pitch1°>,<yaw1°>,<p1>,<q1>,<r1>,
          *         <roll2°>,<pitch2°>,<yaw2°>,<p2>,<q2>,<r2>,
-         *         0,0,0,0,0,0          ← IMX5 INS (placeholder)
+         *         <can_roll°>,<can_pitch°>,<can_yaw°>,<can_p>,<can_q>,<can_r>  ← IMX5 INS (raw, from g_can_imu)
          */
         {
             static char ekfl_buf[256];
@@ -1145,6 +1274,7 @@ static THD_FUNCTION(DebugThread, arg)
             }
         }
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
 }
@@ -1167,8 +1297,15 @@ static THD_FUNCTION(MAVLinkThread, arg)
 {
     (void)arg;
     mavlink_comms_init();
+
+    // Hardcodes its own 10 ms poll below (no ThreadRates entry) — registered
+    // with that literal so the timing report reflects the real period.
+    const int tid = TIMING_REGISTER("mavlink", TIME_MS2I(10));
+
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         mavlink_comms_update();
+        TIMING_TICK_END(tid);
         chThdSleepMilliseconds(10);  // 100 Hz poll — sufficient to drain 115200 baud
     }
 }
@@ -1182,9 +1319,12 @@ static THD_FUNCTION(LogThread, arg)
         chThdSleepMilliseconds(5000);
     }
 
+    const int tid = TIMING_REGISTER_SOFT("log", rates->period);
+
     systime_t next = chVTGetSystemTime();
 
     while (true) {
+        TIMING_TICK_BEGIN(tid);
         /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
@@ -1207,9 +1347,11 @@ static THD_FUNCTION(LogThread, arg)
         strain = g_strain_rate;
         chMtxUnlock(&strainRate_mtx);
 
-        /* ── RPM snapshot (dshot_get_telemetry is thread-safe) ───────── */
-        ESCTelemetry telem[4] = {};
-        dshot_get_telemetry(telem);
+        /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
+        uint32_t rpm_log[4];
+        chMtxLock(&esc_mtx);
+        memcpy(rpm_log, g_rpm_gated, sizeof(rpm_log));
+        chMtxUnlock(&esc_mtx);
 
         /* ── Barometer snapshot ───────────────────────────────────────── */
         BaroRaw baro_snap_log = {};
@@ -1270,6 +1412,7 @@ static THD_FUNCTION(LogThread, arg)
             msg.yaw_stk    = inp[InputIdx::YAW_RATE];
             msg.thr_stk    = inp[InputIdx::THRUST];
             msg.flight_mode = inp[InputIdx::FLIGHT_MODE];
+            msg.indi_stk   = inp[InputIdx::INDI_STK];
             msg.armed      = (uint8_t)armed;
             logger.write(LOG_MSG_RCIN, msg);
         }
@@ -1325,10 +1468,10 @@ static THD_FUNCTION(LogThread, arg)
         {
             LogMsgRPMS msg = {};
             msg.time_us = t_us;
-            msg.rpm0 = telem[0].valid ? (int32_t)(telem[0].erpm / 7U) : 0;
-            msg.rpm1 = telem[1].valid ? (int32_t)(telem[1].erpm / 7U) : 0;
-            msg.rpm2 = telem[2].valid ? (int32_t)(telem[2].erpm / 7U) : 0;
-            msg.rpm3 = telem[3].valid ? (int32_t)(telem[3].erpm / 7U) : 0;
+            msg.rpm0 = (int32_t)rpm_log[0];
+            msg.rpm1 = (int32_t)rpm_log[1];
+            msg.rpm2 = (int32_t)rpm_log[2];
+            msg.rpm3 = (int32_t)rpm_log[3];
             logger.write(LOG_MSG_RPMS, msg);
         }
 
@@ -1396,6 +1539,7 @@ static THD_FUNCTION(LogThread, arg)
             logger.init();  // internally retries sdcConnect/f_mount up to 5×
         }
 
+        TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, rates->period));
     }
 }
@@ -1406,9 +1550,10 @@ void threads_start(const ThreadRates &rates)
     // Priority ordering (highest first):
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
-    //   StateEstThread  +25  500 Hz EKF
-    //   ControlThread   +20  400 Hz PID/mixer/DShot
-    //   RadioThread     +10  50 Hz RC input
+    //   StateEstThread  +25  625 Hz EKF
+    //   ControlThread   +22  400 Hz PID/mixer/DShot
+    //   I2CThread       +20  500 Hz aux-sensor polling
+    //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
     //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
     //   DebugThread     -10  10 Hz $TEL/$EKFL USB stream
@@ -1417,9 +1562,9 @@ void threads_start(const ThreadRates &rates)
 
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 22, I2CThread,       (void *)&rates.i2c);
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
     chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
-    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 20, ControlThread,   (void *)&rates.control);
+    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);

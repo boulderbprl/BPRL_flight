@@ -35,7 +35,7 @@ public:
     // imu_index: which g_imu[i] slot this lane reads from (0–2).
     void init(int imu_index);
 
-    // Prediction step — call at 500 Hz.
+    // Prediction step — call at 625 Hz (StateEstThread rate).
     // accel: body-frame specific force (m/s²), gyro: body-frame rates (rad/s).
     void predict(float dt, const float accel[3], const float gyro[3]);
 
@@ -85,17 +85,17 @@ private:
     static constexpr float P0_BIAS_A = 0.01f;   // accel bias (m/s²)² — tighter init after cal
     static constexpr float P0_BIAS_G = 1e-4f;   // gyro bias (rad/s)²  — ~0.01 rad/s 1σ init
 
-    // Process noise (Q) per EKF step at 500 Hz
+    // Process noise (Q) per EKF step at 625 Hz
     static constexpr float Q_POS    = 1e-4f;   // position random walk
     static constexpr float Q_VEL    = 1e-3f;   // body velocity random walk
     static constexpr float Q_QUAT   = 1e-5f;   // quaternion random walk
     // Bias Q matched to ArduPilot EKF3 GBIAS_P_NSE=1e-3 formula:
-    //   dAngBiasVar = sq(sq(dt) * 1e-3) / dt² → ~4e-12 (rad/s)²/step at 500 Hz.
+    //   dAngBiasVar = sq(sq(dt) * 1e-3) / dt² → ~4e-12 (rad/s)²/step at 625 Hz.
     // We use 1e-9 (250× more permissive) because we have a direct gravity measurement
     // rather than ArduPilot's indirect zero-velocity approach; slightly more latitude
     // lets the filter track temperature-driven drift across the flight envelope.
     static constexpr float Q_BIAS_G = 1e-9f;   // gyro bias random walk (rad/s)²/step
-    // Accel bias: ArduPilot ABIAS_P_NSE=2e-2 → sq(sq(dt)*2e-2)/dt² ≈ 6e-10 at 500 Hz.
+    // Accel bias: ArduPilot ABIAS_P_NSE=2e-2 → sq(sq(dt)*2e-2)/dt² ≈ 6e-10 at 625 Hz.
     // We use 1e-7 — still conservative, accel bias drifts faster than gyro bias.
     static constexpr float Q_BIAS_A = 1e-7f;   // accel bias random walk (m/s²)²/step
 
@@ -114,8 +114,11 @@ private:
     // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
     static constexpr float GRAV_R_VIBE    = 0.25f;  // dimensionless scale
 
-    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 500 Hz
-    static constexpr float GRAV_VIBE_ALPHA = 0.02f;
+    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 625 Hz
+    // (update_gravity() runs once per StateEstThread tick with no dt parameter,
+    // so this is a fixed-rate IIR alpha, not a lowpass_alpha(fc,dt) one — keep
+    // it in sync with StateEstThread's rate in main.cpp if that ever changes.)
+    static constexpr float GRAV_VIBE_ALPHA = 0.016f;
 
     // ── Mocap position/velocity measurement update parameters ─────────────
     // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is

@@ -5,12 +5,62 @@
  *   SPI1 = PLL1_Q = 50 MHz   (STM32_SPI123SEL_PLL1_Q_CK, DIVQ=16)
  *   SPI4 = PCLK2  = 100 MHz  (STM32_SPI45SEL_PCLK2,  D2PPRE2=/2)
  *
- * ICM-45686 (SPI1): MODE0 (CPOL=0, CPHA=0).  Init ~781 kHz, fast 6.25 MHz.
- * ICM-42688 (SPI4): MODE3 (CPOL=1, CPHA=1).  Init ~781 kHz, fast 6.25 MHz.
- *
  * SPIConfig v1 field order: {circular, end_cb, ssport, sspad, cfg1, cfg2,
  *                            dummytx, dummyrx}
+ *
+ * IMU chip set + CS pins are board-conditional — see SPI.hpp for the full
+ * pin map and rationale. Baro is on the same pin/mode for both boards.
  */
+
+#if defined(BPRL_BOARD_CUBEBLUE)
+
+// ── IMU1: ICM-20948 — SPI1  CS=PC2  MODE3 (CPOL=1, CPHA=1) ───────────────────
+static const SPIConfig imu1_init = {
+    false, nullptr, GPIOC, 2U,
+    SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+static const SPIConfig imu1_fast = {
+    false, nullptr, GPIOC, 2U,
+    SPI_CFG1_MBR_DIV8  | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
+// ── IMU2: ICM-20948 — SPI4  CS=PE4  MODE3 ─────────────────────────────────────
+static const SPIConfig imu2_init = {
+    false, nullptr, GPIOE, 4U,
+    SPI_CFG1_MBR_DIV128 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+static const SPIConfig imu2_fast = {
+    false, nullptr, GPIOE, 4U,
+    SPI_CFG1_MBR_DIV16  | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
+// ── IMU3: ICM-20602 — SPI4  CS=PC13  MODE3 ────────────────────────────────────
+static const SPIConfig imu3_init = {
+    false, nullptr, GPIOC, 13U,
+    SPI_CFG1_MBR_DIV128 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+static const SPIConfig imu3_fast = {
+    false, nullptr, GPIOC, 13U,
+    SPI_CFG1_MBR_DIV16  | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
+ICM20948 imu1;
+ICM20948 imu2;
+ICM20602 imu3;
+
+#else  // BPRL_BOARD_CUBEORANGEPLUS
 
 // ── IMU1: ICM-45686 — SPI1  CS=PG1  MODE0 ────────────────────────────────────
 static const SPIConfig imu1_init = {
@@ -48,7 +98,13 @@ static const SPIConfig imu3_fast = {
     nullptr, nullptr
 };
 
-// ── BARO1: MS5611 — SPI1  CS=PD7  MODE3 ──────────────────────────────────────
+ICM45686 imu1;
+ICM45686 imu2;
+ICM45686 imu3;
+
+#endif
+
+// ── BARO1: MS5611 — SPI1  CS=PD7  MODE3 (same on both boards) ────────────────
 static const SPIConfig baro1_init = {
     false, nullptr, GPIOD, 7U,
     SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
@@ -62,9 +118,6 @@ static const SPIConfig baro1_fast = {
     nullptr, nullptr
 };
 
-ICM45686 imu1;
-ICM45686 imu2;
-ICM45686 imu3;
 MS5611   baro1;
 
 void spi_drv_init(void)

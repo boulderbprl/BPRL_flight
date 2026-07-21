@@ -79,9 +79,10 @@ struct __attribute__((packed)) LogMsgRCIN {
     float    yaw_stk;     // [-1, 1]  yaw rate demand from RC
     float    thr_stk;     // [0, 1]   throttle from RC
     float    flight_mode; // [-1, 1]  raw flight-mode switch; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
+    float    indi_stk;    // [-1, 1]  raw INDI/PID switch (channel 7); >0.33=INDI, else PID
     uint8_t  armed;       // 0=disarmed, 1=armed
 };
-// Format: "QfffffB"   Body: 8+5×4+1 = 29 B   Record: 32 B
+// Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
 
 struct __attribute__((packed)) LogMsgOUTP {
     uint64_t time_us;
@@ -184,9 +185,20 @@ struct __attribute__((packed)) LogMsgMOCP {
 
 struct LogDef {
     uint8_t     msg_id;
-    const char *name;    // ≤4 chars, null-padded to 4 by strncpy (e.g. "ATT" → stored as "ATT\0")
-    const char *fmt;     // ArduPilot format codes (≤16 chars): Q H f i h B …
-    const char *labels;  // comma-separated field names (≤64 chars); TimeUS must be first
+    // Logger::write_schema_header() copies these into LogFmtHdr's fixed-size
+    // FMT fields via strncpy(dst, src, sizeof(dst) - 1) — reserving 1 byte for
+    // the null terminator — except `name`, which uses the full sizeof(dst)
+    // since it's a raw positional (non-null-terminated) 4-byte field. A
+    // string longer than its field's usable length is silently truncated by
+    // strncpy, not rejected — UAV Log Viewer then shows the record with
+    // fields missing past the cut, with no build or runtime error to flag it
+    // (this happened once already, see the CTUN entry below). The
+    // static_assert after kLogDefs[] below catches this at compile time for
+    // every entry, so the exact limits only need to be correct here, not
+    // re-verified by hand per entry.
+    const char *name;    // ≤4 chars   (LogFmtHdr::name[4],    full 4 bytes used, no null reserved)
+    const char *fmt;     // ≤15 chars  (LogFmtHdr::format[16], 1 byte reserved for null)
+    const char *labels;  // ≤63 chars  (LogFmtHdr::labels[64], 1 byte reserved for null); TimeUS must be first
     size_t      body_size;
 };
 
@@ -205,8 +217,8 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_RCIN,
       "RCIN",
-      "QfffffB",
-      "TimeUS,RollStk,PitchStk,YawStk,ThrStk,FlightMode,Armed",
+      "QffffffB",
+      "TimeUS,RollStk,PitchStk,YawStk,ThrStk,FlightMode,IndiStk,Armed",
       sizeof(LogMsgRCIN) },
 
     { LOG_MSG_OUTP,
@@ -278,3 +290,31 @@ constexpr LogDef kLogDefs[] = {
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);
+
+/* ── Compile-time FMT field-size check ──────────────────────────────────────
+ * Catches a name/fmt/labels string too long for its LogFmtHdr field (see
+ * LogDef's comments above for the exact per-field limits) at build time,
+ * instead of a silent strncpy truncation only noticed later as missing
+ * columns in UAV Log Viewer. */
+constexpr size_t const_strlen(const char *s)
+{
+    size_t n = 0;
+    while (s[n] != '\0') { ++n; }
+    return n;
+}
+
+constexpr bool log_defs_fit_fmt_fields()
+{
+    for (size_t i = 0; i < sizeof(kLogDefs) / sizeof(kLogDefs[0]); ++i) {
+        if (const_strlen(kLogDefs[i].name)   > 4)  { return false; }
+        if (const_strlen(kLogDefs[i].fmt)    > 15) { return false; }
+        if (const_strlen(kLogDefs[i].labels) > 63) { return false; }
+    }
+    return true;
+}
+
+static_assert(log_defs_fit_fmt_fields(),
+    "A LogDef name/fmt/labels string is too long for its LogFmtHdr FMT field "
+    "(name<=4, fmt<=15, labels<=63 chars) and would be silently truncated by "
+    "Logger::write_schema_header()'s strncpy, breaking UAV Log Viewer's column "
+    "list for that message type — shorten the offending string in kLogDefs[].");

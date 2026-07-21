@@ -2,7 +2,8 @@
  * CubeOrangePlus application linker script.
  *
  * The ArduPilot/CubePilot BL5 bootloader occupies the first 128 KB
- * (0x08000000–0x0801FFFF) of STM32H743 flash.  Application code must be
+ * (0x08000000–0x0801FFFF) of STM32H757 flash (M7 core; same flash/RAM
+ * memory map as STM32H743, this script is reused as-is).  Application code must be
  * compiled to run from 0x08020000 onward so that vector table entries
  * contain the correct absolute addresses.
  *

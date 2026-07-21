@@ -33,7 +33,9 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the **default** interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the override |
+| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
+
+`imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).
 
 ### Adding a device
 
@@ -90,20 +92,22 @@ Each ESC returns an eRPM frame on the same wire after the TX burst ends:
 
 ## SPI (`SPI.hpp/.cpp`)
 
-Two SPI buses drive the three on-board IMUs plus the barometer.
+Two SPI buses drive the three on-board IMUs plus the barometer. **The IMU chip set is board-conditional** — `BOARD=orange`/`BOARD=blue` select `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` in the Makefile, and `SPI.hpp`/`SPI.cpp` `#if` on that to pick both the driver classes and the CS pins/SPI mode:
 
-| Bus | Peripheral | CS pin | Device | Role |
-|---|---|---|---|---|
-| SPI1 | SPID1 | PG1  | ICM-45686 | Primary IMU (`imu1`) |
-| SPI4 | SPID4 | PC15 | ICM-42688 (probed/read as ICM-45686) | External IMU (`imu2`) |
-| SPI4 | SPID4 | PC13 | ICM-42688 (probed/read as ICM-45686) | Backup IMU (`imu3`) |
-| SPI1 | SPID1 | PD7  | MS5611 | Barometer (`baro1`) |
+| Bus | Peripheral | CS pin | `BOARD=orange` device | `BOARD=blue` device | Role |
+|---|---|---|---|---|---|
+| SPI1 | SPID1 | PG1 (orange) / PC2 (blue) | ICM-45686 | ICM-20948 | Primary IMU (`imu1`) |
+| SPI4 | SPID4 | PC15 (orange) / PE4 (blue) | ICM-45686 | ICM-20948 | External IMU (`imu2`) |
+| SPI4 | SPID4 | PC13 | ICM-45686 | ICM-20602 | Backup IMU (`imu3`) |
+| SPI1 | SPID1 | PD7 | MS5611 | MS5611 (same pin both boards) | Barometer (`baro1`) |
 
-All three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `imu2`/`imu3` are physically ICM-42688 chips, but that driver reads them too because the two parts share a compatible WHOAMI/register/FIFO layout at the settings used here. The separate `ICM42688.hpp/.cpp` class exists in the tree but is never instantiated (dead code), as are the older `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` classes from an earlier hardware revision.
+**`BOARD=orange` (default):** all three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — confirmed all three slots on this board are physically populated with ICM-45686 (each passes its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 — the separate `ICM42688.hpp/.cpp` class exists in the tree to support that variant, not instantiated on this board.
+
+**`BOARD=blue`:** `imu1`/`imu2` use `ICM20948.hpp/.cpp`, `imu3` uses `ICM20602.hpp/.cpp` — both classic MPU-9250-family parts with a register-based DLPF instead of the 45686/42688's analog AAF stage, no FIFO/oversampling, and SPI **MODE3** (CPOL=1, CPHA=1) rather than MODE0 (confirmed against ArduPilot's `hwdef.dat` for this chip pairing on Cube-family hardware). CS pins here (PC2/PE4/PC13) come from `boards/CubeBlueH7/board.h`'s documented pin map, not yet WHOAMI-confirmed against physical hardware the way the `BOARD=orange` mapping was — a wrong pairing fails safe (each chip has a distinct WHOAMI, so a mismatch just leaves that `g_imu[i].valid` false). The per-IMU axis-rotation math in `SPIThread` (`src/threads.cpp`) is an explicitly-flagged unverified placeholder for this board — see the root README's [ICM-20948 / ICM-20602](../../README.md#8-imu-drivers) section before flying on it.
 
 `spi_drv_init()` must run inside `SPIThread` (power-on/reset sequences use `chThdSleepMilliseconds`). `imu2`/`imu3` share SPI4, and `imu1`/`baro1` share SPI1, each with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
 
-SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider). The IMU driver uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
+SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider, both boards). On `BOARD=orange` the ICM-45686 runs at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). `BOARD=blue`'s ICM-20948/20602 have no equivalent FIFO-averaging step — one sample per `SPIThread` tick. It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
 
 ---
 
@@ -113,7 +117,7 @@ SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-d
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Current use: strain rate sensor's I2C **fallback** interface only (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C` override — CAN is the default; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
+Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
 
 ### Adding a device
 
@@ -126,7 +130,7 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
-`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()` return normalized RC channel values. `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation. `radio_use_indi()` is `radio_indi() > 0.33f` — a thresholded bool built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection.
 
 Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
 

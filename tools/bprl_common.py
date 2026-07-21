@@ -152,6 +152,7 @@ class TelState:
     can_quat_hz:  int   = 0
     can_rate_hz:  int   = 0
     flight_mode:  int   = 0
+    use_indi:     bool  = False
     received_any: bool  = False
     usb_rx_any:   bool  = False
     last_rx:      float = field(default_factory=time.monotonic)
@@ -167,13 +168,17 @@ def flight_mode_name(mode: int) -> str:
     return f"UNKNOWN({mode})"
 
 
+def attitude_ctrl_name(use_indi: bool) -> str:
+    return "INDI" if use_indi else "PID"
+
+
 def parse_tel_line(line: str, state: TelState) -> bool:
     """Parse a $TEL CSV line into state. Returns True on success."""
     if not line.startswith("$TEL,"):
         return False
     try:
         parts = line[5:].split(",")
-        if len(parts) < 23:
+        if len(parts) < 24:
             return False
         state.time_ms     = float(parts[0])
         state.roll        = float(parts[1])
@@ -196,6 +201,7 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         state.can_quat_hz = int(parts[20])
         state.can_rate_hz = int(parts[21])
         state.flight_mode = int(parts[22])
+        state.use_indi    = bool(int(parts[23]))
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()

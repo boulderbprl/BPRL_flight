@@ -24,6 +24,7 @@ pip install pyserial rich
 | `i2c_tools.py` | `i2c-scan` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
+| *(raw serial, see [Timing](#timing--schedulability-bprl_timing-build) below)* | `TIM,status`, `TIM,reset` | Requires `-DBPRL_TIMING` |
 
 `dshot_decode_test.py` is a standalone dev/test script (no argparse subcommands) — not part of the main CLI family above.
 
@@ -198,7 +199,7 @@ python3 tools/logs.py log-status
 |---|---|
 | `<stem>_att.csv` | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
 | `<stem>_lin.csv` | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
-| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), Armed |
+| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw switch value, >0.33=INDI), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
@@ -212,14 +213,80 @@ The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilo
 
 ---
 
+## Timing / schedulability (`BPRL_TIMING` build)
+
+> Requires `-DBPRL_TIMING` firmware build. Testing/bench only — disable for flight builds (adds per-tick timestamp reads on every instrumented thread).
+
+Per-thread execution-time and CPU-utilization instrumentation, added to check whether the ChibiOS thread set (SPI, CAN, I2C, StateEst, Control, Radio, Heartbeat, MAVLink, Debug, Log, USBCmd) is actually schedulable at its configured rates and priorities, rather than assuming it. See `src/diagnostics/ThreadTiming.hpp` for the implementation and `threads_start()` in `src/threads.cpp` for the current priority ordering.
+
+Build and flash:
+
+```bash
+make BOARD=orange UDEFS_EXTRA=-DBPRL_TIMING
+make flash BOARD=orange
+# combine with debug telemetry if needed:
+make BOARD=blue UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
+```
+
+There's no dedicated `tools/*.py` wrapper yet — query the two commands directly over the USB serial port, e.g. with pyserial's bundled terminal:
+
+```bash
+python3 -m serial.tools.miniterm /dev/ttyACM0 115200
+# then type: TIM,status        (dump the report)
+#            TIM,reset         (zero out min/max/avg/miss counters, start a fresh window)
+# Ctrl+] to exit
+```
+
+or a short one-off script:
+
+```python
+import serial, time
+ser = serial.Serial("/dev/ttyACM0", 115200, timeout=1)
+time.sleep(0.2)
+ser.write(b"TIM,status\r\n")
+time.sleep(0.3)
+print(ser.read(4096).decode(errors="replace"))
+```
+
+Sample output — one `$THD` line per registered thread, plus a `$CPU` totals line. This is a real capture (625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control, armed/loaded):
+
+```
+$THD,can,period_us=event,exec_avg_us=1,exec_max_us=100,n=39120
+$THD,i2c,period_us=2000,exec_avg_us=0,exec_max_us=100,util_pct=0.0,misses=0,n=39119
+$THD,est,period_us=1600,exec_avg_us=876,exec_max_us=1400,util_pct=54.7,misses=0,n=48899
+$THD,ctrl,period_us=2500,exec_avg_us=7,exec_max_us=100,util_pct=0.3,misses=0,n=31296
+$THD,radio,period_us=10000,exec_avg_us=5,exec_max_us=100,util_pct=0.0,misses=0,n=7824
+$THD,heartbeat,period_us=200000,exec_avg_us=1,exec_max_us=100,util_pct=0.0,misses=0,n=392
+$THD,mavlink,period_us=10000,exec_avg_us=0,exec_max_us=100,util_pct=0.0,misses=0,n=7575
+$THD,usbcmd,period_us=event,exec_avg_us=916,exec_max_us=1900,n=6
+$THD,log,period_us=20000,exec_avg_us=4352,exec_max_us=43700,util_pct=21.7,misses=153,n=3909
+$THD,spi,period_us=1000,exec_avg_us=93,exec_max_us=500,util_pct=9.3,misses=0,n=78167
+$CPU,util_pct=86.2,util_pct_hrt=64.3,n_threads=10
+```
+
+Reading it:
+
+| Field | Meaning |
+|---|---|
+| `period_us=event` | An event-driven thread (`can`, `usbcmd`) — exec time is still tracked but excluded from `util_pct`/`util_pct_hrt` since it has no fixed period. |
+| `exec_avg_us` / `exec_max_us` | Running average / worst-case time spent in that thread's per-tick work (excludes the sleep-until-next-period call). |
+| `util_pct` | `exec_avg_us / period_us`, i.e. this thread's slice of CPU time. |
+| `misses` | Ticks where `exec_us` exceeded the thread's own period — a direct sign that thread is not keeping up with its own rate. |
+| `$CPU,util_pct` | Sum of `util_pct` over every rate-tracked thread — the Liu & Layland `Σ(C_i/T_i)` figure. Above ~70% is a soft warning for a task set this size; approaching 100% or `misses>0` anywhere means it's not schedulable as configured. |
+| `$CPU,util_pct_hrt` | Same sum, but skipping threads registered with `TIMING_REGISTER_SOFT` (currently just `log`) — a truer figure for hard-deadline schedulability when the task set also has a soft-deadline, I/O-bound thread whose worst-case latency isn't CPU-bound (see the root README's [Timing and Utilization](../README.md#timing-and-utilization)). In the capture above, `util_pct` is 86.2% but `util_pct_hrt` is 64.3% — `log`'s SD-card-write tail alone accounts for the rest. |
+
+Run it under realistic load (armed, radio connected, CAN/mocap link up) — idle-bench numbers will understate `est`/`ctrl`/`spi` load significantly.
+
+---
+
 ## flash_upload.py
 
 Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using the ChibiOS bootloader protocol over USB.
 
 ```bash
 # Recommended: use Makefile targets
-make flash BOARD=CubeBlueH7
-make flash BOARD=CubeOrangePlus PORT=/dev/ttyACM0
+make flash BOARD=blue
+make flash BOARD=orange PORT=/dev/ttyACM0
 
 # Or directly
 python3 tools/flash_upload.py build/BPRL.bin
@@ -233,11 +300,11 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 ## Quick reference
 
 ```bash
-# Flash (default board: BOARD=CubeBlueH7)
-make flash BOARD=CubeOrangePlus
+# Flash (default board: BOARD=orange)
+make flash BOARD=orange
 
 # Debug build + flash
-make BOARD=CubeOrangePlus UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=CubeOrangePlus
+make BOARD=orange UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=orange
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
@@ -255,4 +322,8 @@ python3 tools/can_tools.py can-scan --duration 2
 
 # IMU calibration (debug build required)
 python3 tools/calibrate.py calibrate
+
+# Timing/schedulability build + query (see Timing section above)
+make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING && make flash BOARD=blue
+python3 -m serial.tools.miniterm /dev/ttyACM0 115200   # then type: TIM,status
 ```

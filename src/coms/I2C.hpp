@@ -3,7 +3,7 @@
 
 /*
  * I2C bus driver — currently used only by the strain-rate sensor's I2C
- * fallback interface (STRAIN_RATE_I2C override; CAN is the default). No
+ * interface (STRAIN_RATE_I2C, the default; CAN is the override). No
  * magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see
  * src/coms/Baro/MS5611.hpp.
  *

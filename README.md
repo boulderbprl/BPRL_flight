@@ -46,8 +46,8 @@ BPRL_flight/
 │   ├── threads.cpp           All thread function bodies + global state definitions
 │   │
 │   ├── coms/                 Peripheral drivers
-│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (ICM-45686 driver class) + MS5611 barometer
-│   │   ├── IMUs/             ICM45686.hpp/.cpp (drives imu1/2/3), ICM42688.hpp/.cpp (unused/dead code)
+│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (chip set selected by BOARD, see below) + MS5611 barometer
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (BOARD=orange: drives imu1/2/3), ICM42688.hpp/.cpp (supports a 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (BOARD=blue: drives imu1/2/3)
 │   │   ├── Baro/             MS5611.hpp/.cpp — barometer state-machine driver (SPI1, CS=PD7)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
 │   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface only
@@ -96,13 +96,15 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 500 Hz | Fuse sensors → g_state[] |
-| I2CThread | NORMALPRIO+22 | 500 Hz | Poll I2C devices (strain rate sensor) |
-| ControlThread | NORMALPRIO+20 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| StateEstThread | NORMALPRIO+25 | 625 Hz | Fuse sensors → g_state[] |
+| ControlThread | NORMALPRIO+22 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| I2CThread | NORMALPRIO+20 | 500 Hz | Poll I2C devices (strain rate sensor) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
-| HeartbeatThread | NORMALPRIO-5 | 5 Hz | LED heartbeat |
+| HeartbeatThread | NORMALPRIO-5 | 1 Hz | LED heartbeat |
 | LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (11 message types per tick) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
+
+`ControlThread` sits above `I2CThread` deliberately — the 400 Hz flight-critical control loop shouldn't be delayed by a slower, less critical sensor poll. See [Timing and Utilization](#timing-and-utilization) below for how this priority ordering and the current rates were chosen/verified.
 
 ### Shared state
 
@@ -112,14 +114,27 @@ All inter-thread communication goes through mutex-protected globals defined in `
 |---|---|---|
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
-| `g_input[5]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch) |
+| `g_input[6]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch, INDI/PID switch) |
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
 | `g_ctrl[4]` | `state_mtx` | PID torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
-| `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1 |
+| `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1, each with an arrival timestamp for age-gating/forward-propagation in `StateManager` |
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
 | `g_baro` | `baro_mtx` | Pressure/temperature/altitude from the MS5611 barometer |
+| `g_rpm_gated[4]` | `esc_mtx` | Fault-gated per-motor mechanical RPM (holds last good value below 100 RPM after having seen a real reading) — published by `ControlThread`, read by `LogThread`/`DebugThread`/`StateManager`'s notch filter |
+
+### Timing and Utilization
+
+Measured with `BPRL_TIMING` (see `tools/README.md`'s [Timing / schedulability](tools/README.md#timing--schedulability-bprl_timing-build) section) at the current rates — 625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control:
+
+| | utilization | misses |
+|---|---|---|
+| Hard-deadline threads (SPI, CAN, StateEst, I2C, Control, Radio, Heartbeat, MAVLink) | ~64% | 0 |
+| LogThread (soft-deadline, SD-card I/O-bound) | ~20–22% | ~4% |
+| **Total** | **~86%** | — |
+
+The hard-deadline figure is what a classic RM/Liu-Layland schedulability analysis actually applies to, and it's comfortably under the ~70% target with real margin. `LogThread` is excluded from that figure by design (`TIM,status`'s `util_pct_hrt` field) because SD-card writes don't have a bounded worst-case latency the way CPU-bound computation does — its residual ~4% miss rate is a bounded, non-corrupting I/O tail (the 32 KB ring buffer absorbs any single stall without data loss), not a scheduling failure. `StateEstThread` at the previous 800 Hz was the opposite story: it regularly missed its own deadline, stayed permanently runnable as the second-highest-priority thread in the system, and starved everything below it — including the watchdog kick in `main()`'s idle loop — causing a reset roughly every 30s. See [State Estimation (EKF)](#3-state-estimation-ekf) and [SD Card Logging](#5-sd-card-logging) for how each was resolved.
 
 ---
 
@@ -132,7 +147,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 The controller stack runs at 400 Hz. `FlightStateMachine` selects the active flight mode and dispatches to the attitude and throttle controllers, whose outputs feed `MotorMixer`.
 
 ```
-RC input[5]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
+RC input[6]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
      │
      ▼
 FlightStateMachine
@@ -205,7 +220,7 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor com
 
 ### Architecture
 
-State estimation runs in `StateEstThread` at 500 Hz. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap).
+State estimation runs in `StateEstThread` at 625 Hz. This rate was chosen empirically, not for a clean ratio with the 400 Hz control loop — profiling with the `BPRL_TIMING` instrumentation (see [Timing and Utilization](#timing-and-utilization)) showed the notch-filtered, CAN-staleness-gated 3-lane EKF update genuinely could not fit an 800 Hz budget (average execution time alone exceeded the 1250µs period on nearly every tick), which left `StateEstThread` — the second-highest-priority thread in the system — permanently runnable and starved everything below it, including the IWDG watchdog kick in `main()`'s idle loop, causing a reset every ~30s. 625 Hz (the nearest achievable rate to 600 Hz at the system's 100µs tick granularity) leaves real headroom (measured ~55% utilization, zero missed deadlines) after two cheap optimizations — de-duplicating the per-axis notch-filter coefficient computation and building at `-O3` instead of `-O2` — recovered a meaningful chunk of the original 800 Hz budget. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
 
 ```
 g_imu[0] ──► EKF lane 0 ──┐
@@ -230,7 +245,7 @@ Each lane estimates:
 
 p/q/r, u_dot/v_dot/w_dot, and p_dot/q_dot/r_dot are **not** Kalman states, they are computed by `StateManager` and appended to the output vector.
 
-### Predict step (500 Hz)
+### Predict step (625 Hz)
 
 Each lane predicts forward using its own IMU after subtracting the estimated bias:
 
@@ -247,11 +262,13 @@ Updates are applied in order each tick (earlier updates inform later ones):
 
 | Step | Source | Rate | States updated |
 |------|--------|------|----------------|
-| 1.5 | Onboard accel (gravity vector) | 500 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
-| 2 | IMX5 quaternion over CAN | 200 Hz, async | Full quaternion |
+| 1.5 | Onboard accel (gravity vector) | 625 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
+| 2 | IMX5 quaternion over CAN | 200 Hz, async, age-gated (skipped if >50ms stale) and forward-propagated by its measured age before fusing | Full quaternion |
 | 5 | Mocap NED position | Async | X, Y, Z |
 | 5 | Mocap NED velocity → body frame | Async | u, v, w |
 | 5.6 | MS5611 barometric altitude | ~100+ Hz, async, **suppressed while mocap is connected** | Z (and, via cross-covariance, w and Z accel bias) |
+
+IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF measurement update) are similarly age-gated — see [Sensor loss behaviour](#sensor-loss-behaviour) and the `STATEMGR_IMX5_RATE_WEIGHT` row below. Unlike the quaternion, the rate blend is a continuous sample-and-hold rather than event-gated: it re-blends whatever `g_can_imu.p/q/r` currently holds every 625 Hz tick (refreshed ~every 10ms), rather than only touching the blend on ticks where a new CAN rate frame actually arrived.
 
 The gravity-vector update (`update_gravity`) hard-rejects samples where `|accel|` is outside `[0.1g, 3g]`, then applies a joint chi-squared gate (`GRAV_CHI2_GATE = 5σ`) over an adaptive measurement noise that grows with a lowpass-filtered vibration estimate (`GRAV_R_VIBE`) — so it's trusted less, not switched off outright, under vibration. Only the Z-axis accel bias is corrected here (X/Y residuals are ambiguous between bias and genuine horizontal acceleration; those are only resolved via mocap velocity fusion's cross-covariance with u/v). Yaw is not observable from gravity alone and requires the IMX5.
 
@@ -265,12 +282,12 @@ The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BA
 |---------|--------|--------|
 | 0–2 | X, Y, Z | Primary EKF lane |
 | 3–5 | u, v, w | Primary EKF lane |
-| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 30 Hz lowpass |
+| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 20 Hz lowpass |
 | 9–12 | q0, q1, q2, q3 | Primary EKF lane |
-| 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix |
+| 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix, motor-vibration notch (RPM-tracked, auto-disables rather than mis-targets once the tracked frequency reaches Nyquist — see the `STATEMGR_NOTCH_BW_HZ` row below), then 20 Hz (roll/pitch) / 5 Hz (yaw) 2nd-order lowpass |
 | 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 20 Hz lowpass |
 
-Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm` to improve noise reduction.
+Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm`, itself low-passed at `STATEMGR_LP_BLENDW_HZ` (3 Hz) before renormalizing across lanes — the raw instantaneous weight is derived from a noisy quantity, so blending it in unsmoothed would make the blend ratio itself a fast-changing noise source.
 
 ### Tuning parameters
 
@@ -289,11 +306,17 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `R_QUAT` | StateManager.hpp | 1e-3 | IMX5 quaternion noise. Lower = trust IMX5 more. |
 | `R_GRAVITY` | StateManager.hpp | 0.5 | Accel gravity-vector noise (m/s²)². Lower = trust accel attitude more. |
 | `R_MOCAP_POS` | StateManager.hpp | 1e-3 | Mocap position noise (m²). |
-| `R_MOCAP_VEL` | StateManager.hpp | 1e-2 | Mocap velocity noise (m/s)². |
+| `R_MOCAP_VEL` | StateManager.hpp | 1e-4 | Mocap velocity noise (m/s)². |
 | `R_BARO_POS` | StateManager.hpp | 0.5 | Baro altitude noise (m²) — tune from bench log noise once flashed. |
 | `STATEMGR_IMX5_RATE_WEIGHT` | StateManager.hpp | 0.3 | IMX5 share of blended p/q/r (0 = pure gyro, 1 = pure IMX5). |
-| `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 30 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
+| `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
+| `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
 | `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
+| `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
+| `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At 625 Hz that's ~300 Hz (~18,000 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |
+| `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.05 | Max fractional change in the notch's tracked center frequency per tick (matches ArduPilot's ±5%/update). |
+| `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. |
+| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.016 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at StateEstThread's 625 Hz — rescale if that rate changes, see the comment in EKF.hpp). |
 
 ### Sensor loss behaviour
 
@@ -325,8 +348,13 @@ All math helpers live in `src/math/math.hpp` / `src/math/math.cpp`. The quaterni
 |----------|-----------|-------------|
 | `lowpass_alpha` | `float lowpass_alpha(float fc_hz, float dt_s)` | Computes first-order IIR coefficient: `α = dt / (dt + 1/(2π·fc))`. Call once when `fc` or `dt` changes. |
 | `lowpass` | `float lowpass(float input, float prev_out, float alpha)` | Applies one IIR tick: `y_k = α·x_k + (1−α)·y_{k−1}`. Caller owns `prev_out`. |
+| `lowpass2p` | `float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)` | Second-order (2-pole) Butterworth IIR lowpass — ~-40 dB/decade vs. `lowpass`'s ~-20 dB/decade. Coefficients recomputed from `fc_hz`/`dt_s` every call. `fc_hz <= 0` disables filtering (passthrough). Caller owns the `Biquad2pState` (2 delay elements). |
+| `notch` | `float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_hz, float dt_s)` | Second-order notch (RBJ biquad form), reusing `Biquad2pState` for delay memory — same direct-form-II structure as `lowpass2p`. `bandwidth_hz` sets notch width (`Q = center_hz/bandwidth_hz`). Caller drives frequency tracking (and should slew-limit `center_hz` between calls). `center_hz <= 0` or `bandwidth_hz <= 0` disables filtering. |
 | `derivative` | `float derivative(float current, float prev, float dt_s)` | Backward-difference numerical derivative: `(current − prev) / dt`. Caller owns `prev`. |
 | `integrate` | `float integrate(float value, float dt_s)` | Rectangular (Euler) integration step: `value · dt`. Caller owns the accumulator. |
+| `rpm_gate` | `uint32_t rpm_gate(RpmGateState& state, uint32_t raw_rpm)` | RPM plausibility gate: once a motor has reported >100 RPM, a subsequent reading below that threshold is treated as a missed telemetry frame (motors don't legitimately idle that slowly while armed) and the last good value is held instead. Returns `raw_rpm` unchanged before the first >100 RPM reading. |
+
+`Biquad2pState` (2 delay elements) backs both `lowpass2p` and `notch`; `RpmGateState` (`last_good`, `seen_valid`) backs `rpm_gate` — both are plain structs, matching this file's convention of small per-channel filter state rather than a class.
 
 ### 3-vector helpers
 
@@ -385,7 +413,7 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 |---|---|---|
 | `ATT` | 0x09 | TimeUS, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
 | `LIN` | 0x0A | TimeUS, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
-| `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), Armed |
+| `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw switch value, >0.33=INDI), Armed |
 | `OUTP` | 0x06 | TimeUS, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
 | `RPMS` | 0x07 | TimeUS, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
 | `STRN` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
@@ -435,7 +463,7 @@ Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first. There 
 { LOG_MSG_RNGF, "RNGF", "QfB", "TimeUS,Range,Valid", sizeof(LogMsgRNGF) },
 ```
 
-Format codes: `Q`=uint64, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad).
+Format codes: `Q`=uint64, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad). `fmt` must be ≤15 chars and `labels` ≤63 chars — these are the actual usable lengths of the FMT record's fixed `format[16]`/`labels[64]` fields once `Logger::write_schema_header()`'s `strncpy` reserves a byte for the null terminator. A `static_assert` right after `kLogDefs[]` in `LogMessages.hpp` checks every entry against these limits at build time, so a string that's too long fails the build instead of being silently truncated by `strncpy` (which happened once before this check existed — UAV Log Viewer showed a message with fields missing past the cut, with no error anywhere to explain why).
 
 **Step 3 — Snapshot and write in `LogThread` (`src/threads.cpp`)**
 
@@ -460,7 +488,9 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ```
 `length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 100 flushes (~1 Hz) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
+
+**File pre-allocation:** `Logger::init()` calls `f_expand()` right after creating the file (10 MB, `PRE_ALLOC_SIZE` in `Logger.hpp`) — a one-time contiguous cluster-chain reservation while a stall is harmless (motors aren't spinning yet), instead of letting `f_write()` grow the FAT chain incrementally during flight. That incremental growth (plus `f_sync()`'s directory/FAT write) was causing `LogThread` periodic multi-ms-to-hundreds-of-ms stalls on the SD card's internal metadata writes — profiling with `BPRL_TIMING` (see [Timing and Utilization](#timing-and-utilization)) is what surfaced this. `Logger::close()` calls `f_truncate()` to trim the file back to the actual bytes written before the final `f_sync()`. Pre-allocation is best-effort: `expand_err()` (surfaced via `LOG,status`'s `expand_err=` field) reports the FatFS `FRESULT` — `0` means it succeeded, nonzero means the card couldn't offer a contiguous 10 MB run and logging fell back to normal incremental growth. Even with pre-allocation confirmed working, some residual stall rate remains — SD cards don't have a bounded worst-case write latency (internal wear-leveling/GC), so this is a mitigated-not-eliminated I/O-latency tail rather than a fixable software bug; see [Timing and Utilization](#timing-and-utilization).
 
 **D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
@@ -479,33 +509,38 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ### Build
 
 ```bash
-# Default board (CubeBlue H7)
+# Default board (CubeOrange+, plain flight build — no debug/timing flags)
 make
 
-# Explicitly select board
-make BOARD=CubeBlueH7
-make BOARD=CubeOrangePlus
+# Explicitly select board — short names map to the internal board dirs/macros
+# (boards/CubeBlueH7, -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS)
+make BOARD=blue      # CubeBlue H7
+make BOARD=orange    # CubeOrange+ (default)
 
 # Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
-make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
+make BOARD=blue UDEFS_EXTRA=-DBPRL_DEBUG
+
+# Enable thread timing / CPU utilization instrumentation (testing/bench only —
+# see Timing and Utilization below)
+make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING
 
 # Clean build directory
 make clean
 ```
 
-Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`.
+Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile).
 
 ### Upload
 
 **Via Cube USB bootloader:**
 ```bash
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
+make flash BOARD=blue PORT=/dev/ttyACM0
 ```
 `tools/flash_upload.py` handles the protocol.
 
 **Via ST-Link / OpenOCD:**
 ```bash
-make flash-stlink BOARD=CubeBlueH7
+make flash-stlink BOARD=blue
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
@@ -515,7 +550,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **U
 
 | Prefix | Content |
 |---|---|
-| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz |
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, use_indi |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 
@@ -529,10 +564,12 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ### Channel summary
 
+IMU chip set and CS pins are board-conditional (`BOARD=orange` default vs. `BOARD=blue`) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `BOARD=orange` shown here:
+
 | Channel | Driver | Device(s) | Status |
 |---|---|---|---|
 | SPI1 | `SPI.hpp/.cpp` | imu1 (ICM-45686, CS=PG1), baro1 (MS5611, CS=PD7) | Working |
-| SPI4 | `SPI.hpp/.cpp` | imu2 (ICM-42688, CS=PC15), imu3 (ICM-42688, CS=PC13) | Working |
+| SPI4 | `SPI.hpp/.cpp` | imu2 (ICM-45686, CS=PC15), imu3 (ICM-45686, CS=PC13) | Working — this board's SPI4 slots are ICM-45686; other CubeOrangePlus revisions populate ICM-42688 there instead (see IMU Drivers below) |
 | FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, default interface) | Working |
 | TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
 | UART (TELEM1) | `Radio.hpp/.cpp` | CRSF receiver (default; SBUS also compiled, `RADIO_PROTOCOL` selects) | Working |
@@ -543,25 +580,35 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ## 8. IMU Drivers
 
-The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed:
+The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set is board-conditional** — `BOARD=orange` (CubeOrangePlus, default) and `BOARD=blue` (CubeBlueH7) populate `imu1/2/3` with genuinely different parts, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` (set by the Makefile from `BOARD=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
 
-| Index | Variable | Sensor | Bus | DOF |
+| Index | Variable | `BOARD=orange` sensor/bus | `BOARD=blue` sensor/bus | DOF |
 |---|---|---|---|---|
-| 0 | `g_imu[0]` | ICM-45686 | SPI1, CS=PG1 | 6 (accel + gyro) |
-| 1 | `g_imu[1]` | ICM-42688 (physically; read via the `ICM45686` driver class) | SPI4, CS=PC15 | 6 (accel + gyro) |
-| 2 | `g_imu[2]` | ICM-42688 (physically; read via the `ICM45686` driver class) | SPI4, CS=PC13 | 6 (accel + gyro) |
-| — | `g_can_imu` | IMX5 (INS) | FDCAN1 | attitude + rates |
-| — | `g_baro` | MS5611 | SPI1, CS=PD7 | pressure + temperature |
+| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | 6 (accel + gyro) |
+| 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | 6 (accel + gyro) |
+| 2 | `g_imu[2]` | ICM-45686, SPI4 CS=PC13 | ICM-20602, SPI4 CS=PC13 | 6 (accel + gyro) |
+| — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
+| — | `g_baro` | MS5611, SPI1 CS=PD7 | MS5611, SPI1 CS=PD7 (same pin both boards) | pressure + temperature |
 
-### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`)
+### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `BOARD=orange`
 
-InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs** — `imu2`/`imu3` are physically ICM-42688 chips, but the ICM-45686 driver reads them too, because the two chips share a compatible WHOAMI/register/FIFO layout at the settings this firmware uses (see the comments in `ICM45686.cpp` on `PWR_MGMT0`/FS_SEL bit compatibility). The `ICM42688.hpp/.cpp` and `ICM20948.hpp/.cpp`/`ICM20602.hpp/.cpp` classes still exist in the tree but are dead code — not instantiated anywhere (the latter two are leftovers from an earlier hardware revision).
+InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs on this board** — all three slots (`imu1/2/3`) are confirmed populated with real ICM-45686 parts (verified by each successfully passing its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 rather than ICM-45686 — `ICM42688.hpp/.cpp` exists in the tree to support that variant, not because it's dead code, it just isn't instantiated on this board's `SPI.cpp`.
 
 - **Configured ranges:** ±16 g accelerometer, ±2000 °/s gyroscope
 - **Outputs:** accel in m/s², gyro in rad/s
-- **Read rate:** 1 kHz from SPIThread; internal ODR ~800 Hz
+- **Read rate:** 1 kHz from SPIThread; internal ODR ~1.6 kHz fast-sampling. `read()` drains and averages every FIFO packet queued since the last call (capped at 8 packets), so the 1 kHz caller gets a decimated/averaged sample rather than picking one aliased sample out of several — this is a deliberate oversample-then-filter design, not just a rate bump. Chosen as a middle ground: noise reduction from averaging scales with `1/√N` samples, so the first doubling (800 Hz→1.6 kHz, matching the chip's native base ODR to ~2 samples/tick) captures roughly the first ~21% of the available noise reduction; a further doubling to ArduPilot's own 3.2 kHz default for this chip only adds another ~23% on top for double the packet count — this trades some of that additional benefit for a much smaller `SPIThread` budget (measured ~9% utilization vs. ~20% at 3.2 kHz, both well within the 1 kHz budget either way).
+- **Hardware anti-alias filter:** enabled (interpolator + AAF bits set via the chip's indirect IPREG bank) but left at its ASIC default corner — the driver doesn't program a custom DELT/DELTSQR/BITSHIFT cutoff the way `ICM42688.cpp` does for that chip family (~258 Hz gyro / ~213 Hz accel at 1 kHz ODR). This matches ArduPilot's own `AP_InertialSensor_Invensensev3` driver for the ICM-456xx family, which does the same thing — not an oversight here.
 - **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
 - **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
+
+### ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `BOARD=blue`
+
+Classic InvenSense MPU-9250-family parts — register-based digital low-pass filter (DLPF) rather than the 45686/42688's analog anti-alias filter stage, and no FIFO/oversampling (single sample per `SPIThread` tick).
+
+- **ICM-20948** (`imu1`/`imu2`, 9-DOF part used here as 6-DOF): ±16 g / ±2000 °/s, ~1.125 kHz ODR. `GYRO_CFG1`/`ACCEL_CFG` enable the DLPF but leave `DLPFCFG=0` — the chip's widest/default bandwidth, not deliberately narrowed.
+- **ICM-20602** (`imu3`): ±16 g / ±2000 °/s, 1 kHz ODR, DLPF **explicitly** configured — `DLPF_CFG=1` (~184 Hz gyro bandwidth), `A_DLPF_CFG=1` (99 Hz accel bandwidth).
+- **SPI mode:** MODE3 (CPOL=1, CPHA=1) for both — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
+- **Axis rotation:** ⚠️ **unverified placeholder.** `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) currently passes each chip's native axes straight through with no rotation — the CubeOrangePlus rotation constants above were derived for that board's specific ICM-45686 mounting and do not apply to these different, differently-mounted chips. The real mounting orientation isn't derivable from source; **bench-verify before flight** (e.g. tilt nose-down, confirm pitch sign in `$TEL`/`$IMU` telemetry via `tools/telemetry.py`) and update the rotation math once known. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
 
 ### MS5611 Barometer
 
@@ -585,7 +632,7 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 | `0x03` | q rate + y accel | same encoding | 100 Hz |
 | `0x04` | r rate + z accel | same encoding | 100 Hz |
 
-When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`). The on-board IMUs continue to run and are logged regardless of IMX5 state.
+When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz — each CAN frame is timestamped on arrival, and `StateManager` skips fusing it if it's more than `STATEMGR_CAN_QUAT_STALE_US` (50ms) stale by the time it's processed, otherwise forward-propagating it by its measured age (using each lane's own gyro) before fusing, rather than treating a few-ms-old sample as if it were instantaneous. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`); this blend is a continuous sample-and-hold rather than event-gated like the quaternion — it re-blends whatever the last-received `g_can_imu.p/q/r` holds on every 625 Hz tick (refreshed ~every 10ms), gated only on the same 50ms staleness check (`STATEMGR_CAN_RATES_STALE_US`), not on whether a new frame arrived this specific tick. The on-board IMUs continue to run and are logged regardless of IMX5 state.
 
 ---
 
@@ -609,7 +656,7 @@ The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs nat
 
 3. **Clone the repo and build** — the Makefile works unchanged:
    ```bash
-   make BOARD=CubeBlueH7
+   make BOARD=blue
    ```
 
 ### Flashing from WSL2
@@ -624,9 +671,9 @@ usbipd attach --wsl --busid <ID>
 ```
 Then in WSL2:
 ```bash
-make flash BOARD=CubeBlueH7 PORT=/dev/ttyACM0
+make flash BOARD=blue PORT=/dev/ttyACM0
 # or
-make flash-stlink BOARD=CubeBlueH7
+make flash-stlink BOARD=blue
 ```
 
 **Option B — STM32CubeProgrammer (no usbipd needed):**

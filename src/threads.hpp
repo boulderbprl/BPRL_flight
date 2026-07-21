@@ -18,12 +18,14 @@ struct CANIMURaw {
     // Replaces the previous Euler-angle fields (roll, pitch, yaw).
     float q0, q1, q2, q3;   // unit quaternion components (decoded from int16/10000)
     bool  has_new_quat;      // set by CAN callback; cleared after StateEstThread consumes it
+    uint32_t quat_timestamp_us;  // chVTGetSystemTimeX()-derived us at which has_new_quat was set
 
     // Body-frame angular rates from IMX5 (100 Hz, CAN IDs 0x02–0x04)
     float p, q, r;           // rad/s
     // Body-frame specific force from IMX5 (100 Hz, same CAN frames as rates)
     float ax, ay, az;        // m/s²
     bool  has_new_rates;     // set by CAN callback; cleared after StateEstThread consumes it
+    uint32_t rates_timestamp_us; // chVTGetSystemTimeX()-derived us at which has_new_rates was set
 
     bool  valid;             // true while IMX5 frames are arriving
 };
@@ -31,8 +33,10 @@ struct CANIMURaw {
 struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
+    float yaw;        // NED heading (rad) — absolute, mocap-frame-referenced
     bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
     bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by StateEstThread
+    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
     bool  valid;       // mocap link connected and receiving
 };
 
@@ -49,13 +53,14 @@ struct BaroRaw {
 extern mutex_t state_mtx;
 extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
-extern float   g_input[5];           // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode)
+extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, indi switch)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
 extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
+extern bool    g_use_indi;           // attitude controller switch from radio (false=PID, true=INDI)
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
@@ -70,8 +75,13 @@ extern MocapRaw g_mocap;
 extern mutex_t baro_mtx;
 extern BaroRaw g_baro;
 
-extern mutex_t      esc_mtx;
-extern ESCTelemetry g_esc_telem[4]; // [FR, RL, FL, RR] — written by DShot ISR
+// Fault-gated per-motor mechanical RPM [FR, RL, FL, RR] — written once per
+// ControlThread tick from dshot_get_telemetry()'s raw eRPM via rpm_gate()
+// (see math.hpp), so a momentary telemetry dropout reads as the last good
+// RPM instead of a spurious near-zero. Other consumers (logging, $TEL) read
+// this instead of re-deriving RPM from raw telemetry themselves.
+extern mutex_t esc_mtx;
+extern uint32_t g_rpm_gated[4];
 
 /* ── Motor test (always built) ───────────────────────────────────────────────
  * Set by USBCmdThread in response to "MT,<motor>,<pct>" USB commands.
