@@ -5,13 +5,10 @@
 AttitudePID::AttitudePID()
     : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
     , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    // filt_target_hz=20 matches ArduPilot's AC_PID FLTT default on all rate
-    // axes; filt_error_hz (FLTE) stays 0 on roll/pitch and 2.5 on yaw, also
-    // matching ArduPilot's AC_AttitudeControl_Multi defaults.
     , _roll_rate (0.09f, 0.075f, 0.001f, 0.5f, 20.0f, 0.0f, 30.0f)
-    , _pitch_rate(0.13f, 0.100f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f)
+    , _pitch_rate(0.12f, 0.100f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f)
     , _yaw_rate  (0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f)
-    , _yaw_hold  (0.50f, 0.00f, 0.000f, 0.3f, 0.0f, 0.0f, 30.0f)
+    , _yaw_hold  (0.60f, 0.050f, 0.000f, 0.3f, 0.0f, 0.0f, 30.0f)
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}

@@ -1,12 +1,20 @@
 #pragma once
 #include <cstdint>
+#include "src/math/math.hpp"
 
 /*
  * Unmixer — converts per-motor RPM to physical roll/pitch torques (N·m).
  *
+ * Gated RPM is 2nd-order (Butterworth) lowpass filtered per motor at
+ * RPM_FILT_HZ before the motor model, to knock down eRPM telemetry
+ * noise/quantization feeding current_torque (the baseline AttitudeINDI adds
+ * delta_torque onto). dt is a fixed constant rather than measured, since
+ * compute() is only ever called from ControlThread's fixed 400 Hz period
+ * (see main.cpp's kRates.control) — no self-timing needed.
+ *
  * Motor model (bench thrust fit, normalised angular velocity cubic → thrust in N).
  * The bench fit was done against motor angular velocity in rad/s, not RPM, so
- * incoming mechanical RPM is converted first:
+ * incoming (filtered) mechanical RPM is converted first:
  *   omega    = rpm * (pi / 30)                       // RPM → rad/s
  *   rpm_norm = (omega - RPM_NORM_CENTER) / RPM_NORM_SCALE
  *   F_N      = C3*rpm_norm³ + C2*rpm_norm² + C1*rpm_norm + C0
@@ -36,7 +44,7 @@ public:
 
     // rpm[4]: per-motor mechanical RPM [FR, RL, FL, RR]
     // torque_Nm[2]: output [roll, pitch] in N·m
-    void compute(const uint32_t rpm[4], float torque_Nm[2]) const;
+    void compute(const uint32_t rpm[4], float torque_Nm[2]);
 
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
@@ -61,6 +69,12 @@ public:
     //   T_MAX = 2*sin(45°) * ARM_LENGTH_M * MAX_THRUST_N
     static constexpr float T_MAX_NM = 1.2693981f;
 
+    // ── Gated-RPM prefilter ─────────────────────────────────────────────────
+    static constexpr float RPM_FILT_HZ = 20.0f;    // 2nd-order LPF cutoff (matches p_dot/q_dot)
+    static constexpr float RPM_FILT_DT_S = 0.0025f; // fixed 400Hz ControlThread period
+
 private:
-    static float motor_force_N(uint32_t rpm);
+    static float motor_force_N(float rpm);
+
+    Biquad2pState _rpm_filt_state[4];
 };

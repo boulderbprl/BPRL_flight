@@ -6,10 +6,10 @@
 AttitudeINDI::AttitudeINDI()
     : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
     , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _roll_rate (4.5f, 0.00f, 0.6f, 15.0f, 0.0f, 0.0f, 30.0f)
-    , _pitch_rate(4.5f, 0.00f, 0.6f, 15.0f, 0.0f, 0.0f, 30.0f)
+    , _roll_rate (6.5f, 0.20f, 0.0f, 10.0f, 30.0f, 0.0f, 30.0f)
+    , _pitch_rate(6.5f, 0.20f, 0.0f, 10.0f, 30.0f, 0.0f, 30.0f)
     , _yaw_rate  (0.065f, 0.02f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _yaw_hold  (0.60f, 0.05f, 0.000f, 0.2f, 0.0f, 0.0f, 30.0f)
+    , _yaw_hold  (0.60f, 0.05f, 0.000f, 0.3f, 0.0f, 0.0f, 30.0f)
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}

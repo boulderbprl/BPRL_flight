@@ -47,8 +47,8 @@ public:
     void reset_all();
 
     // G(x)^-1 : N·m per rad/s² — airframe moment of inertia (Ixx, Iyy) * gain (1 for now)
-    static constexpr float INDI_GAIN_ROLL = 0.001f;
-    static constexpr float INDI_GAIN_PITCH = 0.0015f;
+    static constexpr float INDI_GAIN_ROLL = 0.0025f;
+    static constexpr float INDI_GAIN_PITCH = 0.0035f;
 
 private:
     PID _roll_att;

@@ -53,6 +53,7 @@ void StateManager::init()
     _p_filt_state  = _q_filt_state  = _r_filt_state  = Biquad2pState{};
     _notch_freq_hz = 0.0f;
     _p_notch_state = _q_notch_state = _r_notch_state = Biquad2pState{};
+    _pdot_filt_state = _qdot_filt_state = Biquad2pState{};
 
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
@@ -318,14 +319,18 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _q_filt = lowpass2p(q_notched, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);
     _r_filt = lowpass2p(r_notched, _r_filt_state, STATEMGR_LP_R_HZ, dt);
 
-    // ── 9. Angular acceleration: differentiate the filtered rates + lowpass ─
-    const float alpha_pqr_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
-    _pdot_filt = lowpass(derivative(_p_filt, _prev_p, dt), _pdot_filt, alpha_pqr_dot);
-    _qdot_filt = lowpass(derivative(_q_filt, _prev_q, dt), _qdot_filt, alpha_pqr_dot);
-    _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_pqr_dot);
+    // ── 9. Angular acceleration: differentiate notch-filtered p/q (ahead of
+    // the STATEMGR_LP_PQ_HZ 2nd-order LPF above, so p_dot/q_dot don't inherit
+    // its lag) then 2nd-order lowpass at STATEMGR_LP_PQRDOT_HZ. r_dot is
+    // unchanged — differentiates the fully-filtered r with the original
+    // 1st-order lowpass, since yaw has no INDI path consuming it.
+    _pdot_filt = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    _qdot_filt = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
+    _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_r_dot);
 
-    _prev_p = _p_filt;
-    _prev_q = _q_filt;
+    _prev_p = p_notched;
+    _prev_q = q_notched;
     _prev_r = _r_filt;
 }
 
