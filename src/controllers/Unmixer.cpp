@@ -18,9 +18,12 @@ float Unmixer::motor_force_N(float rpm)
 void Unmixer::compute(const uint32_t rpm[4], float torque_Nm[2])
 {
     float rpm_filt[4];
+    const float alpha_extra = lowpass_alpha(RPM_FILT_EXTRA_HZ, RPM_FILT_DT_S);
     for (int i = 0; i < 4; ++i) {
-        rpm_filt[i] = lowpass2p(static_cast<float>(rpm[i]), _rpm_filt_state[i],
-                                 RPM_FILT_HZ, RPM_FILT_DT_S);
+        const float stage2p = lowpass2p(static_cast<float>(rpm[i]), _rpm_filt_state[i],
+                                         RPM_FILT_HZ, RPM_FILT_DT_S);
+        _rpm_extra_filt[i] = lowpass(stage2p, _rpm_extra_filt[i], alpha_extra);
+        rpm_filt[i] = _rpm_extra_filt[i];
     }
 
     const float F0 = motor_force_N(rpm_filt[0]);  // FR

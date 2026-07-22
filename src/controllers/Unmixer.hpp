@@ -8,9 +8,12 @@
  * Gated RPM is 2nd-order (Butterworth) lowpass filtered per motor at
  * RPM_FILT_HZ before the motor model, to knock down eRPM telemetry
  * noise/quantization feeding current_torque (the baseline AttitudeINDI adds
- * delta_torque onto). dt is a fixed constant rather than measured, since
- * compute() is only ever called from ControlThread's fixed 400 Hz period
- * (see main.cpp's kRates.control) — no self-timing needed.
+ * delta_torque onto), then an optional 3rd (1st-order) stage at
+ * RPM_FILT_EXTRA_HZ — a static A/B knob to test whether a 2+1 order cascade
+ * helps INDI; <=0 disables it (lowpass_alpha() passthrough), leaving the
+ * 2nd-order-only behaviour. dt is a fixed constant rather than measured,
+ * since compute() is only ever called from ControlThread's fixed 400 Hz
+ * period (see main.cpp's kRates.control) — no self-timing needed.
  *
  * Motor model (bench thrust fit, normalised angular velocity cubic → thrust in N).
  * The bench fit was done against motor angular velocity in rad/s, not RPM, so
@@ -71,10 +74,12 @@ public:
 
     // ── Gated-RPM prefilter ─────────────────────────────────────────────────
     static constexpr float RPM_FILT_HZ = 20.0f;    // 2nd-order LPF cutoff (matches p_dot/q_dot)
+    static constexpr float RPM_FILT_EXTRA_HZ = 15.0f; // optional 3rd (1st-order) stage; <=0 disables
     static constexpr float RPM_FILT_DT_S = 0.0025f; // fixed 400Hz ControlThread period
 
 private:
     static float motor_force_N(float rpm);
 
     Biquad2pState _rpm_filt_state[4];
+    float _rpm_extra_filt[4] = {};  // 1st-order LPF memory for RPM_FILT_EXTRA_HZ stage
 };

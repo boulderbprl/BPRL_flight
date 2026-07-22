@@ -3,10 +3,10 @@
 #include <cmath>
 
 AttitudePID::AttitudePID()
-    : _roll_att  (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _pitch_att (3.50f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _roll_rate (0.09f, 0.075f, 0.001f, 0.5f, 20.0f, 0.0f, 30.0f)
-    , _pitch_rate(0.12f, 0.100f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f)
+    : _roll_att  (4.00f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
+    , _pitch_att (4.00f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
+    , _roll_rate (0.08f, 0.05f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f)
+    , _pitch_rate(0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f)
     , _yaw_rate  (0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f)
     , _yaw_hold  (0.60f, 0.050f, 0.000f, 0.3f, 0.0f, 0.0f, 30.0f)
     , _yaw_target(0.0f)

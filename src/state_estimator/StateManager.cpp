@@ -321,11 +321,17 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
     // ── 9. Angular acceleration: differentiate notch-filtered p/q (ahead of
     // the STATEMGR_LP_PQ_HZ 2nd-order LPF above, so p_dot/q_dot don't inherit
-    // its lag) then 2nd-order lowpass at STATEMGR_LP_PQRDOT_HZ. r_dot is
+    // its lag) then 2nd-order lowpass at STATEMGR_LP_PQRDOT_HZ, then an
+    // optional 3rd (1st-order) stage at STATEMGR_LP_PQRDOT_EXTRA_HZ — set it
+    // to 0 to A/B test against the 2nd-order-only filter. r_dot is
     // unchanged — differentiates the fully-filtered r with the original
     // 1st-order lowpass, since yaw has no INDI path consuming it.
-    _pdot_filt = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
-    _qdot_filt = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    const float alpha_pqdot_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, dt);
+    _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
+    _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
+
     const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
     _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_r_dot);
 
