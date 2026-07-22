@@ -4,13 +4,15 @@
 
 #define I2C_SLAVE_ADDR  0x11
 #define SAMPLE_INTERVAL_US  333   // 3 kHz sampling (filter design rate)
-#define PRINT_INTERVAL_US  25000  // 40 Hz serial print rate
 
 #define FILTER_FS_HZ  3000.0
 
 #define BLADE_COUNT          2     // propeller blades per motor — sets blade-pass notch = BLADE_COUNT * RPM/60
 #define NOTCH_HALF_WIDTH_HZ  20.0  // each notch covers center Hz +/- this many Hz
 #define MIN_MOTOR_RPM        6000  // ~100 Hz rotation freq; below this (e.g. bench testing, motors off), notches are bypassed
+#define RPM_RETUNE_DEADBAND  25    // RPM must move by more than this before coefficients are recomputed —
+                                    // avoids retuning (and the transient each retune causes) on ordinary
+                                    // telemetry jitter, which otherwise fires on nearly every poll in flight
 
 #define PIN_CS     10
 #define PIN_RST    11
@@ -20,7 +22,6 @@
 #define PIN_MISO   12
 
 elapsedMicros sampleTimer;
-elapsedMicros printTimer;
 
 volatile int16_t ch_safe[4] = {0, 0, 0, 0};
 volatile uint16_t rpm_avg_safe = 0;  // avg motor RPM, written by CubeOrangePlus over I2C
@@ -43,10 +44,25 @@ struct BiquadState {
 BiquadCoef  notchCoef[NOTCH_COUNT];
 BiquadState notchState[NOTCH_COUNT][4];
 
+// State (z1/z2) is clamped to a wide margin beyond the int16 output range.
+// Without this, a transient (coefficient retune, ADC glitch, brief real
+// overload) can leave the state holding a huge value that a near-unity-pole
+// notch only bleeds off over many samples — producing sustained rail-to-rail
+// clipped output long after whatever caused the transient is gone. The
+// clamp bounds how long that ringdown can possibly take without changing
+// behavior for any normal in-range signal.
+#define BIQUAD_STATE_LIMIT 200000.0
+
 double biquadProcess(const BiquadCoef &c, BiquadState &s, double x) {
   double y = c.b0 * x + s.z1;
-  s.z1 = c.b1 * x - c.a1 * y + s.z2;
-  s.z2 = c.b2 * x - c.a2 * y;
+  double z1 = c.b1 * x - c.a1 * y + s.z2;
+  double z2 = c.b2 * x - c.a2 * y;
+  if (z1 > BIQUAD_STATE_LIMIT) z1 = BIQUAD_STATE_LIMIT;
+  else if (z1 < -BIQUAD_STATE_LIMIT) z1 = -BIQUAD_STATE_LIMIT;
+  if (z2 > BIQUAD_STATE_LIMIT) z2 = BIQUAD_STATE_LIMIT;
+  else if (z2 < -BIQUAD_STATE_LIMIT) z2 = -BIQUAD_STATE_LIMIT;
+  s.z1 = z1;
+  s.z2 = z2;
   return y;
 }
 
@@ -133,8 +149,6 @@ int16_t readWord() {
 }
 
 void setup() {
-  Serial.begin(115200);
-
   pinMode(PIN_CS, OUTPUT);
   pinMode(PIN_RST, OUTPUT);
   pinMode(PIN_CONVST, OUTPUT);
@@ -189,16 +203,24 @@ void loop() {
 
     digitalWrite(PIN_CS, HIGH);
 
-    // Retune the notches only when RPM actually changes — avoids 3 kHz worth
-    // of sin/cos calls when the motors are holding steady. Below MIN_MOTOR_RPM
-    // (motors off, e.g. bench testing) the notches are bypassed entirely
-    // rather than tuned to a bogus near-zero frequency; filter state is reset
-    // so they start clean once the motors spin back up.
+    // Retune the notches only when RPM has moved by more than the deadband —
+    // avoids recomputing (and re-transienting) coefficients on ordinary
+    // telemetry jitter, which in flight changes by 1 RPM on nearly every
+    // poll. Below MIN_MOTOR_RPM (motors off, e.g. bench testing) the notches
+    // are bypassed entirely rather than tuned to a bogus near-zero
+    // frequency; filter state is reset so they start clean once the motors
+    // spin back up. Crossing the spin/idle boundary always resyncs
+    // immediately, regardless of the deadband.
     static uint16_t s_last_rpm = 0xFFFF;
+    static bool     s_was_spinning = false;
     uint16_t rpm_now = rpm_avg_safe;
     bool motors_spinning = (rpm_now >= MIN_MOTOR_RPM);
-    if (rpm_now != s_last_rpm) {
+    bool spin_state_changed = (motors_spinning != s_was_spinning);
+    int32_t rpm_delta = (int32_t)rpm_now - (int32_t)s_last_rpm;
+    if (rpm_delta < 0) rpm_delta = -rpm_delta;
+    if (spin_state_changed || (motors_spinning && rpm_delta > RPM_RETUNE_DEADBAND)) {
       s_last_rpm = rpm_now;
+      s_was_spinning = motors_spinning;
       if (motors_spinning) {
         updateNotchCoeffs(rpm_now);
       } else {
@@ -228,17 +250,5 @@ void loop() {
     ch_safe[2] = filtered[2];
     ch_safe[3] = filtered[3];
     interrupts();
-
-    // Filtered channel data to Serial Plotter, throttled to ~40 Hz
-    // if (printTimer >= PRINT_INTERVAL_US) {
-    //   printTimer -= PRINT_INTERVAL_US;
-    //   Serial.print(filtered[0]);
-    //   Serial.print('\t');
-    //   Serial.print(filtered[1]);
-    //   Serial.print('\t');
-    //   Serial.print(filtered[2]);
-    //   Serial.print('\t');
-    //   Serial.println(filtered[3]);
-    // }
   }
 }
