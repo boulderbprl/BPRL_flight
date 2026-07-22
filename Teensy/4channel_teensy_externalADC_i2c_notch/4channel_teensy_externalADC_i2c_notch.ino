@@ -3,16 +3,20 @@
 #include <string.h>
 
 #define I2C_SLAVE_ADDR  0x11
-#define SAMPLE_INTERVAL_US  333   // 3 kHz sampling (filter design rate)
+#define SAMPLE_INTERVAL_US  250   // 4 kHz sampling (filter design rate)
 
-#define FILTER_FS_HZ  3000.0
+#define FILTER_FS_HZ  4000.0
+#define FILTER_FC_HZ  10.0   // lowpass cutoff -- matches the earlier i2c 4th-order LPF build that gave
+                              // good z-jerk correlation; adjust if that build used a different cutoff
 
-#define BLADE_COUNT          2     // propeller blades per motor — sets blade-pass notch = BLADE_COUNT * RPM/60
+#define BLADE_COUNT          3     // propeller blades per motor — sets blade-pass notch = BLADE_COUNT * RPM/60
 #define NOTCH_HALF_WIDTH_HZ  20.0  // each notch covers center Hz +/- this many Hz
 #define MIN_MOTOR_RPM        6000  // ~100 Hz rotation freq; below this (e.g. bench testing, motors off), notches are bypassed
 #define RPM_RETUNE_DEADBAND  25    // RPM must move by more than this before coefficients are recomputed —
-                                    // avoids retuning (and the transient each retune causes) on ordinary
-                                    // telemetry jitter, which otherwise fires on nearly every poll in flight
+                                    // avoids redundant retuning once the smoothed RPM below is already stable
+#define RPM_SMOOTH_TAU_S     0.03  // one-pole low-pass on RPM telemetry before it drives retuning — keeps
+                                    // each retune's frequency step small (tau is far faster than real motor
+                                    // spool-up dynamics) so filter state can safely carry across retunes
 
 #define PIN_CS     10
 #define PIN_RST    11
@@ -77,6 +81,37 @@ void setBiquadNotch(BiquadCoef &f, double f0, double fs, double Q) {
   double b0 = 1.0;
   double b1 = -2.0 * cosw0;
   double b2 = 1.0;
+  double a0 = 1.0 + alpha;
+  double a1 = -2.0 * cosw0;
+  double a2 = 1.0 - alpha;
+
+  f.b0 = b0 / a0;
+  f.b1 = b1 / a0;
+  f.b2 = b2 / a0;
+  f.a1 = a1 / a0;
+  f.a2 = a2 / a0;
+}
+
+// 4th-order Butterworth lowpass, applied after the notches on every channel
+// regardless of motor state. The notches only remove narrow tones at the
+// current RPM harmonics; everything else in the broadband noise floor
+// passes through them at unity gain. This stage is what actually rejects
+// that broadband noise and limits output bandwidth to the range relevant
+// to airframe/structural dynamics -- fixed coefficients (fc doesn't track
+// RPM), computed once in setup(), so it carries none of the notch cascade's
+// retuning/stability concerns.
+BiquadCoef  lpCoef[2];
+BiquadState lpState[2][4];
+
+void setBiquadLowpass(BiquadCoef &f, double fc, double fs, double Q) {
+  double w0 = 2.0 * PI * fc / fs;
+  double cosw0 = cos(w0);
+  double sinw0 = sin(w0);
+  double alpha = sinw0 / (2.0 * Q);
+
+  double b0 = (1.0 - cosw0) / 2.0;
+  double b1 = 1.0 - cosw0;
+  double b2 = (1.0 - cosw0) / 2.0;
   double a0 = 1.0 + alpha;
   double a1 = -2.0 * cosw0;
   double a2 = 1.0 - alpha;
@@ -175,6 +210,13 @@ void setup() {
   // rpm_avg_safe is 0 until the first I2C write arrives; updateNotchCoeffs
   // clamps that to a harmless near-DC notch rather than an invalid f0=0.
   updateNotchCoeffs(rpm_avg_safe);
+
+  // 4th-order Butterworth = two biquad sections with the standard
+  // Butterworth pole-pair Q values: Q_k = 1 / (2*cos((2k-1)*pi/8))
+  double lpQ1 = 1.0 / (2.0 * cos(PI / 8.0));       // 0.541196
+  double lpQ2 = 1.0 / (2.0 * cos(3.0 * PI / 8.0)); // 1.306563
+  setBiquadLowpass(lpCoef[0], FILTER_FC_HZ, FILTER_FS_HZ, lpQ1);
+  setBiquadLowpass(lpCoef[1], FILTER_FC_HZ, FILTER_FS_HZ, lpQ2);
 }
 
 void loop() {
@@ -203,17 +245,24 @@ void loop() {
 
     digitalWrite(PIN_CS, HIGH);
 
-    // Retune the notches only when RPM has moved by more than the deadband —
-    // avoids recomputing (and re-transienting) coefficients on ordinary
-    // telemetry jitter, which in flight changes by 1 RPM on nearly every
-    // poll. Below MIN_MOTOR_RPM (motors off, e.g. bench testing) the notches
-    // are bypassed entirely rather than tuned to a bogus near-zero
-    // frequency; filter state is reset so they start clean once the motors
-    // spin back up. Crossing the spin/idle boundary always resyncs
-    // immediately, regardless of the deadband.
+    // Low-pass the raw RPM telemetry before it ever reaches the notch
+    // coefficient calculation. Feeding raw, jittery/fast-moving telemetry
+    // straight into updateNotchCoeffs made each retune a potentially large,
+    // abrupt frequency jump -- resetting filter state on every retune
+    // bounded that (no more compounding across retunes), but a single
+    // retune's zero-state transient could still clip on its own during a
+    // fast RPM sweep, since jumping a resonant notch's center frequency by
+    // a large step is inherently transient-producing. Smoothing the target
+    // keeps each retune step small, which means state can safely carry
+    // across retunes again instead of needing a full reset every time.
+    static const double s_rpm_smooth_alpha =
+        (SAMPLE_INTERVAL_US * 1e-6) / (RPM_SMOOTH_TAU_S + SAMPLE_INTERVAL_US * 1e-6);
+    static double   s_rpm_smooth = 0.0;
     static uint16_t s_last_rpm = 0xFFFF;
     static bool     s_was_spinning = false;
-    uint16_t rpm_now = rpm_avg_safe;
+
+    s_rpm_smooth += s_rpm_smooth_alpha * ((double)rpm_avg_safe - s_rpm_smooth);
+    uint16_t rpm_now = (uint16_t)lround(s_rpm_smooth);
     bool motors_spinning = (rpm_now >= MIN_MOTOR_RPM);
     bool spin_state_changed = (motors_spinning != s_was_spinning);
     int32_t rpm_delta = (int32_t)rpm_now - (int32_t)s_last_rpm;
@@ -229,7 +278,8 @@ void loop() {
     }
 
     // Filter each channel: cascade the 3 RPM-tracking notches (bypassed
-    // below MIN_MOTOR_RPM).
+    // below MIN_MOTOR_RPM) followed by the fixed 4th-order lowpass (always
+    // active, motors on or off).
     int16_t filtered[4];
     for (int i = 0; i < 4; i++) {
       double y = (double)tmp[i];
@@ -238,6 +288,8 @@ void loop() {
           y = biquadProcess(notchCoef[n], notchState[n][i], y);
         }
       }
+      y = biquadProcess(lpCoef[0], lpState[0][i], y);
+      y = biquadProcess(lpCoef[1], lpState[1][i], y);
       if (y > 32767.0) y = 32767.0;
       if (y < -32768.0) y = -32768.0;
       filtered[i] = (int16_t)lround(y);
