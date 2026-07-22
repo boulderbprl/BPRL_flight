@@ -2,11 +2,11 @@
 #include <math.h>
 
 #define I2C_SLAVE_ADDR  0x11
-#define SAMPLE_INTERVAL_US  333   // 3 kHz sampling (filter design rate)
+#define SAMPLE_INTERVAL_US  200   // 5 kHz sampling (filter design rate)
 #define PRINT_INTERVAL_US  25000  // 40 Hz serial print rate
 
-#define FILTER_FC_HZ  10.0
-#define FILTER_FS_HZ  3000.0
+#define FILTER_FC_HZ  8.0
+#define FILTER_FS_HZ  5000.0
 
 #define PIN_CS     10
 #define PIN_RST    11
@@ -138,7 +138,7 @@ void loop() {
 
     digitalWrite(PIN_CS, HIGH);
 
-    // Filter each channel: 4th-order Butterworth LPF, fc = 15 Hz, fs = 3 kHz
+    // Filter each channel: 4th-order Butterworth LPF, fc = 10 Hz, fs = 5 kHz
     int16_t filtered[4];
     for (int i = 0; i < 4; i++) {
       double y = biquadProcess(stage1[i], (double)tmp[i]);
