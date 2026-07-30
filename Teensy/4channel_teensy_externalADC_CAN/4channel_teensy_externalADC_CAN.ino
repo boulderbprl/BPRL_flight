@@ -2,14 +2,16 @@
 #include <math.h>
 #include <string.h>
 
+const bool LPF_ENABLED = false;  // set false to bypass the Butterworth LPF
+
 #define CAN_BAUD_RATE  1000000
 #define CAN_TX_ID      0x69      // 8-byte frame: ch1,ch2,ch3,ch4 as int16, little-endian
 #define SAMPLE_INTERVAL_US  667   // 1.5 kHz sampling (filter design rate)
-#define CAN_TX_INTERVAL_US  10000 // 100 Hz CAN broadcast rate (decoupled from sampling)
+#define CAN_TX_INTERVAL_US  667   // 1.5 kHz CAN broadcast rate (matches sampling rate)
 #define PRINT_INTERVAL_US  25000  // 40 Hz serial print rate
 #define CAN_DIAG_INTERVAL_US 500000 // 2 Hz CAN tx ok/fail diagnostic print (temporary)
 
-#define FILTER_FC_HZ  10.0
+#define FILTER_FC_HZ  4.0
 #define FILTER_FS_HZ  1500.0
 
 #define PIN_CS     10
@@ -146,11 +148,15 @@ void loop() {
     // Filter each channel: 4th-order Butterworth LPF, fc = 15 Hz, fs = 1.5 kHz
     int16_t filtered[4];
     for (int i = 0; i < 4; i++) {
-      double y = biquadProcess(stage1[i], (double)tmp[i]);
-      y = biquadProcess(stage2[i], y);
-      if (y > 32767.0) y = 32767.0;
-      if (y < -32768.0) y = -32768.0;
-      filtered[i] = (int16_t)lround(y);
+      if (LPF_ENABLED) {
+        double y = biquadProcess(stage1[i], (double)tmp[i]);
+        y = biquadProcess(stage2[i], y);
+        if (y > 32767.0) y = 32767.0;
+        if (y < -32768.0) y = -32768.0;
+        filtered[i] = (int16_t)lround(y);
+      } else {
+        filtered[i] = tmp[i];
+      }
     }
 
     // Broadcast all 4 channels in one 8-byte CAN frame, throttled to
