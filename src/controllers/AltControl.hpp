@@ -1,5 +1,6 @@
 #pragma once
 #include "PID.hpp"
+#include "configs/DroneConfig.hpp"
 
 /*
  * Altitude controller — throttle passthrough and closed-loop altitude hold.
@@ -28,7 +29,7 @@
  */
 class AltControl {
 public:
-    AltControl();
+    explicit AltControl(const AltControlGains &g);
 
     // Expo throttle with tilt boost; identical to the function removed from
     // AttitudePID/AttitudeINDI.

@@ -17,14 +17,14 @@ struct CANIMURaw {
     // Quaternion NED→Body from IMX5 CID_INS_QUATN2B [W,X,Y,Z], Hamilton convention.
     // Replaces the previous Euler-angle fields (roll, pitch, yaw).
     float q0, q1, q2, q3;   // unit quaternion components (decoded from int16/10000)
-    bool  has_new_quat;      // set by CAN callback; cleared after StateEstThread consumes it
+    bool  has_new_quat;      // set by CAN callback; cleared after ControlThread consumes it
     uint32_t quat_timestamp_us;  // chVTGetSystemTimeX()-derived us at which has_new_quat was set
 
     // Body-frame angular rates from IMX5 (100 Hz, CAN IDs 0x02–0x04)
     float p, q, r;           // rad/s
     // Body-frame specific force from IMX5 (100 Hz, same CAN frames as rates)
     float ax, ay, az;        // m/s²
-    bool  has_new_rates;     // set by CAN callback; cleared after StateEstThread consumes it
+    bool  has_new_rates;     // set by CAN callback; cleared after ControlThread consumes it
     uint32_t rates_timestamp_us; // chVTGetSystemTimeX()-derived us at which has_new_rates was set
 
     bool  valid;             // true while IMX5 frames are arriving
@@ -34,9 +34,9 @@ struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
     float yaw;        // NED heading (rad) — absolute, mocap-frame-referenced
-    bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
-    bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by StateEstThread
-    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
+    bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
+    bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by ControlThread
+    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
     bool  valid;       // mocap link connected and receiving
 };
 
@@ -44,7 +44,7 @@ struct BaroRaw {
     float pressure_pa;    // Pa, compensated
     float temperature_c;  // °C, compensated
     float alt_m;          // m, positive UP, relative to MS5611::init() boot-time reference
-    bool  has_new;        // fresh sample this tick — set by SPIThread, cleared by StateEstThread
+    bool  has_new;        // fresh sample this tick — set by SPIThread, cleared by ControlThread
     bool  valid;          // true once MS5611 init + warm-up zero-reference capture completed
 };
 
@@ -60,7 +60,8 @@ extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, de
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
-extern bool    g_use_indi;           // attitude controller switch from radio (false=PID, true=INDI)
+extern int     g_radio_switch_pos;   // raw controller-select switch position (0/1/2, low/mid/high) — RadioThread writes; ControlThread reads to drive FlightStateMachine::set_active_controller()
+extern int     g_active_controller;  // FlightStateMachine's resolved active controller-list index (0=PID default) — ControlThread publishes after update(), for $TEL/logging
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
@@ -101,7 +102,6 @@ struct LogRates {
 
 struct ThreadRates {
     sysinterval_t spi;      // SPIThread
-    sysinterval_t est;      // StateEstThread
     sysinterval_t i2c;      // I2CThread
     sysinterval_t control;  // ControlThread
     sysinterval_t radio;    // RadioThread

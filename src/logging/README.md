@@ -14,9 +14,9 @@ Binary flight-data logger using FatFS over ChibiOS SDMMC1.
 | SDMMC1_CMD | PD2 | AF12 |
 
 Card format: **FAT32**, any capacity.  The Cube microSD slot (same PCB on
-both `BOARD=orange` and `BOARD=blue`) has no card-detect or write-protect
-signals wired to the MCU — presence is determined by whether `sdcConnect()`
-succeeds.
+both `DRONE=Drone1`/CubeOrangePlus and `DRONE=Drone2`/CubeBlueH7) has no
+card-detect or write-protect signals wired to the MCU — presence is
+determined by whether `sdcConnect()` succeeds.
 
 ## Clock configuration
 
@@ -78,7 +78,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
 
-No message carries a rate field — every one logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
+No message carries a rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
 
 Each `kLogDefs[]` entry's `name`/`fmt`/`labels` strings must fit the FMT record's fixed fields (`name` ≤4 chars, `fmt` ≤15, `labels` ≤63 — one byte short of the declared 4/16/64-byte fields since `strncpy` reserves a byte for the null terminator). A `static_assert` right after the table checks every entry at build time, so an over-length string fails the build instead of being silently truncated by `strncpy` at runtime (which happened once before the check existed).
 
@@ -88,7 +88,7 @@ Each `kLogDefs[]` entry's `name`/`fmt`/`labels` strings must fit the FMT record'
 between each.  After `sdcConnect()` and `f_mount()` succeed, the file is opened
 and the schema header is written before `init()` returns `true`.
 
-**Sync interval**: `f_sync()` is called every 5 flushes (~100 ms at 50 Hz),
+**Sync interval**: `f_sync()` is called every 5 flushes (~100 ms at the default 50 Hz `log_rate_hz`; scales with whatever rate a drone's config sets),
 bounding the data lost to an unclean power-off.
 
 **File pre-allocation**: right after the file is created (still empty —

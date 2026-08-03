@@ -1,15 +1,15 @@
 /*
  * main.cpp — BPRL Standalone ChibiOS Flight Controller
  * Target:  STM32H7xx (CubeBlue H7 / CubeOrange+) at 400 MHz
- * Build:   make BOARD=CubeBlueH7          (or CubeOrangePlus)
- * Flash:   make flash BOARD=CubeBlueH7  PORT=/dev/ttyACM0
- * Debug:   make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_DEBUG
- * Timing:  make BOARD=CubeBlueH7 UDEFS_EXTRA=-DBPRL_TIMING   (see src/diagnostics/ThreadTiming.hpp)
+ * Build:   make DRONE=Drone2              (or Drone1)
+ * Flash:   make flash DRONE=Drone2  PORT=/dev/ttyACM0
+ * Debug:   make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
+ * Timing:  make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING   (see src/diagnostics/ThreadTiming.hpp)
  *
  * ── What lives where ────────────────────────────────────────────────────────
  *
  *   main.cpp               Init calls, thread rate sequencer, scheduler start.
- *   src/threads.cpp/.hpp   All eight thread function bodies + shared state.
+ *   src/threads.cpp/.hpp   All seven thread function bodies + shared state.
  *   src/coms/SPI.*         ICM-20948/20602 SPI bus drivers.
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
@@ -44,6 +44,7 @@
 #include "src/coms/PWM.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/usb_serial.hpp"
+#include "configs/DroneConfig.hpp"
 #include "chprintf.h"
 
 int main(void)
@@ -88,16 +89,23 @@ int main(void)
 
     /* ══════════════════════════════════════════════════════════════════════
      * Thread rate sequencer
+     *
+     * Not `static`: kRates.log now derives from kDroneConfig (a runtime
+     * value, not a compile-time constant), so a function-local `static`
+     * here would need the C++ thread-safe-init guard (__cxa_guard_acquire/
+     * release) that this embedded target's minimal runtime doesn't provide.
+     * A plain local is fine — main() never returns, so it lives for the
+     * program's whole lifetime, which is all threads_start()'s per-thread
+     * pointers into it need.
      * ══════════════════════════════════════════════════════════════════════ */
-    static const ThreadRates kRates = {
+    const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
-        /* .est     = */ TIME_US2I(1600),  // 625 Hz (16 ticks at the 100us/10kHz system tick)
         /* .i2c     = */ TIME_US2I(2000),  // 500 Hz — matches Teensy ADC sample rate
         /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),
-        /* .log     = */ { TIME_MS2I(20) },   // 50 Hz
+        /* .log     = */ { TIME_MS2I(1000.0f / kDroneConfig.logging.log_rate_hz) },  // from DroneConfig
     };
 
     motor_output_init();

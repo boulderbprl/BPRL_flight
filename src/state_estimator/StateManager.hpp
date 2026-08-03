@@ -30,7 +30,13 @@
 // STATEMGR_LP_PQ_HZ/STATEMGR_LP_R_HZ lowpass (matches ArduPilot's harmonic
 // notch: notch first, then LPF "to attenuate any notch induced noise").
 #define STATEMGR_NOTCH_BW_HZ          10.0f   // notch bandwidth (sets Q = center/bandwidth)
-#define STATEMGR_NOTCH_MAX_SLEW_FRAC   0.05f  // max fractional change in tracked center freq per update (matches ArduPilot's ±5%/update)
+// Max fractional change in tracked center freq per update() call. This is
+// per-*call*, not per-second, and update() now runs at 400 Hz (ControlThread)
+// instead of the former 625 Hz (StateEstThread) — rescaled by 625/400 so the
+// real-world slew rate (Hz/s) is unchanged: 0.05 * 625/400 = 0.078125.
+// (ArduPilot's own "±5%/update" figure is against its own update rate, not
+// directly comparable here.)
+#define STATEMGR_NOTCH_MAX_SLEW_FRAC   0.078125f
 
 // Lane-blend weight smoothing: the raw 1/(1e-4+innovation_norm) weight is
 // itself derived from a noisy instantaneous quantity, so low-pass it before
@@ -96,7 +102,7 @@ public:
 
     void init();
 
-    // Call once per StateEstThread tick (625 Hz).
+    // Call once per ControlThread tick (400 Hz).
     // dt: loop period in seconds.
     // imu: snapshot of g_imu[3] (taken under imu_mtx before this call).
     // can_imu: snapshot of g_can_imu (taken under can_imu_mtx before this call).
@@ -118,7 +124,7 @@ public:
     float pitch()   const;
     float yaw()     const;
 
-    // Per-lane accessors — called by StateEstThread only (no mutex needed).
+    // Per-lane accessors — called by ControlThread only (no mutex needed).
     void get_lane_euler(int lane, float& roll, float& pitch, float& yaw) const;
     void get_lane_pqr  (int lane, float& p,    float& q,    float& r)    const;
     int  primary_lane  () const { return _primary; }

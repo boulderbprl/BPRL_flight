@@ -15,15 +15,18 @@ void MotorMixer::update(const float cmds[3], float thrust,
     }
 
     // Motor order: FR, RL, FL, RR (matches out[] / hardware pinout).
-    static constexpr float roll_factor[4]  = { -1.0f, +1.0f, +1.0f, -1.0f };
-    static constexpr float pitch_factor[4] = { +1.0f, -1.0f, +1.0f, -1.0f };
-    static constexpr float yaw_factor[4]   = { +1.0f, +1.0f, -1.0f, -1.0f };
+    const float *roll_factor  = _cfg.roll_factor;
+    const float *pitch_factor = _cfg.pitch_factor;
+    const float *yaw_factor   = _cfg.yaw_factor;
+    const float pwm_min  = (float)_cfg.pwm_min;
+    const float pwm_idle = (float)_cfg.pwm_idle;
+    const float pwm_max  = (float)_cfg.pwm_max;
 
-    const float span = (float)(PWM_MAX - PWM_MIN);
-    float thr     = (float)PWM_IDLE + thrust * (float)(PWM_MAX - PWM_IDLE);
-    const float r = cmds[0] * ATT_SCALE;
-    const float p = cmds[1] * ATT_SCALE;
-    float y       = cmds[2] * YAW_SCALE;
+    const float span = pwm_max - pwm_min;
+    float thr     = pwm_idle + thrust * (pwm_max - pwm_idle);
+    const float r = cmds[0] * _cfg.att_scale;
+    const float p = cmds[1] * _cfg.att_scale;
+    float y       = cmds[2] * _cfg.yaw_scale;
 
     // Step 1: roll+pitch only, per motor.
     float rp[4];
@@ -33,15 +36,15 @@ void MotorMixer::update(const float cmds[3], float thrust,
     // Step 2: how much yaw headroom each motor has left after roll+pitch,
     // then guarantee yaw a minimum share of the output span regardless of
     // how much roll+pitch demand there is (mirrors ArduPilot).
-    float yaw_allowed = YAW_SCALE;
+    float yaw_allowed = _cfg.yaw_scale;
     for (int i = 0; i < 4; i++) {
         const float base = thr + rp[i];
         const float room = (y * yaw_factor[i] >= 0.0f)
-            ? ((float)PWM_MAX - base)
-            : (base - (float)PWM_MIN);
+            ? (pwm_max - base)
+            : (base - pwm_min);
         yaw_allowed = fminf(yaw_allowed, fmaxf(room, 0.0f) / fabsf(yaw_factor[i]));
     }
-    yaw_allowed = fmaxf(yaw_allowed, YAW_HEADROOM_MIN * span);
+    yaw_allowed = fmaxf(yaw_allowed, _cfg.yaw_headroom_min * span);
     y = clamp(y, -yaw_allowed, yaw_allowed);
 
     // Step 3: combine roll+pitch+yaw; if the combined spread still can't fit
@@ -58,13 +61,13 @@ void MotorMixer::update(const float cmds[3], float thrust,
         for (int i = 0; i < 4; i++) cmd[i] *= scale;
         lo *= scale; hi *= scale;
     }
-    thr = clamp(thr, (float)PWM_MIN - lo, (float)PWM_MAX - hi);
+    thr = clamp(thr, pwm_min - lo, pwm_max - hi);
 
     for (int i = 0; i < 4; i++)
-        out[i] = (int32_t)clamp(thr + cmd[i], (float)PWM_MIN, (float)PWM_MAX);
+        out[i] = (int32_t)clamp(thr + cmd[i], pwm_min, pwm_max);
 }
 
-bool MotorMixer::should_disarm(const float state[])
+bool MotorMixer::should_disarm(const float state[]) const
 {
-    return fabsf(state[0]) > MAX_ANGLE || fabsf(state[1]) > MAX_ANGLE;
+    return fabsf(state[0]) > _cfg.max_angle_rad || fabsf(state[1]) > _cfg.max_angle_rad;
 }

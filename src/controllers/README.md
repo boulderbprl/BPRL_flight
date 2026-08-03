@@ -29,9 +29,10 @@ FlightStateMachine  (400 Hz)
           AltControl::alt_hold_from_rate() (D vel → thrust_out)          │
           Attitude (with lean angles overriding roll/pitch targets)  ─────┤
                                                                           │
-     Attitude block (shared, dispatched by _use_indi flag):              │
-       false → AttitudePID::update()                                ◄────┘
-       true  → AttitudeINDI::update()
+     Attitude block (shared, dispatched by FlightStateMachine's           │
+     config-driven controller list — see below):                         │
+       list index 0 (default) → AttitudePID::update()               ◄────┘
+       list index 1 (if enabled) → AttitudeINDI::update()
                     └─ Unmixer::compute() (RPM → torque N·m)
      │
      ▼
@@ -75,12 +76,12 @@ Mode changes reset all controllers.
 
 ### Attitude controller selection
 
-The attitude controller is independent of the flight mode and is selected by `set_use_indi(bool)` at runtime (default: PID):
+The attitude controller is independent of the flight mode and is selected by `set_active_controller(int radio_switch_pos)` at runtime. `FlightStateMachine` holds a config-driven list of controllers (see `configs/DroneConfig.hpp`'s `ControllersConfig`) behind the common `AttitudeController` interface — every controller in the list runs every tick (shadow mode); only the one at the resolved list index drives the output:
 
-| Flag | Controller |
+| List index | Controller |
 |---|---|
-| `false` | `AttitudePID` — cascade P + PID |
-| `true` | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
+| 0 (always present, default) | `AttitudePID` — cascade P + PID |
+| 1 (present only if `ControllersConfig::indi_enabled`) | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
 
 ---
 
@@ -94,21 +95,24 @@ pitch_tgt [rad] ──► outer P ──► rate_tgt [rad/s] ──► inner PID
 yaw_rate_tgt ───────────────────────────────────────► rate PID  ──► out_cmds[2]
 ```
 
-Each loop's target/error/derivative filtering matches ArduPilot's `AC_PID` structure (target LPF → error = filtered target − measurement → error LPF → derivative of filtered error → D LPF); the rate loops' target-filter (`FLTT`) and yaw's error-filter (`FLTE`) are set to match `AC_AttitudeControl_Multi`'s actual defaults — see the D-filter/T-filter/E-filter columns below. Integrators are anti-windup clamped to ±0.5.
+Each loop's target/error/derivative filtering matches ArduPilot's `AC_PID` structure (target LPF → error = filtered target − measurement → error LPF → derivative of filtered error → D LPF); the rate loops' target-filter (`FLTT`) and yaw's error-filter (`FLTE`) are set to match `AC_AttitudeControl_Multi`'s actual defaults — see the D-filter/T-filter/E-filter columns below. Integrators are anti-windup clamped to `imax` (see table).
+
+Gains now live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGains`, see `configs/DroneConfig.hpp`) rather than hardcoded in `Attitude_PID.cpp` — the table below is Drone1/Drone2's current (identical) values.
 
 ### Gains
 
 | Loop | Kp | Ki | Kd | T-filter | E-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|---|
-| Roll attitude | 3.50 | 0 | 0 | off | off | 30 Hz | 0.5 |
-| Pitch attitude | 3.50 | 0 | 0 | off | off | 30 Hz | 0.5 |
-| Roll rate | 0.09 | 0.075 | 0.001 | 20 Hz | off | 30 Hz | 0.5 |
-| Pitch rate | 0.13 | 0.100 | 0.002 | 20 Hz | off | 30 Hz | 0.5 |
+| Roll attitude | 4.00 | 0 | 0 | off | off | 30 Hz | 0.5 |
+| Pitch attitude | 4.00 | 0 | 0 | off | off | 30 Hz | 0.5 |
+| Roll rate | 0.08 | 0.05 | 0.002 | 20 Hz | off | 30 Hz | 0.5 |
+| Pitch rate | 0.09 | 0.06 | 0.002 | 20 Hz | off | 30 Hz | 0.5 |
 | Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 2.5 Hz | 5 Hz | 0.5 |
+| Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | off | 30 Hz | 0.3 |
 
 T-filter/E-filter are the target/error low-pass stages ahead of the derivative (`PID`'s `filt_target_hz`/`filt_error_hz`); "off" means disabled (passthrough), matching ArduPilot's own default for that specific gain (e.g. roll/pitch rate `FLTE=0`, but all rate axes get `FLTT=20Hz`, and yaw alone gets `FLTE=2.5Hz`).
 
-`YAW_STICK_GAIN = 2.5` scales the yaw rate target before the rate PID — not the same constant as `AttitudeINDI::YAW_GAIN` (1.5); see the note in the AttitudeINDI section below.
+`yaw_stick_gain = 3.0` (`AttitudePidGains::yaw_stick_gain`) scales the yaw rate target before the rate PID — not the same value as `AttitudeIndiGains::yaw_gain` (1.5); see the note in the AttitudeINDI section below.
 
 ---
 
@@ -131,23 +135,24 @@ INDI uses the measured angular acceleration (`p_dot`, `q_dot` from `g_state[P_DO
 
 `current_torque_Nm` is estimated from live DShot RPM telemetry by the **Unmixer**, which now has real bench-fit constants (see the Unmixer section below) — `current_torque` is no longer always zero.
 
-`INDI_GAIN_ROLL = 0.0023f` / `INDI_GAIN_PITCH = 0.0033f` N·m·s²/rad — effective moment of inertia (Ixx, Iyy), one constant per axis (not a single shared `INDI_GAIN`).
+`indi_gain_roll = 0.0035` / `indi_gain_pitch = 0.0045` N·m·s²/rad (`AttitudeIndiGains`, see `configs/DroneConfig.hpp`) — effective moment of inertia (Ixx, Iyy), one value per axis (not a single shared gain). Like the other controllers, these now live per-drone in `configs/<Drone>/drone_config.cpp` rather than hardcoded in `Attitude_INDI.cpp`.
 
-`accel_cmd` (the rate-PID's output, before the INDI increment) is exposed as an extra `update()` output parameter and logged in the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
+`accel_cmd` (the rate-PID's output, before the INDI increment) and `delta_torque` are no longer separate `update()` output parameters — that would break the common `AttitudeController` interface every controller in `FlightStateMachine`'s list now shares (see `src/controllers/AttitudeController.hpp`). `AttitudeINDI::update()` stores them internally instead; `get_diag(delta_torque[2], accel_cmd[2])` reads them back for the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
 
 ### Gains
 
-The outer angle-P loops match `AttitudePID`'s attitude gains (3.50/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain with a real D-term:
+The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain and a much larger integrator clamp:
 
-| Loop | Kp | Ki | Kd | D-filter | Imax |
-|---|---|---|---|---|---|
-| Roll attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
-| Pitch attitude | 3.50 | 0 | 0 | 30 Hz | 0.5 |
-| Roll rate | 6.50 | 0 | 0.65 | 30 Hz | 0.5 |
-| Pitch rate | 6.50 | 0 | 0.65 | 30 Hz | 0.5 |
-| Yaw rate | 0.065 | 0.02 | 0 | 30 Hz | 0.5 |
+| Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|
+| Roll attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
+| Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
+| Roll rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
+| Pitch rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
+| Yaw rate | 0.065 | 0.02 | 0 | off | 30 Hz | 0.5 |
+| Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
-`YAW_GAIN = 1.5` scales the yaw rate target before the rate PID — **not** the same constant as `AttitudePID::YAW_STICK_GAIN` (2.5); these are two distinct constants in two distinct classes, easy to conflate.
+`yaw_gain = 1.5` (`AttitudeIndiGains::yaw_gain`) scales the yaw rate target before the rate PID — **not** the same value as `AttitudePidGains::yaw_stick_gain` (3.0); these are two distinct fields in two distinct gain structs, easy to conflate.
 
 ---
 
@@ -194,9 +199,11 @@ Skips the outer stick-to-rate conversion. Called with the D-axis velocity target
 
 ### Gains
 
-| Loop | Kp | Ki | Kd | D-filter | Imax |
-|---|---|---|---|---|---|
-| Climb rate | 0.15 | 0.05 | 0 | 20 Hz | 0.3 |
+Lives per-drone as `AltControlGains` in `configs/<Drone>/drone_config.cpp` (see `configs/DroneConfig.hpp`).
+
+| Loop | Kp | Ki | Kd | E-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|
+| Climb rate | 0.15 | 0.05 | 0 | 5 Hz | 20 Hz | 0.3 |
 
 Starting-point gains only — not yet re-tuned in flight since the accel loop was removed.
 
@@ -235,13 +242,15 @@ vel_E_tgt − vE  ──► _vel_E (PID) ──► accel_E_tgt [m/s²]
 
 ### Gains
 
-| Loop | Kp | Ki | Kd | D-filter | Imax |
-|---|---|---|---|---|---|
-| Pos N | 1.0 | 0 | 0 | 20 Hz | 0 |
-| Pos E | 1.0 | 0 | 0 | 20 Hz | 0 |
-| Pos D | 1.0 | 0 | 0 | 20 Hz | 0 |
-| Vel N | 2.0 | 1.0 | 0.5 | 20 Hz | 0 |
-| Vel E | 2.0 | 1.0 | 0.5 | 20 Hz | 0 |
+Lives per-drone as `PosControlGains` in `configs/<Drone>/drone_config.cpp` (see `configs/DroneConfig.hpp`).
+
+| Loop | Kp | Ki | Kd | E-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|
+| Pos N | 1.0 | 0 | 0 | off | 20 Hz | 0 |
+| Pos E | 1.0 | 0 | 0 | off | 20 Hz | 0 |
+| Pos D | 1.0 | 0 | 0 | off | 20 Hz | 0 |
+| Vel N | 2.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
+| Vel E | 2.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
 
 ---
 
@@ -274,25 +283,25 @@ D axis: altitude position is latched once both N and E axes have settled to HOLD
 
 ## Unmixer (`Unmixer.hpp/.cpp`)
 
-Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders).
+Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders) — supplied per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`) rather than hardcoded `static constexpr` members; `Unmixer`'s constructor takes the config by reference and stores it.
 
 **Motor force model** — cubic fit against *normalized angular velocity*, not raw RPM directly:
 ```
 omega    = rpm × (π / 30)                       // RPM → rad/s
-rpm_norm = (omega − RPM_NORM_CENTER) / RPM_NORM_SCALE      // RPM_NORM_CENTER=2005, RPM_NORM_SCALE=880.8 rad/s
-F_N      = C3·rpm_norm³ + C2·rpm_norm² + C1·rpm_norm + C0  // C3=0.0134, C2=0.5607, C1=2.2831, C0=2.4540
+rpm_norm = (omega − rpm_norm_center) / rpm_norm_scale      // rpm_norm_center=2005, rpm_norm_scale=880.8 rad/s
+F_N      = C3·rpm_norm³ + C2·rpm_norm² + C1·rpm_norm + C0  // motor_c3=0.0134, motor_c2=0.5607, motor_c1=2.2831, motor_c0=2.4540
 F_N      = max(F_N, 0)                          // guard small negative thrust near zero RPM
 ```
 
-**X-frame geometry** (arm length `ARM_LENGTH_M = 0.1275 m`, NED body frame):
+**X-frame geometry** (arm length `arm_length_m = 0.1275 m`, NED body frame):
 ```
-roll_Nm  = (ARM_LENGTH_M/√2) × (−F_FR + F_RL + F_FL − F_RR)
-pitch_Nm = (ARM_LENGTH_M/√2) × ( F_FR − F_RL + F_FL − F_RR)
+roll_Nm  = (arm_length_m/√2) × (−F_FR + F_RL + F_FL − F_RR)
+pitch_Nm = (arm_length_m/√2) × ( F_FR − F_RL + F_FL − F_RR)
 ```
 
 Signs are consistent with `MotorMixer`: positive roll command spins RL/FL faster, producing positive `roll_Nm`.
 
-**Normalization:** `MAX_THRUST_N = 7.04` (single-motor max from the bench fit) gives `T_MAX_NM = 2·sin(45°)·ARM_LENGTH_M·MAX_THRUST_N ≈ 1.269 N·m`, used to normalize torque to `[-1, 1]` via `normalize_torque()`.
+**Normalization:** `max_thrust_n = 7.04` (single-motor max from the bench fit) gives `T_MAX_NM = 2·sin(45°)·arm_length_m·max_thrust_n ≈ 1.269 N·m`, computed once at construction (not a separate config field, so it can't drift out of sync with the fields it's derived from) and used to normalize torque to `[-1, 1]` via `normalize_torque()`.
 
 The bench fit also gives motor reaction (drag) torque as a function of thrust (`torque_Nm = 0.03·((F_N − 2.991)/2.183) + 0.0423`), but it isn't wired in since yaw currently uses a rate PID rather than INDI torque feedback — see `Unmixer.hpp`'s doc comment if yaw moves to torque-based control.
 
@@ -300,9 +309,9 @@ The bench fit also gives motor reaction (drag) torque as a function of thrust (`
 
 ## MotorMixer (`MotorMixer.hpp/.cpp`)
 
-Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to four motor commands (0–1000) using an X-frame mixing matrix.
+Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to four motor commands (0–1000) using an X-frame mixing matrix. Motor factor arrays, PWM min/idle/max, and the roll/pitch/yaw scale and disarm-angle constants come from `MotorMixerConfig` (`configs/DroneConfig.hpp`), passed to the constructor — no longer `static constexpr` class members, so per-drone geometry (different frame size, motor order, or PWM range) doesn't require touching this shared code.
 
-All motors output 0 when disarmed or when |roll| or |pitch| exceeds ~80°.
+All motors output 0 when disarmed or when |roll| or |pitch| exceeds the config's `max_angle_rad` (~80° for both drones today).
 
 ```
     FL [2]       FR [0]

@@ -40,25 +40,35 @@ BPRL_flight/
 ├── main.cpp                  Entry point — hardware init, rate sequencer, threads_start()
 ├── Makefile
 │
+├── configs/                  Per-drone configuration (see below)
+│   ├── DroneConfig.hpp        Shared DroneConfig struct type + `extern const DroneConfig kDroneConfig;`
+│   ├── Drone1/
+│   │   ├── config.mk          Sets BOARD_FULL=CubeOrangePlus, BOARD_UDEFS
+│   │   └── drone_config.cpp   Defines kDroneConfig: gains, RC map, motor geometry, sensors, logging
+│   └── Drone2/
+│       ├── config.mk          Sets BOARD_FULL=CubeBlueH7, BOARD_UDEFS
+│       └── drone_config.cpp   Defines kDroneConfig
+│
 ├── src/
 │   ├── FlightState.hpp       Shared index enums: StateIdx, InputIdx
 │   ├── threads.hpp           Shared state (g_state, g_imu, …), ThreadRates struct
 │   ├── threads.cpp           All thread function bodies + global state definitions
 │   │
 │   ├── coms/                 Peripheral drivers
-│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (chip set selected by BOARD, see below) + MS5611 barometer
-│   │   ├── IMUs/             ICM45686.hpp/.cpp (BOARD=orange: drives imu1/2/3), ICM42688.hpp/.cpp (supports a 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (BOARD=blue: drives imu1/2/3)
+│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (chip set selected by the drone's board, see below) + MS5611 barometer
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (Drone1/CubeOrangePlus: drives imu1/2/3), ICM42688.hpp/.cpp (supports a 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (Drone2/CubeBlueH7: drives imu1/2/3)
 │   │   ├── Baro/             MS5611.hpp/.cpp — barometer state-machine driver (SPI1, CS=PD7)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
 │   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface only
 │   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
-│   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL)
+│   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
 │   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
 │   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
 │   │
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
-│   │   ├── PID.hpp/.cpp            PID base class with derivative filter + anti-windup
-│   │   ├── FlightStateMachine.hpp/.cpp  Top-level mode/phase dispatcher (400 Hz)
+│   │   ├── PID.hpp/.cpp                 PID base class with derivative filter + anti-windup
+│   │   ├── FlightStateMachine.hpp/.cpp   Top-level mode/phase dispatcher + config-driven controller list (400 Hz)
+│   │   ├── AttitudeController.hpp        Common interface implemented by AttitudePID/AttitudeINDI
 │   │   ├── Attitude_PID.hpp/.cpp   Cascaded P+PID attitude controller
 │   │   ├── Attitude_INDI.hpp/.cpp  Incremental NDI roll/pitch controller
 │   │   ├── AltControl.hpp/.cpp     Altitude hold cascade (stick→climb rate→accel→thrust)
@@ -76,8 +86,8 @@ BPRL_flight/
 │       └── Logger.cpp        Ring buffer + FatFS implementation
 │
 ├── boards/
-│   ├── CubeBlueH7/           STM32H753ZI board files (board.h, board.c, board.mk)
-│   └── CubeOrangePlus/       STM32H743ZI board files
+│   ├── CubeBlueH7/           STM32H753ZI board files (board.h, board.c, board.mk) — used by Drone2
+│   └── CubeOrangePlus/       STM32H743ZI board files — used by Drone1
 │
 ├── cfg/
 │   ├── chconf.h              ChibiOS kernel configuration
@@ -90,21 +100,29 @@ BPRL_flight/
     └── ChibiOS/              Pinned to ArduPilot Copter-4.6.3 (commit 88b84600)
 ```
 
+### Per-drone configuration
+
+`configs/DroneConfig.hpp` declares one `DroneConfig` struct (controller gains, RC channel map, motor mixer/unmixer geometry, sensors equipped, attitude-controller list, logging rate + per-message enable) and `extern const DroneConfig kDroneConfig;`. Each physical drone gets its own directory under `configs/` supplying:
+
+- `config.mk` — sets `BOARD_FULL`/`BOARD_UDEFS` (which flight-controller board this drone uses; same mechanism the old `BOARD=` selector used internally).
+- `drone_config.cpp` — defines `kDroneConfig` with every field spelled out (no defaults/override machinery — plain aggregate init, chosen because this toolchain builds with no explicit `-std=`, defaulting to `gnu++14`, where C++20 designated initializers aren't reliably available).
+
+`make DRONE=Drone1` (or `Drone2`) selects which drone's files get compiled in — see [Build and Upload](#6-build-and-upload) below. Shared application code (controllers, EKF, mixer, drivers) never changes between drones; only `configs/<Drone>/` does.
+
 ### Thread priority table
 
 | Thread | Priority | Rate | Role |
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| StateEstThread | NORMALPRIO+25 | 625 Hz | Fuse sensors → g_state[] |
-| ControlThread | NORMALPRIO+22 | 400 Hz | FlightStateMachine → MotorMixer → motor output |
+| ControlThread | NORMALPRIO+22 | 400 Hz | Full 3-lane EKF (fuse sensors → g_state[]) → FlightStateMachine → MotorMixer → motor output, all in one tick |
 | I2CThread | NORMALPRIO+20 | 500 Hz | Poll I2C devices (strain rate sensor) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 1 Hz | LED heartbeat |
-| LogThread | NORMALPRIO-15 | 50 Hz | Snapshot all state → SD card (11 message types per tick) |
+| LogThread | NORMALPRIO-15 | 50 Hz (configurable per drone) | Snapshot all state → SD card (13 message types per tick, each individually enable/disable-able per drone) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
 
-`ControlThread` sits above `I2CThread` deliberately — the 400 Hz flight-critical control loop shouldn't be delayed by a slower, less critical sensor poll. See [Timing and Utilization](#timing-and-utilization) below for how this priority ordering and the current rates were chosen/verified.
+State estimation used to run in a separate `StateEstThread` at 625 Hz, free-running independently of `ControlThread`'s 400 Hz timer. That 625:400 ratio isn't an integer ratio, so the number of estimator writes landing between two control-thread reads alternated irregularly — a suspected structural contributor to high-frequency jitter in the control output. The two threads were merged into one: the EKF now runs unconditionally at the top of every `ControlThread` tick, so the mixer always consumes this exact tick's fresh estimate rather than a value handed across a free-running cross-thread boundary. `ControlThread` sits above `I2CThread` deliberately — the flight-critical loop shouldn't be delayed by a slower, less critical sensor poll. See [Timing and Utilization](#timing-and-utilization) below for how this priority ordering and the current rates were chosen/verified.
 
 ### Shared state
 
@@ -114,10 +132,12 @@ All inter-thread communication goes through mutex-protected globals defined in `
 |---|---|---|
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
-| `g_input[6]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch, INDI/PID switch) |
+| `g_input[6]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch, controller-select switch) |
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
-| `g_ctrl[4]` | `state_mtx` | PID torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
+| `g_ctrl[4]` | `state_mtx` | Active controller's torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
+| `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
+| `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default, 1=INDI if the drone's config enables it) — for `$TEL`/logging |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1, each with an arrival timestamp for age-gating/forward-propagation in `StateManager` |
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
@@ -126,7 +146,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 
 ### Timing and Utilization
 
-Measured with `BPRL_TIMING` (see `tools/README.md`'s [Timing / schedulability](tools/README.md#timing--schedulability-bprl_timing-build) section) at the current rates — 625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control:
+> **Stale — needs a fresh capture.** The table below was measured with `BPRL_TIMING` (see `tools/README.md`'s [Timing / schedulability](tools/README.md#timing--schedulability-bprl_timing-build) section) against the **previous** architecture, with a separate 625 Hz `StateEstThread` alongside 400 Hz `ControlThread`. Since then the two were merged into one 400 Hz `ControlThread` that runs the full EKF every tick (see the thread priority table above and [State Estimation (EKF)](#3-state-estimation-ekf) below) — the combined `ctrl` exec time now includes what used to be `est`'s, on a 400 Hz period instead of `est`'s old 1600 µs one. Re-run `TIM,status` against real hardware before trusting these figures for the merged architecture; the old numbers are kept here only as the last real measurement on record.
 
 | | utilization | misses |
 |---|---|---|
@@ -171,12 +191,12 @@ Mode changes reset all controller integrators.
 
 ### Attitude controller
 
-Attitude is independent of flight mode, selected at runtime by `set_use_indi(bool)`:
+Attitude is independent of flight mode, selected at runtime by `FlightStateMachine::set_active_controller(int radio_switch_pos)`. `FlightStateMachine` holds a config-driven list of controllers (`configs/DroneConfig.hpp`'s `ControllersConfig`) behind a common `AttitudeController` interface — every controller in the list runs every tick (shadow mode), and only the one at the resolved list index drives the mixer:
 
-| Controller | Description |
-|---|---|
-| `AttitudePID` (default) | Cascaded outer-P / inner-PID for roll, pitch, yaw |
-| `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
+| List index | Controller | Description |
+|---|---|---|
+| 0 (always present, default) | `AttitudePID` | Cascaded outer-P / inner-PID for roll, pitch, yaw |
+| 1 (present only if `indi_enabled`) | `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
 
 ### AltControl — altitude hold
 
@@ -220,7 +240,9 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor com
 
 ### Architecture
 
-State estimation runs in `StateEstThread` at 625 Hz. This rate was chosen empirically, not for a clean ratio with the 400 Hz control loop — profiling with the `BPRL_TIMING` instrumentation (see [Timing and Utilization](#timing-and-utilization)) showed the notch-filtered, CAN-staleness-gated 3-lane EKF update genuinely could not fit an 800 Hz budget (average execution time alone exceeded the 1250µs period on nearly every tick), which left `StateEstThread` — the second-highest-priority thread in the system — permanently runnable and starved everything below it, including the IWDG watchdog kick in `main()`'s idle loop, causing a reset every ~30s. 625 Hz (the nearest achievable rate to 600 Hz at the system's 100µs tick granularity) leaves real headroom (measured ~55% utilization, zero missed deadlines) after two cheap optimizations — de-duplicating the per-axis notch-filter coefficient computation and building at `-O3` instead of `-O2` — recovered a meaningful chunk of the original 800 Hz budget. The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
+State estimation runs at the top of every `ControlThread` tick, 400 Hz — merged into the same thread as the controller/mixer stage (formerly a separate `StateEstThread` at 625 Hz; see the [Thread priority table](#thread-priority-table) above for why they were merged: two independent free-running timers at a non-integer rate ratio were a suspected source of control-loop jitter). Running the estimator and controller in one thread means the mixer always consumes this exact tick's fresh EKF output, never a value handed across a cross-thread boundary. Compute cost was assessed as well within budget for the full 3-lane EKF at 400 Hz on this MCU (prior profiling at higher rates — see the stale-flagged [Timing and Utilization](#timing-and-utilization) table above — showed real headroom even before the merge; revisit only if a fresh capture on the merged architecture shows pressure). The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
+
+Historical note: at the previous 800 Hz (before the 625 Hz step, itself before this 400 Hz merge), the notch-filtered, CAN-staleness-gated 3-lane EKF update genuinely could not fit its budget (average execution time alone exceeded the period on nearly every tick), which left the estimator thread — then the second-highest-priority thread in the system — permanently runnable and starved everything below it, including the IWDG watchdog kick in `main()`'s idle loop, causing a reset every ~30s. Two cheap optimizations (de-duplicating the per-axis notch-filter coefficient computation, building at `-O3` instead of `-O2`) recovered enough budget to make 625 Hz viable, and that same margin carries into the current 400 Hz merged thread.
 
 ```
 g_imu[0] ──► EKF lane 0 ──┐
@@ -245,7 +267,7 @@ Each lane estimates:
 
 p/q/r, u_dot/v_dot/w_dot, and p_dot/q_dot/r_dot are **not** Kalman states, they are computed by `StateManager` and appended to the output vector.
 
-### Predict step (625 Hz)
+### Predict step (400 Hz)
 
 Each lane predicts forward using its own IMU after subtracting the estimated bias:
 
@@ -262,13 +284,13 @@ Updates are applied in order each tick (earlier updates inform later ones):
 
 | Step | Source | Rate | States updated |
 |------|--------|------|----------------|
-| 1.5 | Onboard accel (gravity vector) | 625 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
+| 1.5 | Onboard accel (gravity vector) | 400 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
 | 2 | IMX5 quaternion over CAN | 200 Hz, async, age-gated (skipped if >50ms stale) and forward-propagated by its measured age before fusing | Full quaternion |
 | 5 | Mocap NED position | Async | X, Y, Z |
 | 5 | Mocap NED velocity → body frame | Async | u, v, w |
 | 5.6 | MS5611 barometric altitude | ~100+ Hz, async, **suppressed while mocap is connected** | Z (and, via cross-covariance, w and Z accel bias) |
 
-IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF measurement update) are similarly age-gated — see [Sensor loss behaviour](#sensor-loss-behaviour) and the `STATEMGR_IMX5_RATE_WEIGHT` row below. Unlike the quaternion, the rate blend is a continuous sample-and-hold rather than event-gated: it re-blends whatever `g_can_imu.p/q/r` currently holds every 625 Hz tick (refreshed ~every 10ms), rather than only touching the blend on ticks where a new CAN rate frame actually arrived.
+IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF measurement update) are similarly age-gated — see [Sensor loss behaviour](#sensor-loss-behaviour) and the `STATEMGR_IMX5_RATE_WEIGHT` row below. Unlike the quaternion, the rate blend is a continuous sample-and-hold rather than event-gated: it re-blends whatever `g_can_imu.p/q/r` currently holds every `ControlThread` tick (400 Hz, refreshed ~every 10ms), rather than only touching the blend on ticks where a new CAN rate frame actually arrived.
 
 The gravity-vector update (`update_gravity`) hard-rejects samples where `|accel|` is outside `[0.1g, 3g]`, then applies a joint chi-squared gate (`GRAV_CHI2_GATE = 5σ`) over an adaptive measurement noise that grows with a lowpass-filtered vibration estimate (`GRAV_R_VIBE`) — so it's trusted less, not switched off outright, under vibration. Only the Z-axis accel bias is corrected here (X/Y residuals are ambiguous between bias and genuine horizontal acceleration; those are only resolved via mocap velocity fusion's cross-covariance with u/v). Yaw is not observable from gravity alone and requires the IMX5.
 
@@ -295,8 +317,8 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 
 | Parameter | Location | Default | Effect |
 |-----------|----------|---------|--------|
-| `Q_BIAS_A` | EKF.hpp | 1e-7 | Accel bias random-walk rate. Increase if bias changes rapidly. |
-| `Q_BIAS_G` | EKF.hpp | 1e-9 | Gyro bias random-walk rate. Typically slower than accel. |
+| `Q_BIAS_A` | EKF.hpp | 1.5625e-7 | Accel bias random-walk rate. Increase if bias changes rapidly. Rescaled from 1e-7 for the 625→400 Hz thread merge — see EKF.hpp's comment. |
+| `Q_BIAS_G` | EKF.hpp | 1.5625e-9 | Gyro bias random-walk rate. Typically slower than accel. Rescaled from 1e-9 for the 625→400 Hz thread merge — see EKF.hpp's comment. |
 | `P0_BIAS_A` | EKF.hpp | 0.01 | Initial accel bias uncertainty. Larger = faster startup convergence. |
 | `P0_BIAS_G` | EKF.hpp | 1e-4 | Initial gyro bias uncertainty. |
 | `GRAV_HARD_GATE` | EKF.hpp | 3g | Outer reject: skip gravity update outright if `\|accel\|` exceeds this multiple of g. |
@@ -313,10 +335,10 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
 | `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
 | `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
-| `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At 625 Hz that's ~300 Hz (~18,000 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |
-| `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.05 | Max fractional change in the notch's tracked center frequency per tick (matches ArduPilot's ±5%/update). |
-| `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. |
-| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.016 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at StateEstThread's 625 Hz — rescale if that rate changes, see the comment in EKF.hpp). |
+| `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At the current 400 Hz that's ~192 Hz (~11,520 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |
+| `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.078125 | Max fractional change in the notch's tracked center frequency per `update()` call. Rescaled from 0.05 for the 625→400 Hz thread merge (×625/400) so the real-world slew rate in Hz/s is unchanged — `update()` now runs at 400 Hz instead of 625 Hz, so the same per-call fraction would otherwise translate to a slower real-time tracking response. |
+| `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. In real microseconds, not ticks, so unaffected by the thread-rate merge. |
+| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.025 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at `ControlThread`'s 400 Hz, since this is called once per tick with no `dt` parameter — rescaled from 0.016 for the 625→400 Hz thread merge; rescale again if that rate changes, see the comment in EKF.hpp). |
 
 ### Sensor loss behaviour
 
@@ -509,38 +531,43 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ### Build
 
 ```bash
-# Default board (CubeOrange+, plain flight build — no debug/timing flags)
+# Default drone (Drone1 = CubeOrange+, plain flight build — no debug/timing flags)
 make
 
-# Explicitly select board — short names map to the internal board dirs/macros
-# (boards/CubeBlueH7, -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS)
-make BOARD=blue      # CubeBlue H7
-make BOARD=orange    # CubeOrange+ (default)
+# Explicitly select drone — DRONE picks configs/<Drone>/config.mk, which sets
+# the board this drone uses (BOARD_FULL/BOARD_UDEFS — boards/CubeBlueH7,
+# -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS)
+# and configs/<Drone>/drone_config.cpp, which supplies that drone's
+# DroneConfig (gains, RC map, motor geometry, sensors, logging).
+make DRONE=Drone1    # CubeOrange+ (default)
+make DRONE=Drone2    # CubeBlue H7
 
 # Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
-make BOARD=blue UDEFS_EXTRA=-DBPRL_DEBUG
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
 
 # Enable thread timing / CPU utilization instrumentation (testing/bench only —
 # see Timing and Utilization below)
-make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING
 
 # Clean build directory
 make clean
 ```
 
-Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile).
+The old `BOARD=blue`/`BOARD=orange` selector is retired — `make BOARD=...` now fails with a clear error pointing at `DRONE=` instead of silently building whatever `DRONE` defaults to (a silent wrong-drone build is a worse failure mode on a flight controller than a build error). See [Per-drone configuration](#per-drone-configuration) above.
+
+Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile). Switching `DRONE=` doesn't segregate `build/` by drone — run `make clean` when switching, the same as was needed switching `BOARD=` before.
 
 ### Upload
 
 **Via Cube USB bootloader:**
 ```bash
-make flash BOARD=blue PORT=/dev/ttyACM0
+make flash DRONE=Drone2 PORT=/dev/ttyACM0
 ```
 `tools/flash_upload.py` handles the protocol.
 
 **Via ST-Link / OpenOCD:**
 ```bash
-make flash-stlink BOARD=blue
+make flash-stlink DRONE=Drone2
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
@@ -550,7 +577,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **U
 
 | Prefix | Content |
 |---|---|
-| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, use_indi |
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, active_controller (resolved controller-list index, 0=PID default, 1=INDI if enabled) |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 
@@ -564,7 +591,7 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ### Channel summary
 
-IMU chip set and CS pins are board-conditional (`BOARD=orange` default vs. `BOARD=blue`) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `BOARD=orange` shown here:
+IMU chip set and CS pins are board-conditional (`DRONE=Drone1`/CubeOrangePlus, the default, vs. `DRONE=Drone2`/CubeBlueH7) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `DRONE=Drone1` shown here:
 
 | Channel | Driver | Device(s) | Status |
 |---|---|---|---|
@@ -580,9 +607,9 @@ IMU chip set and CS pins are board-conditional (`BOARD=orange` default vs. `BOAR
 
 ## 8. IMU Drivers
 
-The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set is board-conditional** — `BOARD=orange` (CubeOrangePlus, default) and `BOARD=blue` (CubeBlueH7) populate `imu1/2/3` with genuinely different parts, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` (set by the Makefile from `BOARD=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
+The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set is board-conditional** — `DRONE=Drone1` (CubeOrangePlus, default) and `DRONE=Drone2` (CubeBlueH7) populate `imu1/2/3` with genuinely different parts, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` (set by `configs/Drone1/config.mk`/`configs/Drone2/config.mk`, chosen via `DRONE=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
 
-| Index | Variable | `BOARD=orange` sensor/bus | `BOARD=blue` sensor/bus | DOF |
+| Index | Variable | `DRONE=Drone1` sensor/bus | `DRONE=Drone2` sensor/bus | DOF |
 |---|---|---|---|---|
 | 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | 6 (accel + gyro) |
 | 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | 6 (accel + gyro) |
@@ -590,7 +617,7 @@ The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus
 | — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
 | — | `g_baro` | MS5611, SPI1 CS=PD7 | MS5611, SPI1 CS=PD7 (same pin both boards) | pressure + temperature |
 
-### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `BOARD=orange`
+### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `DRONE=Drone1`
 
 InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driver class serves all three on-board IMUs on this board** — all three slots (`imu1/2/3`) are confirmed populated with real ICM-45686 parts (verified by each successfully passing its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 rather than ICM-45686 — `ICM42688.hpp/.cpp` exists in the tree to support that variant, not because it's dead code, it just isn't instantiated on this board's `SPI.cpp`.
 
@@ -601,7 +628,7 @@ InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driv
 - **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
 - **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
 
-### ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `BOARD=blue`
+### ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `DRONE=Drone2`
 
 Classic InvenSense MPU-9250-family parts — register-based digital low-pass filter (DLPF) rather than the 45686/42688's analog anti-alias filter stage, and no FIFO/oversampling (single sample per `SPIThread` tick).
 
@@ -632,7 +659,7 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 | `0x03` | q rate + y accel | same encoding | 100 Hz |
 | `0x04` | r rate + z accel | same encoding | 100 Hz |
 
-When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz — each CAN frame is timestamped on arrival, and `StateManager` skips fusing it if it's more than `STATEMGR_CAN_QUAT_STALE_US` (50ms) stale by the time it's processed, otherwise forward-propagating it by its measured age (using each lane's own gyro) before fusing, rather than treating a few-ms-old sample as if it were instantaneous. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`); this blend is a continuous sample-and-hold rather than event-gated like the quaternion — it re-blends whatever the last-received `g_can_imu.p/q/r` holds on every 625 Hz tick (refreshed ~every 10ms), gated only on the same 50ms staleness check (`STATEMGR_CAN_RATES_STALE_US`), not on whether a new frame arrived this specific tick. The on-board IMUs continue to run and are logged regardless of IMX5 state.
+When the IMX5 is connected, its quaternion is fused into all three EKF lanes via `update_quaternion()` at 200 Hz — each CAN frame is timestamped on arrival, and `StateManager` skips fusing it if it's more than `STATEMGR_CAN_QUAT_STALE_US` (50ms) stale by the time it's processed, otherwise forward-propagating it by its measured age (using each lane's own gyro) before fusing, rather than treating a few-ms-old sample as if it were instantaneous. Angular rates are optionally blended into the StateManager p/q/r output (30% IMX5, 70% onboard gyros by default — see `STATEMGR_IMX5_RATE_WEIGHT`); this blend is a continuous sample-and-hold rather than event-gated like the quaternion — it re-blends whatever the last-received `g_can_imu.p/q/r` holds on every `ControlThread` tick (400 Hz, refreshed ~every 10ms), gated only on the same 50ms staleness check (`STATEMGR_CAN_RATES_STALE_US`), not on whether a new frame arrived this specific tick. The on-board IMUs continue to run and are logged regardless of IMX5 state.
 
 ---
 
@@ -656,7 +683,7 @@ The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs nat
 
 3. **Clone the repo and build** — the Makefile works unchanged:
    ```bash
-   make BOARD=blue
+   make DRONE=Drone2
    ```
 
 ### Flashing from WSL2
@@ -671,9 +698,9 @@ usbipd attach --wsl --busid <ID>
 ```
 Then in WSL2:
 ```bash
-make flash BOARD=blue PORT=/dev/ttyACM0
+make flash DRONE=Drone2 PORT=/dev/ttyACM0
 # or
-make flash-stlink BOARD=blue
+make flash-stlink DRONE=Drone2
 ```
 
 **Option B — STM32CubeProgrammer (no usbipd needed):**

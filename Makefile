@@ -2,40 +2,41 @@
 # BPRL Flight Controller — ChibiOS Makefile
 #
 # Usage:
-#   make                            (default: BOARD=orange, plain flight build)
-#   make BOARD=orange               (CubeOrangePlus, default)
-#   make BOARD=blue                 (CubeBlueH7)
-#   make flash  BOARD=blue   PORT=/dev/ttyACM0   (Cube bootloader)
-#   make flash-stlink BOARD=blue                  (ST-Link / OpenOCD)
+#   make                            (default: DRONE=Drone1, plain flight build)
+#   make DRONE=Drone1               (CubeOrangePlus, default)
+#   make DRONE=Drone2               (CubeBlueH7)
+#   make flash  DRONE=Drone2 PORT=/dev/ttyACM0   (Cube bootloader)
+#   make flash-stlink DRONE=Drone2                (ST-Link / OpenOCD)
 #
 # Debug UART (USART3 @ 115200, Telem1 connector):
-#   make BOARD=blue UDEFS_EXTRA=-DBPRL_DEBUG
+#   make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
 #   (Disable before flight — adds a 10 Hz print thread)
 #
 # Thread timing / CPU utilization instrumentation (schedulability testing):
-#   make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING
+#   make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING
 #   (Testing/bench only — query over USB with "TIM,status" / "TIM,reset".
 #   Zero-cost when the flag is absent; see src/diagnostics/ThreadTiming.hpp)
 #
 
 ##############################################################################
-# Board selection
+# Drone selection
 #
-# BOARD is the short user-facing name (blue/orange); BOARD_FULL maps it to
-# the boards/<dir> and internal board name used everywhere else (linker
-# scripts, board.h BOARD_NAME, etc.) — that internal naming is unchanged.
+# DRONE picks a physical airframe's config — configs/<DRONE>/config.mk sets
+# BOARD_FULL/BOARD_UDEFS (which flight-controller board this drone uses; same
+# mechanism/internal naming as the old BOARD=blue/orange selector) and
+# configs/<DRONE>/drone_config.cpp supplies its DroneConfig (gains, RC
+# mapping, motor geometry, sensors, logging — see configs/DroneConfig.hpp).
 
-BOARD ?= orange
-
-ifeq ($(BOARD), blue)
-  BOARD_FULL  = CubeBlueH7
-  BOARD_UDEFS = -DSTM32H753xx -DSTM32_ENFORCE_H7_REV_XY -DBPRL_BOARD_CUBEBLUE
-else ifeq ($(BOARD), orange)
-  BOARD_FULL  = CubeOrangePlus
-  BOARD_UDEFS = -DSTM32H757xx -DCORE_CM7 -DBPRL_BOARD_CUBEORANGEPLUS
-else
-  $(error Unknown BOARD="$(BOARD)". Valid values: blue, orange)
+ifdef BOARD
+  $(error BOARD= is retired — use DRONE=Drone1 or DRONE=Drone2 instead. \
+    (make BOARD=blue would otherwise be silently ignored and quietly build \
+    whatever DRONE defaults to, which on a flight controller is worse than \
+    a build error.))
 endif
+
+DRONE ?= Drone1
+
+include configs/$(DRONE)/config.mk
 
 BOARDDIR := boards/$(BOARD_FULL)
 
@@ -148,6 +149,7 @@ CSRC = $(ALLCSRC) \
 
 # C++ sources
 CPPSRC = $(ALLCPPSRC) \
+         configs/$(DRONE)/drone_config.cpp \
          main.cpp \
          src/threads.cpp \
          src/math/math.cpp \

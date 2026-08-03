@@ -3,9 +3,11 @@
 #include <cstring>
 #include "Attitude_PID.hpp"
 #include "Attitude_INDI.hpp"
+#include "AttitudeController.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
 #include "Unmixer.hpp"
+#include "configs/DroneConfig.hpp"
 
 enum class FlightMode  { STABILIZE, ALT_HOLD, POS_HOLD };
 enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
@@ -36,25 +38,26 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * but only in shadow, feeding get_ctun_diag() for the CTUN log. Flip that
  * flag to false to restore closed-loop pos-hold flight.
  *
- * Both AttitudePID and AttitudeINDI run every tick (shadow mode), so INDI's
- * internal controller state stays live and its output is always directly
- * comparable to whichever one actually flew (see get_indi_diag()). Only the
- * controller selected by _use_indi (default: false = PID) drives out_cmds:
- *   false → AttitudePID cascade
- *   true  → AttitudeINDI (incremental NDI; roll/pitch INDI, yaw PID)
+ * Every controller in the drone's config list runs every tick (shadow mode —
+ * see code_rework.md Section 3.4), so a controller not currently selected
+ * stays live and its output is always directly comparable to whichever one
+ * actually flew (see get_indi_diag() for INDI's shadow diagnostics
+ * specifically). Only the controller at _active_index drives out_cmds.
+ * PID is always list index 0 and is the default; a drone's config
+ * (DroneConfig::controllers) decides whether INDI is in the list at all.
  *
- * _use_indi is set every tick by ControlThread from the radio's INDI/PID
- * switch (channel 7, see radio_use_indi()) via set_use_indi() — it is not a
- * flight-mode-linked choice, so the pilot can flip attitude controllers in
- * any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change. Channel 7 is a
- * 3-position switch; only the 3rd (highest) position selects INDI, the
- * other two both mean PID.
+ * _active_index is set every tick by ControlThread from the radio's
+ * controller-select switch (channel 7) via set_active_controller() — it is
+ * not a flight-mode-linked choice, so the pilot can flip attitude
+ * controllers in any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change.
+ * Channel 7 is a 3-position switch; see set_active_controller()'s mapping
+ * from raw switch position to list index.
  *
  * Output (out_cmds[3], thrust_out) feeds the unchanged MotorMixer.
  */
 class FlightStateMachine {
 public:
-    FlightStateMachine();
+    explicit FlightStateMachine(const DroneConfig &cfg);
 
     // state_full[19]: full EKF state vector (StateIdx::*)
     // euler[3]:       [roll, pitch, yaw] rad
@@ -68,7 +71,20 @@ public:
                 const uint32_t rpm[4],
                 float out_cmds[3], float &thrust_out);
 
-    void set_use_indi(bool use_indi) { _use_indi = use_indi; }
+    // Maps the raw 3-position RC switch value (0/1/2, low/mid/high) to a
+    // controller-list index. Only the highest position ever selects
+    // something other than PID (list index 0, the default) — a drone whose
+    // config doesn't enable INDI has _num_controllers == 1, so the highest
+    // position is a no-op and stays on PID.
+    void set_active_controller(int radio_switch_pos)
+    {
+        _active_index = (radio_switch_pos >= 2 && _num_controllers > 1) ? 1 : 0;
+    }
+
+    // Resolved controller-list index actually driving out_cmds (may differ
+    // from the raw radio switch position if the drone's config doesn't
+    // enable a second controller) — for $TEL/logging.
+    int active_index() const { return _active_index; }
 
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
@@ -88,23 +104,19 @@ public:
 
 private:
     // ── Mode dispatch helpers ────────────────────────────────────────────────
-    void run_attitude(const float ctrl_state6[], const float euler[],
-                      const float state_full[], const float input[],
-                      const uint32_t rpm[], float out_cmds[3]);
+    void run_attitude(const float euler[], const float state_full[],
+                      const float input[], const uint32_t rpm[], float out_cmds[3]);
 
-    void mode_stabilize(const float ctrl_state6[], const float euler[],
-                        const float state_full[], const float input[],
-                        const uint32_t rpm[],
+    void mode_stabilize(const float euler[], const float state_full[],
+                        const float input[], const uint32_t rpm[],
                         float out_cmds[3], float &thrust_out);
 
-    void mode_alt_hold(const float ctrl_state6[], const float euler[],
-                       const float state_full[], const float input[],
-                       const uint32_t rpm[],
+    void mode_alt_hold(const float euler[], const float state_full[],
+                       const float input[], const uint32_t rpm[],
                        float out_cmds[3], float &thrust_out);
 
-    void mode_pos_hold(const float ctrl_state6[], const float euler[],
-                       const float state_full[], const float input[],
-                       const uint32_t rpm[],
+    void mode_pos_hold(const float euler[], const float state_full[],
+                       const float input[], const uint32_t rpm[],
                        float out_cmds[3], float &thrust_out);
 
     // ── PosHold pilot-blend state ────────────────────────────────────────────
@@ -150,7 +162,6 @@ private:
     // ── State ────────────────────────────────────────────────────────────────
     FlightPhase _phase    = FlightPhase::DISARMED;
     FlightMode  _mode     = FlightMode::STABILIZE;
-    bool        _use_indi = false;
 
     // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
     float _indi_diag[8] = {};
@@ -158,9 +169,17 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
-    AttitudePID  _pid;
-    AttitudeINDI _indi;
+    AttitudePID  _pid;    // always present, always list index 0 (the default)
+    AttitudeINDI _indi;   // storage always exists (no heap allocation); only
+                          // reachable via _controllers[] if the drone's
+                          // config enables it (see constructor)
     AltControl   _alt;
     PosControl   _pos;
     Unmixer      _unmixer;
+
+    // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────
+    static constexpr int MAX_ATTITUDE_CONTROLLERS = 2;  // PID + INDI today
+    AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
+    int _num_controllers;
+    int _active_index;   // generalizes the old _use_indi bool
 };

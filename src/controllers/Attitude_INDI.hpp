@@ -1,6 +1,8 @@
 #pragma once
 #include "PID.hpp"
 #include "Unmixer.hpp"
+#include "AttitudeController.hpp"
+#include "configs/DroneConfig.hpp"
 
 /*
  * INDI (Incremental Nonlinear Dynamic Inversion) attitude controller.
@@ -33,22 +35,31 @@
  *   input[]           [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
  *   current_torque[2] [roll_Nm, pitch_Nm] from Unmixer
  *   out_cmds[3]       normalised torque [roll, pitch, yaw] in [-1, 1]
- *   delta_torque[2]   [delta_roll_Nm, delta_pitch_Nm] incremental INDI correction (for logging)
- *   accel_cmd[2]      [accel_cmd_roll, accel_cmd_pitch] rad/s², rate-PID output fed to the INDI step (for logging)
+ *
+ * delta_torque/accel_cmd (shadow-logging diagnostics, [roll, pitch]) are no
+ * longer separate update() out-params — that would break the shared
+ * AttitudeController signature every controller in FlightStateMachine's list
+ * now uses. update() stores them internally; get_diag() reads them back.
  */
-class AttitudeINDI {
+class AttitudeINDI : public AttitudeController {
 public:
-    AttitudeINDI();
+    explicit AttitudeINDI(const AttitudeIndiGains &g);
 
     void update(const float euler[3], const float state_full[],
                 const float input[], const float current_torque[2],
-                const Unmixer &unmixer, float out_cmds[3],
-                float delta_torque[2], float accel_cmd[2]);
-    void reset_all();
+                const Unmixer &unmixer, float out_cmds[3]) override;
+    void reset_all() override;
 
-    // G(x)^-1 : N·m per rad/s² — airframe moment of inertia (Ixx, Iyy) * gain (1 for now)
-    static constexpr float INDI_GAIN_ROLL = 0.0035f;
-    static constexpr float INDI_GAIN_PITCH = 0.0045f;
+    // [delta_roll_Nm, delta_pitch_Nm] incremental INDI correction, and
+    // [accel_cmd_roll, accel_cmd_pitch] rad/s² rate-PID output fed to the
+    // INDI step — both from the most recent update() call, for logging.
+    void get_diag(float delta_torque[2], float accel_cmd[2]) const
+    {
+        delta_torque[0] = _delta_torque[0];
+        delta_torque[1] = _delta_torque[1];
+        accel_cmd[0]    = _accel_cmd[0];
+        accel_cmd[1]    = _accel_cmd[1];
+    }
 
 private:
     PID _roll_att;
@@ -58,10 +69,17 @@ private:
     PID _yaw_rate;
     PID _yaw_hold;   // heading-lock trim: heading error [rad] -> corrective rate [rad/s]
 
+    // G(x)^-1 : N·m per rad/s² — airframe moment of inertia (Ixx, Iyy) * gain (1 for now)
+    float _indi_gain_roll;   // from DroneConfig; was INDI_GAIN_ROLL
+    float _indi_gain_pitch;  // from DroneConfig; was INDI_GAIN_PITCH
+    float _yaw_gain;         // from DroneConfig; was YAW_GAIN
+
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
 
-    static constexpr float YAW_GAIN            = 1.5f;
+    float _delta_torque[2] = {};  // see get_diag()
+    float _accel_cmd[2]    = {};
+
     static constexpr float YAW_STICK_DEADBAND   = 0.10f;  // normalised stick [-1,1], matches FlightStateMachine::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE    = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
 };

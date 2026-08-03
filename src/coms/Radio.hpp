@@ -1,5 +1,6 @@
 #pragma once
 #include "hal.h"
+#include "configs/DroneConfig.hpp"
 
 /*
  * ── RC radio input protocol selection ──────────────────────────────────────
@@ -29,7 +30,7 @@ float radio_thr(void);          /* throttle       [0, 1]  */
 float radio_roll(void);         /* roll           [-1, 1] */
 float radio_pitch(void);        /* pitch          [-1, 1] */
 float radio_yaw(void);          /* yaw rate       [-1, 1] */
-float radio_flight_mode(void);  /* flight mode sw [-1, 1] from channel 6 */
+float radio_flight_mode(void);  /* flight mode sw [-1, 1] from RcChannelMap::flight_mode */
 bool  radio_armed(void);
-float radio_indi(void);         /* raw INDI/PID switch position [-1, 1], channel 7 (3-pos) */
-bool  radio_use_indi(void);     /* INDI/PID attitude ctrl switch, channel 7 (3-pos; INDI = 3rd/highest position only) */
+float radio_indi(void);         /* raw controller-select switch position [-1, 1], RcChannelMap::indi_switch (3-pos) */
+int   radio_switch_position(void);  /* radio_indi() bucketed to 0/1/2 (low/mid/high) — see FlightStateMachine::set_active_controller() */

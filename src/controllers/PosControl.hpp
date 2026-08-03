@@ -1,6 +1,7 @@
 #pragma once
 #include "PID.hpp"
 #include "src/math/math.hpp"
+#include "configs/DroneConfig.hpp"
 #include <cstdint>
 
 /*
@@ -19,7 +20,7 @@
  */
 class PosControl {
 public:
-    PosControl();
+    explicit PosControl(const PosControlGains &g);
 
     void NED_update(const float state[], const float pos_tgt[3], float vel_tgt[3]);
     void NE_rate_update(const float state[], const float vel_NE_tgt[2], float att_cmds[2]);

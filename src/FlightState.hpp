@@ -63,6 +63,6 @@ namespace InputIdx {
     constexpr int PITCH_TGT   = 2; // pitch setpoint [-1, 1]
     constexpr int YAW_RATE    = 3; // yaw rate demand [-1, 1]
     constexpr int FLIGHT_MODE = 4; // flight mode switch [-1,1]; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
-    constexpr int INDI_STK    = 5; // INDI/PID attitude ctrl switch [-1,1]; >0.33=INDI, else PID (see radio_use_indi())
+    constexpr int INDI_STK    = 5; // controller-select switch [-1,1], raw value (see radio_switch_position())
     constexpr int N_INPUTS    = 6;
 }

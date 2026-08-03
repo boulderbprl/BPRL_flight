@@ -3,21 +3,28 @@
 #include "src/math/math.hpp"
 #include <cmath>
 
-AttitudeINDI::AttitudeINDI()
-    : _roll_att  (4.00f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _pitch_att (4.00f, 0.00f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _roll_rate (6.5f, 0.20f, 0.0f, 10.0f, 30.0f, 0.0f, 30.0f)
-    , _pitch_rate(6.5f, 0.20f, 0.0f, 10.0f, 30.0f, 0.0f, 30.0f)
-    , _yaw_rate  (0.065f, 0.02f, 0.000f, 0.5f, 0.0f, 0.0f, 30.0f)
-    , _yaw_hold  (0.60f, 0.05f, 0.000f, 0.3f, 0.0f, 0.0f, 30.0f)
+static PID make_pid(const PidGains &g)
+{
+    return PID(g.kp, g.ki, g.kd, g.imax, g.filt_target_hz, g.filt_error_hz, g.filt_d_hz);
+}
+
+AttitudeINDI::AttitudeINDI(const AttitudeIndiGains &g)
+    : _roll_att  (make_pid(g.roll_att))
+    , _pitch_att (make_pid(g.pitch_att))
+    , _roll_rate (make_pid(g.roll_rate))
+    , _pitch_rate(make_pid(g.pitch_rate))
+    , _yaw_rate  (make_pid(g.yaw_rate))
+    , _yaw_hold  (make_pid(g.yaw_hold))
+    , _indi_gain_roll(g.indi_gain_roll)
+    , _indi_gain_pitch(g.indi_gain_pitch)
+    , _yaw_gain(g.yaw_gain)
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}
 
 void AttitudeINDI::update(const float euler[3], const float state_full[],
                           const float input[], const float current_torque[2],
-                          const Unmixer &unmixer, float out_cmds[3],
-                          float delta_torque[2], float accel_cmd[2])
+                          const Unmixer &unmixer, float out_cmds[3])
 {
     // ── Outer loop: angle error → rate target ─────────────────────────────
     const float roll_rate_tgt  = _roll_att.update(input[1], euler[0]);
@@ -31,18 +38,18 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     const float accel_cmd_roll  = _roll_rate.update(roll_rate_tgt,  p);
     const float accel_cmd_pitch = _pitch_rate.update(pitch_rate_tgt, q);
 
-    accel_cmd[0] = accel_cmd_roll;
-    accel_cmd[1] = accel_cmd_pitch;
+    _accel_cmd[0] = accel_cmd_roll;
+    _accel_cmd[1] = accel_cmd_pitch;
 
     // ── INDI step: incremental torque from acceleration error ──────────────
-    const float p_dot_meas = state_full[StateIdx::P_DOT]; 
+    const float p_dot_meas = state_full[StateIdx::P_DOT];
     const float q_dot_meas = state_full[StateIdx::Q_DOT];
 
-    const float delta_torque_roll  = (accel_cmd_roll  - p_dot_meas) * INDI_GAIN_ROLL;
-    const float delta_torque_pitch = (accel_cmd_pitch - q_dot_meas) * INDI_GAIN_PITCH;
+    const float delta_torque_roll  = (accel_cmd_roll  - p_dot_meas) * _indi_gain_roll;
+    const float delta_torque_pitch = (accel_cmd_pitch - q_dot_meas) * _indi_gain_pitch;
 
-    delta_torque[0] = delta_torque_roll;
-    delta_torque[1] = delta_torque_pitch;
+    _delta_torque[0] = delta_torque_roll;
+    _delta_torque[1] = delta_torque_pitch;
 
     out_cmds[0] = unmixer.normalize_torque(current_torque[0] + delta_torque_roll);
     out_cmds[1] = unmixer.normalize_torque(current_torque[1] + delta_torque_pitch);
@@ -61,7 +68,7 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
                                                  -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
 
-    out_cmds[2] = _yaw_rate.update(YAW_GAIN * input[3] + yaw_hold_rate, r);
+    out_cmds[2] = _yaw_rate.update(_yaw_gain * input[3] + yaw_hold_rate, r);
 }
 
 void AttitudeINDI::reset_all()
