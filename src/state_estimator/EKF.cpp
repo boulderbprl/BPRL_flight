@@ -351,8 +351,9 @@ void EKF::update_altitude(float alt_up_m, float R_var)
     // ── NED sign convention ────────────────────────────────────────────────
     // EKF iZ is NED (down-positive). Barometric height above the boot-time
     // reference is up-positive (see MS5611::init warm-up capture). Explicit
-    // flip here, matching update_gravity's explicit NED sign handling
-    // (EKF.cpp:84) rather than pushing the sign convention onto callers.
+    // flip here, matching update_gravity()'s own explicit NED sign handling
+    // (its g_pred[] negation above) rather than pushing the sign convention
+    // onto callers.
     const float z_meas = -alt_up_m;
     const float innov   = z_meas - _x[iZ];
 

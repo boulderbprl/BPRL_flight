@@ -195,7 +195,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         }
     }
 
-    // ── 5.6. Barometric altitude fusion (all lanes, when available) ────────
+    // ── 5.5. Barometric altitude fusion (all lanes, when available) ────────
     // Gated on has_new the same way mocap pos/vel are — avoids re-fusing a
     // stale sample on ticks where SPIThread hasn't completed a new P+T pair
     // (baro updates at ~100+ Hz into a 400 Hz EKF loop).

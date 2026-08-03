@@ -53,7 +53,7 @@ struct BaroRaw {
 extern mutex_t state_mtx;
 extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
-extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, indi switch)
+extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, controller-select switch)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
 extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
@@ -64,7 +64,7 @@ extern int     g_radio_switch_pos;   // raw controller-select switch position (0
 extern int     g_active_controller;  // FlightStateMachine's resolved active controller-list index (0=PID default) — ControlThread publishes after update(), for $TEL/logging
 
 extern mutex_t imu_mtx;
-extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
+extern IMURaw  g_imu[3];     // [0]=primary, [1]=ext, [2]=backup — chip set is board-conditional (ICM-45686 x3 on Drone1/CubeOrangePlus, ICM-20948 x2 + ICM-20602 on Drone2/CubeBlueH7; see src/coms/SPI.hpp)
 
 extern mutex_t   can_imu_mtx;
 extern CANIMURaw g_can_imu;
@@ -97,7 +97,7 @@ extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
  * All rates live in main.cpp.  Change them there to retune loop timing.    */
 
 struct LogRates {
-    sysinterval_t period;  // 50 Hz → TIME_MS2I(20)
+    sysinterval_t period;  // derived from the drone's DroneConfig::logging.log_rate_hz (default 50 Hz) — see main.cpp
 };
 
 struct ThreadRates {

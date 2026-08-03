@@ -34,10 +34,10 @@ constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + flight mode + arm 
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
 constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
 constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
-constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of _use_indi)
+constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (SPI1, CS=PG1)  (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20948 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (SPI4, CS=PC15) (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20948 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (SPI4, CS=PC13) (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20602 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of FlightStateMachine's active controller)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
@@ -79,7 +79,7 @@ struct __attribute__((packed)) LogMsgRCIN {
     float    yaw_stk;     // [-1, 1]  yaw rate demand from RC
     float    thr_stk;     // [0, 1]   throttle from RC
     float    flight_mode; // [-1, 1]  raw flight-mode switch; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
-    float    indi_stk;    // [-1, 1]  raw INDI/PID switch (channel 7); >0.33=INDI, else PID
+    float    indi_stk;    // [-1, 1]  raw controller-select switch (channel 7); see radio_switch_position()/FlightStateMachine::set_active_controller()
     uint8_t  armed;       // 0=disarmed, 1=armed
 };
 // Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
@@ -138,8 +138,8 @@ struct __attribute__((packed)) LogMsgINDI {
     float    accel_pitch;  // rad/s²  INDI rate-PID commanded angular acceleration, pitch
 };
 // Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
-// Always populated regardless of FlightStateMachine::_use_indi — this is INDI
-// running in shadow mode alongside whichever controller actually flies (OUTP).
+// Always populated regardless of FlightStateMachine's active controller — this
+// is INDI running in shadow mode alongside whichever controller actually flies (OUTP).
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;

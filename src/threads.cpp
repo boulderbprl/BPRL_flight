@@ -557,18 +557,10 @@ static THD_FUNCTION(HeartbeatThread, arg)
     (void)arg;
     chRegSetThreadName("heartbeat");
 
-    /* Simplified heartbeat: LED blink + DShot diagnostics over USB.
-     * IMU/EKF output removed since SPIThread and ControlThread are not
-     * running in the motor-test configuration.
-     *
-     * Every 2 s:
-     *   $DSHOT,<ms>,tc=<tim1_dma_tc>/<tim4_dma_tc>,cc=<tim1_cc>/<tim4_cc>,
-     *           edges=<m0>/<m1>/<m2>/<m3>
-     *
-     * tc increasing → DShot DMA is firing → signal is being sent.
-     * edges > 0     → ESC is responding with GCR telemetry.
-     * tc = 0        → DShot is NOT running (check dshot_init failure).
-     */
+    /* LED-only heartbeat: 200 ms flash every 2 s, no USB output. DShot
+     * diagnostics are available on-demand instead, via the "DSHOT,diag" USB
+     * command (see usb_cmd_dispatch() below) rather than a periodic stream
+     * from this thread. */
     // NB: rates.heartbeat (passed as arg) is unused — this thread hardcodes
     // its own 200 ms tick below. Registered with that literal so the timing
     // report's period matches what actually runs, not the configured-but-

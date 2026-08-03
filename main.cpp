@@ -10,11 +10,13 @@
  *
  *   main.cpp               Init calls, thread rate sequencer, scheduler start.
  *   src/threads.cpp/.hpp   All seven thread function bodies + shared state.
- *   src/coms/SPI.*         ICM-20948/20602 SPI bus drivers.
+ *   src/coms/SPI.*         On-board IMU + barometer SPI bus drivers (chip set is
+ *                          board-conditional — ICM-45686 x3 on Drone1/CubeOrangePlus,
+ *                          ICM-20948 x2 + ICM-20602 on Drone2/CubeBlueH7).
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
  *   src/sensors/StrainRate.*  Strain rate sensor, CAN/I2C switchable via STRAIN_RATE_INTERFACE.
- *   src/coms/PWM.*         Motor PWM output stub (TIM1, future DShot).
+ *   src/coms/PWM.*, DShot.* Motor output — bidirectional DShot 600 by default (MOTOR_PROTOCOL in PWM.hpp).
  *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
  *   src/controllers/       PID, AttitudeController, MotorMixer.
  *
@@ -32,7 +34,7 @@
  *
  * ── Switching radio protocol ────────────────────────────────────────────────
  *   Change RADIO_PROTOCOL in src/coms/Radio.hpp (or pass -DRADIO_PROTOCOL=...
- *   via UDEFS_EXTRA). SBUS=SBUSo port (USART6), CRSF=TELEM1 (USART3).
+ *   via UDEFS_EXTRA). SBUS=SBUSo port (USART6), CRSF=TELEM1 (USART2).
  */
 
 #include "ch.h"

@@ -41,4 +41,5 @@ private:
     uint32_t _last_t_us;
 
     static uint32_t now_us();
+    float _reinit(float target, float measurement, uint32_t now);
 };

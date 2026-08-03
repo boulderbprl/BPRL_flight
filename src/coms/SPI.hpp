@@ -11,9 +11,10 @@
 #endif
 
 /*
- * SPI bus driver — FMUv5x on-board IMUs, chip set selected by BOARD at
- * build time (see Makefile: BOARD=CubeBlueH7 defines BPRL_BOARD_CUBEBLUE,
- * BOARD=CubeOrangePlus defines BPRL_BOARD_CUBEORANGEPLUS).
+ * SPI bus driver — FMUv5x on-board IMUs, chip set selected by DRONE at
+ * build time (see Makefile: DRONE=Drone2 selects CubeBlueH7 and defines
+ * BPRL_BOARD_CUBEBLUE, DRONE=Drone1 selects CubeOrangePlus and defines
+ * BPRL_BOARD_CUBEORANGEPLUS — see configs/<DRONE>/config.mk).
  *
  * ── BPRL_BOARD_CUBEORANGEPLUS (default) ─────────────────────────────────
  * This board's three IMU slots are all populated with ICM-45686 (confirmed —

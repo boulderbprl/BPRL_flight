@@ -48,7 +48,7 @@
 /*
  * StateManager — multi-lane EKF orchestrator.
  *
- * Runs three EKF lanes (N=13 states each), one per onboard IMU. Each lane
+ * Runs three EKF lanes (N=16 states each), one per onboard IMU. Each lane
  * receives its own IMU's predict step; all lanes share the same IMX5
  * measurement updates.
  *
@@ -115,7 +115,7 @@ public:
     // *_timestamp_us fields) rather than fusing them as if they were current.
     void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us);
 
-    // Full 19-element state output — maps 13-state EKF lanes onto StateIdx ordering
+    // Full 19-element state output — maps 16-state EKF lanes onto StateIdx ordering
     // and fills in the 6 derived quantities (uvw_dot, pqr_dot).
     void get_state(float out[StateIdx::N]) const;
 

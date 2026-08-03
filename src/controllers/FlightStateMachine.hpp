@@ -90,7 +90,7 @@ public:
     FlightMode  mode()  const { return _mode;  }
 
     // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
-    // Always populated from AttitudeINDI, regardless of _use_indi (shadow-mode logging).
+    // Always populated from AttitudeINDI, regardless of _active_index (shadow-mode logging).
     void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
     // TEMP (CTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
@@ -152,7 +152,7 @@ private:
     // climb-rate command centered on a hold-altitude deadband, so intent-to-fly
     // means crossing past that center.
     static constexpr float    TAKEOFF_THR_THRESHOLD_STABILIZE = 0.10f;
-    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD ////////////////////change back to 0.5 before re-enabling pso hold
+    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD — TEMP: change back to 0.5 before re-enabling closed-loop POS_HOLD (see CTUN_POSHOLD_SHADOW)
     static constexpr uint32_t TAKEOFF_DEBOUNCE_TICKS = 100;   // 0.25 s @ 400 Hz sustained push
     static constexpr float    LANDED_THR_THRESHOLD   = 0.15f; // commanded thrust considered "at rest"
     static constexpr float    LANDED_VEL_THRESHOLD   = 0.2f;  // m/s, vertical speed considered "at rest"

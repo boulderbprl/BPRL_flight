@@ -12,27 +12,31 @@ PID::PID(float kp, float ki, float kd, float imax,
     , _deriv_valid(false), _last_t_us(0)
 {}
 
+// Shared by the first-sample and stale-input paths: (re)seed target/error
+// state from this sample and fall back to a P-only output, since neither
+// case has a valid previous sample to derive dt/derivative/integrator from.
+float PID::_reinit(float target, float measurement, uint32_t now)
+{
+    _last_t_us   = now;
+    _target_filt = target;
+    _error_filt  = target - measurement;
+    _deriv_valid = true;
+    return _kp * _error_filt;
+}
+
 float PID::update(float target, float measurement)
 {
     const uint32_t now = now_us();
 
     if (!_deriv_valid) {
-        _last_t_us   = now;
-        _target_filt = target;
-        _error_filt  = target - measurement;
-        _deriv_valid = true;
-        return _kp * _error_filt;
+        return _reinit(target, measurement, now);
     }
 
     const float dt = (float)(now - _last_t_us) * 1.0e-6f;
 
     if (dt > STALE_TIMEOUT_US * 1.0e-6f) {
         reset();
-        _last_t_us   = now;
-        _target_filt = target;
-        _error_filt  = target - measurement;
-        _deriv_valid = true;
-        return _kp * _error_filt;
+        return _reinit(target, measurement, now);
     }
 
     _last_t_us = now;
