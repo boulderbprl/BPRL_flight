@@ -158,6 +158,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/PID.cpp \
          src/controllers/Attitude_PID.cpp \
          src/controllers/Attitude_INDI.cpp \
+         src/controllers/Attitude_PID_PI.cpp \
          src/controllers/AltControl.cpp \
          src/controllers/PosControl.cpp \
          src/controllers/Unmixer.cpp \

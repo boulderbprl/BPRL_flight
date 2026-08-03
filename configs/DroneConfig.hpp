@@ -34,6 +34,17 @@ struct AttitudeIndiGains {
     float    yaw_gain;         // was AttitudeINDI::YAW_GAIN
 };
 
+// Gains for AttitudePIDPI (src/controllers/Attitude_PID_PI.hpp) — ported from
+// the BPRL ArduPilot fork's rate-PID + inner angular-acceleration-PI cascade
+// (AC_AttitudeControl_Multi, "switched to PID" commit). roll_accel/pitch_accel
+// are the inner PI loop closed on measured angular acceleration (kd expected
+// to be 0 — a plain PI, not a PID).
+struct AttitudePidPiGains {
+    PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
+    PidGains roll_accel, pitch_accel;
+    float    yaw_stick_gain;
+};
+
 // Gains for AltControl (src/controllers/AltControl.hpp).
 struct AltControlGains {
     PidGains climb_rate;
@@ -82,6 +93,7 @@ struct SensorsConfig {
 // always-present default (PID, always list index 0).
 struct ControllersConfig {
     bool indi_enabled;
+    bool pid_pi_enabled;
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
@@ -100,6 +112,7 @@ struct LoggingConfig {
 struct DroneConfig {
     AttitudePidGains  pid;
     AttitudeIndiGains indi;
+    AttitudePidPiGains pid_pi;
     AltControlGains   alt;
     PosControlGains   pos;
     RcChannelMap      rc_map;

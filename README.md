@@ -68,9 +68,10 @@ BPRL_flight/
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
 │   │   ├── PID.hpp/.cpp                 PID base class with derivative filter + anti-windup
 │   │   ├── FlightStateMachine.hpp/.cpp   Top-level mode/phase dispatcher + config-driven controller list (400 Hz)
-│   │   ├── AttitudeController.hpp        Common interface implemented by AttitudePID/AttitudeINDI
-│   │   ├── Attitude_PID.hpp/.cpp   Cascaded P+PID attitude controller
-│   │   ├── Attitude_INDI.hpp/.cpp  Incremental NDI roll/pitch controller
+│   │   ├── AttitudeController.hpp        Common interface implemented by AttitudePID/AttitudeINDI/AttitudePIDPI
+│   │   ├── Attitude_PID.hpp/.cpp     Cascaded P+PID attitude controller
+│   │   ├── Attitude_INDI.hpp/.cpp    Incremental NDI roll/pitch controller
+│   │   ├── Attitude_PID_PI.hpp/.cpp  Outer P + rate-PID ("SLC") + inner PI on measured angular acceleration, ported from the BPRL ArduPilot fork
 │   │   ├── AltControl.hpp/.cpp     Altitude hold cascade (stick→climb rate→accel→thrust)
 │   │   ├── PosControl.hpp/.cpp     Position hold cascade (pos→vel→lean angles)
 │   │   ├── Unmixer.hpp/.cpp        RPM → physical torque (N·m) for INDI feedback
@@ -137,7 +138,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_ctrl[4]` | `state_mtx` | Active controller's torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
-| `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default, 1=INDI if the drone's config enables it) — for `$TEL`/logging |
+| `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default; INDI and/or PID+PI follow, if the drone's config enables them — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)) — for `$TEL`/logging |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1, each with an arrival timestamp for age-gating/forward-propagation in `StateManager` |
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
@@ -193,10 +194,15 @@ Mode changes reset all controller integrators.
 
 Attitude is independent of flight mode, selected at runtime by `FlightStateMachine::set_active_controller(int radio_switch_pos)`. `FlightStateMachine` holds a config-driven list of controllers (`configs/DroneConfig.hpp`'s `ControllersConfig`) behind a common `AttitudeController` interface — every controller in the list runs every tick (shadow mode), and only the one at the resolved list index drives the mixer:
 
+List indices are assigned in this fixed order — PID always 0; INDI, if enabled, always takes the next index; PID+PI, if enabled, always comes last — so a drone with only PID+PI enabled (INDI off) still has it at index 1, not 2:
+
 | List index | Controller | Description |
 |---|---|---|
 | 0 (always present, default) | `AttitudePID` | Cascaded outer-P / inner-PID for roll, pitch, yaw |
-| 1 (present only if `indi_enabled`) | `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
+| next, if `indi_enabled` | `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
+| next, if `pid_pi_enabled` | `AttitudePIDPI` | Outer-P + rate-PID ("SLC") + inner PI closed on measured angular acceleration for roll/pitch, ported from the BPRL ArduPilot fork; yaw falls back to rate PID |
+
+With all three enabled, the 3-position controller-select switch maps one-to-one to list index (low/mid/high → 0/1/2); with only two controllers present it keeps the legacy mapping (low+mid → PID, high → the other one) — see `FlightStateMachine::set_active_controller()`.
 
 ### AltControl — altitude hold
 
@@ -435,7 +441,7 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 |---|---|---|
 | `ATT` | 0x09 | TimeUS, Roll, Pitch, Yaw (rad), P, Q, R (rad/s), Pdot, Qdot, Rdot (rad/s²) |
 | `LIN` | 0x0A | TimeUS, X, Y, Z (m NED), U, V, W (m/s body), Udot, Vdot, Wdot (m/s² body) |
-| `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw switch value, >0.33=INDI), Armed |
+| `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)), Armed |
 | `OUTP` | 0x06 | TimeUS, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
 | `RPMS` | 0x07 | TimeUS, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
 | `STRN` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
@@ -577,7 +583,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **U
 
 | Prefix | Content |
 |---|---|
-| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, active_controller (resolved controller-list index, 0=PID default, 1=INDI if enabled) |
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, active_controller (resolved controller-list index, 0=PID default; INDI/PID+PI follow if enabled) |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 

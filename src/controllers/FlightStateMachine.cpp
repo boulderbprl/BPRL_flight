@@ -10,15 +10,21 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _mode(FlightMode::STABILIZE)
     , _pid(cfg.pid)
     , _indi(cfg.indi)
+    , _pid_pi(cfg.pid_pi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
     , _unmixer(cfg.unmixer)
     , _num_controllers(0)
     , _active_index(0)
+    , _indi_index(-1)
 {
     _controllers[_num_controllers++] = &_pid;   // always present, always index 0
     if (cfg.controllers.indi_enabled) {
+        _indi_index = _num_controllers;
         _controllers[_num_controllers++] = &_indi;
+    }
+    if (cfg.controllers.pid_pi_enabled) {
+        _controllers[_num_controllers++] = &_pid_pi;
     }
 }
 
@@ -26,6 +32,7 @@ void FlightStateMachine::reset_all()
 {
     _pid.reset_all();
     _indi.reset_all();
+    _pid_pi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
     _ph_N = PHAxisMode::PILOT;
@@ -55,19 +62,18 @@ void FlightStateMachine::run_attitude(const float euler[],
         _controllers[i]->update(euler, state_full, input, current_torque, _unmixer, cmds[i]);
     }
 
-    // INDI is always list index 1 when present (see constructor) — shadow
-    // diagnostics only mean something if it's actually in the list (and
-    // therefore was just updated above); otherwise leave them at zero.
-    const bool indi_present = (_num_controllers > 1);
-    if (indi_present) {
+    // _indi_index is INDI's list index when the drone's config enables it
+    // (see constructor), -1 otherwise — no longer assumable as "1" now that
+    // list index 1 may instead be PID+PI on a drone with INDI disabled.
+    if (_indi_index >= 0) {
         float delta_torque[2], accel_cmd[2];
         _indi.get_diag(delta_torque, accel_cmd);
         _indi_diag[0] = current_torque[0];
         _indi_diag[1] = current_torque[1];
         _indi_diag[2] = delta_torque[0];
         _indi_diag[3] = delta_torque[1];
-        _indi_diag[4] = cmds[1][0];
-        _indi_diag[5] = cmds[1][1];
+        _indi_diag[4] = cmds[_indi_index][0];
+        _indi_diag[5] = cmds[_indi_index][1];
         _indi_diag[6] = accel_cmd[0];
         _indi_diag[7] = accel_cmd[1];
     } else {

@@ -32,8 +32,9 @@ FlightStateMachine  (400 Hz)
      Attitude block (shared, dispatched by FlightStateMachine's           │
      config-driven controller list — see below):                         │
        list index 0 (default) → AttitudePID::update()               ◄────┘
-       list index 1 (if enabled) → AttitudeINDI::update()
+       next, if indi_enabled → AttitudeINDI::update()
                     └─ Unmixer::compute() (RPM → torque N·m)
+       next, if pid_pi_enabled → AttitudePIDPI::update()
      │
      ▼
 MotorMixer  [roll_tq, pitch_tq, yaw_tq, thrust] → motor commands [0..1000]
@@ -78,10 +79,15 @@ Mode changes reset all controllers.
 
 The attitude controller is independent of the flight mode and is selected by `set_active_controller(int radio_switch_pos)` at runtime. `FlightStateMachine` holds a config-driven list of controllers (see `configs/DroneConfig.hpp`'s `ControllersConfig`) behind the common `AttitudeController` interface — every controller in the list runs every tick (shadow mode); only the one at the resolved list index drives the output:
 
+List indices are assigned in fixed order — PID always 0; INDI, if enabled, always takes the next index; PID+PI, if enabled, always comes last (so PID+PI is index 1, not 2, on a drone that enables it without INDI):
+
 | List index | Controller |
 |---|---|
 | 0 (always present, default) | `AttitudePID` — cascade P + PID |
-| 1 (present only if `ControllersConfig::indi_enabled`) | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
+| next, if `ControllersConfig::indi_enabled` | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
+| next, if `ControllersConfig::pid_pi_enabled` | `AttitudePIDPI` — outer P + rate-PID ("SLC") + inner PI on measured angular acceleration for roll/pitch, PID yaw |
+
+With all three controllers present, the 3-position switch maps one-to-one to list index. With only two present it keeps the legacy mapping (low/mid → index 0, high → index 1) — see `FlightStateMachine::set_active_controller()`.
 
 ---
 
@@ -153,6 +159,43 @@ The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rat
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
 `yaw_gain = 1.5` (`AttitudeIndiGains::yaw_gain`) scales the yaw rate target before the rate PID — **not** the same value as `AttitudePidGains::yaw_stick_gain` (3.0); these are two distinct fields in two distinct gain structs, easy to conflate.
+
+---
+
+## AttitudePIDPI (`Attitude_PID_PI.hpp/.cpp`)
+
+Three-stage cascade for roll and pitch; yaw falls back to standard rate PID (same as `AttitudePID`/`AttitudeINDI`). Ported from the BPRL ArduPilot fork (`Documents/ardupilot`, `AC_AttitudeControl_Multi::rate_controller_run_dt`, the "switched to PID" commit `8a1c0e33fb`) — that commit replaced ArduPilot's earlier INDI-style running-total inner loop with a plain PI closed directly on measured angular acceleration.
+
+Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's output outright rather than adding an incremental torque correction on top of `current_torque` — this is a plain nested PI on measured angular acceleration, not a dynamic-inversion step, so it needs no `Unmixer`/`current_torque` feedback (like `AttitudePID`, it builds its own 6-element state locally).
+
+### Control loop (roll shown, pitch symmetric)
+
+```
+1. Outer P:      angle_error [rad]   → rate_tgt [rad/s]
+2. SLC (rate PID): rate_error [rad/s] → accel_tgt [rad/s²]
+3. Inner PI:     accel_error [rad/s²] → out_cmds[0], accel_error = accel_tgt − p_dot_measured
+```
+
+`p_dot`/`q_dot` come from `g_state[P_DOT/Q_DOT]` — the same EKF-derived measured angular acceleration `AttitudeINDI` uses.
+
+### Gains
+
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`). The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination** — `ControllersConfig::pid_pi_enabled` defaults to `false` on both drones until it has.
+
+| Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|
+| Roll attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
+| Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
+| Roll rate ("SLC") | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
+| Pitch rate ("SLC") | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
+| Roll accel (inner PI) | 0.80 | 0.30 | 0 | 30 Hz (passthrough) | off | 0.1 |
+| Pitch accel (inner PI) | 0.80 | 0.30 | 0 | 30 Hz (passthrough) | off | 0.1 |
+| Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 5 Hz | 0.5 |
+| Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
+
+`yaw_stick_gain = 3.0` (`AttitudePidPiGains::yaw_stick_gain`), same value and role as `AttitudePidGains::yaw_stick_gain`.
+
+There is no shadow-diagnostics log for this controller yet (unlike INDI's `get_diag()`/`INDI` log message) — its shadow-mode output (`out_cmds`) is only directly observable via `$TEL`/the `ATT` log when it's the active controller.
 
 ---
 

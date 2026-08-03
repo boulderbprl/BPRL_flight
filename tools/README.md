@@ -199,7 +199,7 @@ python3 tools/logs.py log-status
 |---|---|
 | `<stem>_att.csv` | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
 | `<stem>_lin.csv` | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
-| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw switch value, >0.33=INDI), Armed |
+| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see BPRL_flight's `src/controllers/README.md`), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |

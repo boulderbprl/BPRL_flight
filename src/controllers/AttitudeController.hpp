@@ -13,7 +13,7 @@ class Unmixer;
  *
  * euler[3]:            roll, pitch, yaw (rad)
  * state_full[19]:      full EKF state (StateIdx::*)
- * input[]:             InputIdx::* (thrust, roll/pitch/yaw targets, flight_mode, indi switch)
+ * input[]:             InputIdx::* (thrust, roll/pitch/yaw targets, flight_mode, control switch)
  * current_torque[2]:   [roll_Nm, pitch_Nm] from Unmixer — only INDI-shaped
  *                       controllers need this; PID-only controllers ignore it.
  * out_cmds[3]:         normalised torque [roll, pitch, yaw] in [-1, 1]

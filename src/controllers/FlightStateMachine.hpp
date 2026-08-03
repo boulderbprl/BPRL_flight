@@ -3,6 +3,7 @@
 #include <cstring>
 #include "Attitude_PID.hpp"
 #include "Attitude_INDI.hpp"
+#include "Attitude_PID_PI.hpp"
 #include "AttitudeController.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
@@ -72,13 +73,24 @@ public:
                 float out_cmds[3], float &thrust_out);
 
     // Maps the raw 3-position RC switch value (0/1/2, low/mid/high) to a
-    // controller-list index. Only the highest position ever selects
-    // something other than PID (list index 0, the default) — a drone whose
-    // config doesn't enable INDI has _num_controllers == 1, so the highest
-    // position is a no-op and stays on PID.
+    // controller-list index.
+    //   _num_controllers <= 2 (today's PID/PID+INDI drones): unchanged
+    //     legacy mapping — only the highest position ever selects something
+    //     other than PID (list index 0, the default); a drone whose config
+    //     doesn't enable a second controller has _num_controllers == 1, so
+    //     the highest position is a no-op and stays on PID.
+    //   _num_controllers == 3 (PID + INDI + PID+PI all enabled): the switch
+    //     has exactly as many positions as there are controllers, so each
+    //     position selects its same-numbered list index directly.
     void set_active_controller(int radio_switch_pos)
     {
-        _active_index = (radio_switch_pos >= 2 && _num_controllers > 1) ? 1 : 0;
+        if (_num_controllers >= 3) {
+            _active_index = (radio_switch_pos < 0) ? 0
+                           : (radio_switch_pos >= _num_controllers) ? _num_controllers - 1
+                           : radio_switch_pos;
+        } else {
+            _active_index = (radio_switch_pos >= 2 && _num_controllers > 1) ? 1 : 0;
+        }
     }
 
     // Resolved controller-list index actually driving out_cmds (may differ
@@ -169,17 +181,18 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
-    AttitudePID  _pid;    // always present, always list index 0 (the default)
-    AttitudeINDI _indi;   // storage always exists (no heap allocation); only
-                          // reachable via _controllers[] if the drone's
-                          // config enables it (see constructor)
+    AttitudePID   _pid;      // always present, always list index 0 (the default)
+    AttitudeINDI  _indi;     // storage always exists (no heap allocation); only
+    AttitudePIDPI _pid_pi;   // reachable via _controllers[] if the drone's
+                             // config enables it (see constructor)
     AltControl   _alt;
     PosControl   _pos;
     Unmixer      _unmixer;
 
     // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────
-    static constexpr int MAX_ATTITUDE_CONTROLLERS = 2;  // PID + INDI today
+    static constexpr int MAX_ATTITUDE_CONTROLLERS = 3;  // PID + INDI + PID+PI today
     AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
     int _num_controllers;
     int _active_index;   // generalizes the old _use_indi bool
+    int _indi_index;     // INDI's list index if cfg.controllers.indi_enabled, else -1 (see constructor)
 };

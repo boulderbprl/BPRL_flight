@@ -152,7 +152,7 @@ class TelState:
     can_quat_hz:  int   = 0
     can_rate_hz:  int   = 0
     flight_mode:  int   = 0
-    use_indi:     bool  = False
+    active_controller: int = 0
     received_any: bool  = False
     usb_rx_any:   bool  = False
     last_rx:      float = field(default_factory=time.monotonic)
@@ -168,8 +168,13 @@ def flight_mode_name(mode: int) -> str:
     return f"UNKNOWN({mode})"
 
 
-def attitude_ctrl_name(use_indi: bool) -> str:
-    return "INDI" if use_indi else "PID"
+ATTITUDE_CONTROLLER_NAMES = ["PID", "INDI", "PID+PI"]  # matches FlightStateMachine's fixed list order
+
+
+def attitude_ctrl_name(active_controller: int) -> str:
+    if 0 <= active_controller < len(ATTITUDE_CONTROLLER_NAMES):
+        return ATTITUDE_CONTROLLER_NAMES[active_controller]
+    return f"UNKNOWN({active_controller})"
 
 
 def parse_tel_line(line: str, state: TelState) -> bool:
@@ -201,7 +206,7 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         state.can_quat_hz = int(parts[20])
         state.can_rate_hz = int(parts[21])
         state.flight_mode = int(parts[22])
-        state.use_indi    = bool(int(parts[23]))
+        state.active_controller = int(parts[23])
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()
