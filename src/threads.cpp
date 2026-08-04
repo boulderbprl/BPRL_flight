@@ -43,7 +43,7 @@ float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaterni
 float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
-float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
@@ -478,7 +478,7 @@ static THD_FUNCTION(ControlThread, arg)
         float thrust;
         flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
 
-        float indi_diag[8];
+        float indi_diag[10];
         flight_sm.get_indi_diag(indi_diag);
 
         float ctun_diag[12];
@@ -1347,7 +1347,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8], ctun_diag[12];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1460,6 +1460,8 @@ static THD_FUNCTION(LogThread, arg)
             msg.cmd_pitch   = indi_diag[5];
             msg.accel_roll  = indi_diag[6];
             msg.accel_pitch = indi_diag[7];
+            msg.g1_roll     = indi_diag[8];
+            msg.g1_pitch    = indi_diag[9];
             logger.write(LOG_MSG_INDI, msg);
         }
 

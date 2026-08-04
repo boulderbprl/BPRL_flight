@@ -57,6 +57,15 @@ void FlightStateMachine::run_attitude(const float euler[],
     float current_torque[2];
     _unmixer.compute(rpm, current_torque);
 
+    // Tell the live NLMS estimator whether INDI is the controller actually
+    // driving out_cmds this tick, so it can select its mode-dependent
+    // adaptation rate mu (spec section 5.2). The estimator itself still runs
+    // every tick below regardless of this flag (continuous shadow
+    // estimation, spec section 7).
+    if (_indi_index >= 0) {
+        _indi.set_indi_active(_active_index == _indi_index);
+    }
+
     float cmds[MAX_ATTITUDE_CONTROLLERS][3];
     for (int i = 0; i < _num_controllers; ++i) {
         _controllers[i]->update(euler, state_full, input, current_torque, _unmixer, cmds[i]);
@@ -66,8 +75,9 @@ void FlightStateMachine::run_attitude(const float euler[],
     // (see constructor), -1 otherwise — no longer assumable as "1" now that
     // list index 1 may instead be PID+PI on a drone with INDI disabled.
     if (_indi_index >= 0) {
-        float delta_torque[2], accel_cmd[2];
+        float delta_torque[2], accel_cmd[2], g1[2];
         _indi.get_diag(delta_torque, accel_cmd);
+        _indi.get_g1(g1);
         _indi_diag[0] = current_torque[0];
         _indi_diag[1] = current_torque[1];
         _indi_diag[2] = delta_torque[0];
@@ -76,6 +86,8 @@ void FlightStateMachine::run_attitude(const float euler[],
         _indi_diag[5] = cmds[_indi_index][1];
         _indi_diag[6] = accel_cmd[0];
         _indi_diag[7] = accel_cmd[1];
+        _indi_diag[8] = g1[0];
+        _indi_diag[9] = g1[1];
     } else {
         memset(_indi_diag, 0, sizeof(_indi_diag));
     }

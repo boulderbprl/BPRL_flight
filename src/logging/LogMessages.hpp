@@ -136,10 +136,14 @@ struct __attribute__((packed)) LogMsgINDI {
     float    cmd_pitch;    // [-1, 1]  normalized pitch torque commanded by INDI
     float    accel_roll;   // rad/s²  INDI rate-PID commanded angular acceleration, roll
     float    accel_pitch;  // rad/s²  INDI rate-PID commanded angular acceleration, pitch
+    float    g1_roll;      // N·m per rad/s²  live NLMS-adapted G1_hat, roll  (seed: DroneConfig::AttitudeIndiGains::g1_seed_roll)
+    float    g1_pitch;     // N·m per rad/s²  live NLMS-adapted G1_hat, pitch (seed: DroneConfig::AttitudeIndiGains::g1_seed_pitch)
 };
-// Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
+// Format: "Qffffffffff"   Body: 8+10×4 = 48 B   Record: 51 B
 // Always populated regardless of FlightStateMachine's active controller — this
 // is INDI running in shadow mode alongside whichever controller actually flies (OUTP).
+// g1_roll/g1_pitch track live-adaptive-G(x) NLMS convergence — compare against
+// the offline seed to validate the estimator (see indi_adaptive_G_controller_spec.md).
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;
@@ -259,8 +263,8 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_INDI,
       "INDI",
-      "Qffffffff",
-      "TimeUS,UnmixR,UnmixP,DeltaR,DeltaP,CmdR,CmdP,AccR,AccP",
+      "Qffffffffff",
+      "TimeUS,UnmixR,UnmixP,DeltaR,DeltaP,CmdR,CmdP,AccR,AccP,G1R,G1P",
       sizeof(LogMsgINDI) },
 
     { LOG_MSG_BARO,

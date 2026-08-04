@@ -101,9 +101,10 @@ public:
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
 
-    // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
+    // diag[10]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch]
     // Always populated from AttitudeINDI, regardless of _active_index (shadow-mode logging).
-    void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
+    // g1_hat_roll/pitch are the live NLMS-adapted effectiveness estimate (see AttitudeINDI::get_g1()).
+    void get_indi_diag(float diag[10]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
     // TEMP (CTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
     // vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt,
@@ -175,8 +176,8 @@ private:
     FlightPhase _phase    = FlightPhase::DISARMED;
     FlightMode  _mode     = FlightMode::STABILIZE;
 
-    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
-    float _indi_diag[8] = {};
+    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — see get_indi_diag()
+    float _indi_diag[10] = {};
 
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};

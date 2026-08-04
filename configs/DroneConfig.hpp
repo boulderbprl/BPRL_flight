@@ -29,8 +29,23 @@ struct AttitudePidGains {
 // Gains for AttitudeINDI (src/controllers/Attitude_INDI.hpp).
 struct AttitudeIndiGains {
     PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
-    float    indi_gain_roll;   // was AttitudeINDI::INDI_GAIN_ROLL
-    float    indi_gain_pitch;  // was AttitudeINDI::INDI_GAIN_PITCH
+    // G1_tau seed (N*m per rad/s^2) — offline-identified airframe effectiveness
+    // (~1/Ixx, 1/Iyy), the starting point for AttitudeINDI's live NLMS
+    // adaptation. Was indi_gain_roll/indi_gain_pitch, which folded this seed
+    // and an implicit gain of 1 together.
+    float    g1_seed_roll;
+    float    g1_seed_pitch;
+    // INDI output gain (kappa) — decoupled control-authority multiplier on
+    // top of the adaptive G1_tau estimate, tuned independently of the
+    // physical-effectiveness identification. 1.0 reproduces pre-adaptation
+    // behavior.
+    float    indi_output_gain_roll;
+    float    indi_output_gain_pitch;
+    // NLMS adaptation rate (mu), mode-dependent per spec section 5.2:
+    // aggressive while PID/PID+PI is the active controller (INDI in shadow,
+    // no closed-loop bias risk), slow/trickle while INDI itself is active.
+    float    nlms_mu_pid;
+    float    nlms_mu_indi;
     float    yaw_gain;         // was AttitudeINDI::YAW_GAIN
 };
 
