@@ -792,31 +792,8 @@
  * @details This hook is invoked in case to a system halting error before
  *          the system is halted.
  */
-/* DIAGNOSTIC: stash the panic reason across a warm/IWDG reset so main() can
- * print it on the next boot — see main.cpp's g_panic_reason/g_panic_magic.
- * Remove once the USBCmdThread-not-responding investigation is resolved.
- * Guarded: chconf.h is also preprocessed by chcoreasm.S (GCC predefines
- * __ASSEMBLER__ for .S files) and a plain C `extern` isn't valid there. */
-#if !defined(__ASSEMBLER__)
-#ifdef __cplusplus
-extern "C" {
-#endif
-extern volatile unsigned int g_panic_magic;   /* matches uint32_t, avoids needing <stdint.h> this deep in the config chain */
-extern char g_panic_reason[128];
-#ifdef __cplusplus
-}
-#endif
-#endif
 #define CH_CFG_SYSTEM_HALT_HOOK(reason) {                                   \
-  if ((reason) != NULL) {                                                   \
-    int __i = 0;                                                            \
-    for (; (reason)[__i] != '\0' && __i < (int)sizeof(g_panic_reason) - 1; __i++) \
-      g_panic_reason[__i] = (reason)[__i];                                  \
-    g_panic_reason[__i] = '\0';                                             \
-  } else {                                                                  \
-    g_panic_reason[0] = '\0';                                               \
-  }                                                                         \
-  g_panic_magic = 0xDEAD10CCU;                                              \
+  /* System halt code here.*/                                               \
 }
 
 /**

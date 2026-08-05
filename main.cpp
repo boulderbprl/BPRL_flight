@@ -49,86 +49,18 @@
 #include "configs/DroneConfig.hpp"
 #include "chprintf.h"
 
-/* DIAGNOSTIC: chSysHalt() (fired by a failed chDbgAssert) disables interrupts
- * before running CH_CFG_SYSTEM_HALT_HOOK (see cfg/chconf.h), so USB can't
- * actually flush anything written to SDU1 from inside that hook. Instead the
- * hook stashes the panic reason here — placed in the same .nocache region
- * s_usb_dl_buf already uses, which is NOLOAD and untouched by the C runtime's
- * .bss zero-fill, so it survives a warm/IWDG reset — and main() prints it
- * on the next boot, before anything else. g_panic_magic distinguishes a real
- * stashed panic from cold-boot SRAM garbage. Remove once resolved. */
-#define PANIC_MAGIC 0xDEAD10CCU
-extern "C" {
-    volatile unsigned int __attribute__((section(".nocache"))) g_panic_magic;
-    char                  __attribute__((section(".nocache"))) g_panic_reason[128];
-}
-
-/* DIAGNOSTIC: no LASTPANIC ever printed despite a repeatable hang means no
- * chDbgAssert fired — so this is very likely a hard fault (bad memory/
- * register access), whose default handler is a silent infinite loop that
- * never runs CH_CFG_SYSTEM_HALT_HOOK. These override the weak default
- * fault handlers (see vectors.S) to stash the fault type + CFSR/HFSR/
- * MMFAR/BFAR into the same cross-reset buffer, then reset immediately
- * instead of waiting out the 32s IWDG so we can iterate faster. Manual hex
- * formatting only — no chprintf/snprintf, to stay safe from fault context.
- * Remove once resolved. */
-static void hex32(char *out, unsigned int v)
-{
-    static const char digits[] = "0123456789ABCDEF";
-    for (int i = 7; i >= 0; i--) {
-        out[7 - i] = digits[(v >> (i * 4)) & 0xF];
-    }
-    out[8] = '\0';
-}
-
-static void stash_fault(const char *name)
-{
-    char cfsr[9], hfsr[9], mmfar[9], bfar[9];
-    hex32(cfsr,  SCB->CFSR);
-    hex32(hfsr,  SCB->HFSR);
-    hex32(mmfar, SCB->MMFAR);
-    hex32(bfar,  SCB->BFAR);
-
-    int n = 0;
-    for (const char *p = name; *p && n < 40; p++) g_panic_reason[n++] = *p;
-    g_panic_reason[n++] = ',';
-    for (const char *p = "CFSR=0x";  *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = cfsr;       *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = ",HFSR=0x"; *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = hfsr;       *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = ",MMFAR=0x"; *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = mmfar;      *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = ",BFAR=0x"; *p; p++) g_panic_reason[n++] = *p;
-    for (const char *p = bfar;       *p; p++) g_panic_reason[n++] = *p;
-    g_panic_reason[n] = '\0';
-    g_panic_magic = PANIC_MAGIC;
-
-    NVIC_SystemReset();
-}
-
-extern "C" {
-    void HardFault_Handler(void)  { stash_fault("HardFault");  }
-    void MemManage_Handler(void)  { stash_fault("MemManage");  }
-    void BusFault_Handler(void)   { stash_fault("BusFault");   }
-    void UsageFault_Handler(void) { stash_fault("UsageFault"); }
-}
-
-/* DIAGNOSTIC: print a "BOOT,STAGE,<label>" line straight to SDU1 from main()'s
- * own context, before any thread (and therefore before USBCmdThread or any
- * scheduling/priority problem) exists. Watch with e.g.:
- *   python3 -c "import serial,sys; s=serial.Serial('/dev/ttyACM0',115200,timeout=1)
- *   [print(l) for l in iter(lambda: s.readline().decode(errors='replace'), '')]"
- * or any serial terminal (screen, minicom) at 115200 8N1.
- * Whichever STAGE line is the last one printed pinpoints the hang. Remove
- * once the USBCmdThread-not-responding investigation is resolved. */
-static void stage_print(const char *label)
-{
-    chprintf((BaseSequentialStream *)&SDU1, "BOOT,STAGE,%s\r\n", label);
-    chThdSleepMilliseconds(20);   /* let the USB CDC IN endpoint actually drain */
-}
-
 int main(void)
 {
+    /* CM4 is never released from reset on this dual-core part — this
+     * firmware only runs on the M7 side (see board.h). Hold it explicitly
+     * rather than relying on option-byte defaults: an auto-booting CM4 with
+     * no firmware of its own would execute whatever garbage sits in the
+     * unflashed program region and can write to shared D2-domain
+     * peripherals (I2C2 lives there) with nothing stopping it. */
+#if defined(STM32H757xx) || defined(STM32H747xx) || defined(STM32H755xx) || defined(STM32H745xx)
+    RCC->GCR &= ~RCC_GCR_BOOT_C2;
+#endif
+
     halInit();
 
     /* Start IWDG with ~32 s timeout for crash recovery.
@@ -166,13 +98,6 @@ int main(void)
 
     usb_serial_init();
     chThdSleepMilliseconds(1500);   /* wait for host USB enumeration */
-    stage_print("usb_ready");
-
-    if (g_panic_magic == PANIC_MAGIC) {
-        chprintf((BaseSequentialStream *)&SDU1, "BOOT,LASTPANIC,%s\r\n", g_panic_reason);
-        chThdSleepMilliseconds(20);
-        g_panic_magic = 0;   /* consumed — don't reprint next boot */
-    }
 
     /* ══════════════════════════════════════════════════════════════════════
      * Thread rate sequencer
@@ -188,10 +113,7 @@ int main(void)
     const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
         /* .i2c     = */ TIME_US2I(2000),  // 500 Hz — matches Teensy ADC sample rate
-        /* .control = */ TIME_US2I(5000),  // DIAGNOSTIC: was 2500 (400 Hz) — doubled to 200 Hz
-                                            // to test whether ControlThread is overrunning its
-                                            // budget (merged EKF + 3 shadow controllers) and
-                                            // starving lower-priority threads incl. USBCmdThread
+        /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),
@@ -199,17 +121,11 @@ int main(void)
     };
 
     motor_output_init();
-    stage_print("motor_output_init_done");
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
-    stage_print("can_drv_init_done");
     i2c_drv_init();        // start I2CD2 at 400 kHz
-    stage_print("i2c_drv_init_done");
     strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
-    stage_print("strain_rate_init_done");
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
-    stage_print("radio_input_init_done");
     threads_start(kRates);
-    stage_print("threads_start_done");
 
     /* Main thread: low-priority idle, feeds IWDG. */
     while (true) {
