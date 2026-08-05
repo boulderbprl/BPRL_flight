@@ -283,7 +283,17 @@
 
 /*
  * I2C driver system settings.
+ *
+ * DMA disabled: STM32_I2C_USE_DMA defaults to TRUE in hal_i2c_lld.h, which
+ * makes i2c_lld_start() set I2C_CR1_TXDMAEN/RXDMAEN on the peripheral-enable
+ * write. On this exact chip (CubeOrange/CubeOrange+, STM32H7 I2Cv3) that
+ * causes i2cStart(&I2CD2, ...) to hang indefinitely right at that register
+ * write — no assert, no CPU fault, only the IWDG eventually resets it.
+ * ArduPilot's hwdef for this identical board (verified: PB10/PB11 = I2C2,
+ * confirmed flying on this unit) defines no DMA streams for I2C at all —
+ * it runs I2C interrupt-driven, not DMA-driven, on H7. Matching that here.
  */
+#define STM32_I2C_USE_DMA                   FALSE
 #define STM32_I2C_USE_I2C1                  FALSE
 #define STM32_I2C_USE_I2C2                  TRUE
 #define STM32_I2C_USE_I2C3                  FALSE

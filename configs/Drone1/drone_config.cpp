@@ -94,7 +94,7 @@ const DroneConfig kDroneConfig = {
     
     // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
     // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, PID+PI last if enabled 
-    { true, true },
+    { false, false },
    
     // .logging — LoggingConfig { log_rate_hz, enable{att,lin,rcin,outp,rpms,strn,imu1,imu2,imu3,indi,baro,ctun,mocp} }
     {

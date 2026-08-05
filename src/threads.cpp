@@ -100,7 +100,10 @@ static StateManager state_mgr;
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
 static THD_WORKING_AREA(waI2C,      1024);
-static THD_WORKING_AREA(waControl,  8192);  // enlarged: now also carries StateManager::update()'s frame (former waStateEst was 6144)
+static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
+                                              // (former waStateEst was 6144) plus three shadow attitude controllers
+                                              // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
+                                              // off — a boot-time reset loop (~32s IWDG period) pointed at overflow here
 static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
