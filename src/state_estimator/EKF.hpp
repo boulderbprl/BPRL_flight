@@ -108,6 +108,17 @@ private:
     // We use 1.5625e-7 — still conservative, accel bias drifts faster than gyro bias.
     static constexpr float Q_BIAS_A = 1.5625e-7f;   // accel bias random walk (m/s²)²/step
 
+    // ── CAN/IMX5 quaternion measurement update parameters ──────────────────
+    // Chi-squared innovation gate — same pattern/gate value as
+    // GRAV_CHI2_GATE/MOCAP_CHI2_GATE/BARO_CHI2_GATE. H is diagonal (row i
+    // observes iQ0+i directly), so S_ii is just that state's P diagonal + R,
+    // same simplification as update_position()'s gate. Added so a single
+    // corrupted/glitched CAN sample (bit flip that passes CRC, a momentary
+    // IMX5-internal fault) can't get fused into attitude unconditionally —
+    // every other update_*() in this file already rejects outliers this way;
+    // update_quaternion() previously did not.
+    static constexpr float QUAT_CHI2_GATE = 5.0f;
+
     // ── Gravity-vector measurement update parameters ───────────────────────
     // Hard reject: skip update if |a| > this multiple of g (clearly bad sample)
     static constexpr float GRAV_HARD_GATE = 3.0f * GRAVITY;  // 3g outer limit
@@ -123,13 +134,35 @@ private:
     // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
     static constexpr float GRAV_R_VIBE    = 0.25f;  // dimensionless scale
 
-    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 400 Hz
-    // (update_gravity() runs once per ControlThread tick with no dt parameter,
-    // so this is a fixed-rate IIR alpha, not a lowpass_alpha(fc,dt) one — keep
-    // it in sync with ControlThread's rate in main.cpp if that ever changes.
-    // alpha = dt/tau = (1/400)/0.1 = 0.025; was 0.016 at the former 625 Hz
-    // separate StateEstThread rate.)
-    static constexpr float GRAV_VIBE_ALPHA = 0.025f;
+    // Vibration filter: α for vibe_rms² IIR filter, smoothing vibe_filt
+    // *across* update_gravity() calls. update_gravity() is no longer called
+    // every ControlThread tick — StateManager now windows/averages the accel
+    // over STATEMGR_GRAVACC_AVG_S (0.2 s — matches ArduPilot DCM's no-GPS
+    // window, see that constant in StateManager.hpp) before each call, so
+    // this alpha's implicit calling period is ~0.2 s, not 1/400 s. τ ≈ 2 s
+    // (~10 windows) at that period: alpha = dt/tau = 0.2/2.0 = 0.1. This is
+    // a fixed-period IIR alpha, not a lowpass_alpha(fc,dt) one — keep it in
+    // sync with STATEMGR_GRAVACC_AVG_S if that ever changes.
+    static constexpr float GRAV_VIBE_ALPHA = 0.1f;
+
+    // Max quaternion rotation angle (rad) update_gravity() is allowed to
+    // apply per call, mirroring ArduPilot DCM's rate-limited correction
+    // (_omega_P = error * AHRS_RP_P, default AHRS_RP_P=0.2 rad/s, integrated
+    // over dt — a bounded creep, never a snap, regardless of how large the
+    // accel error was). The windowing above (STATEMGR_GRAVACC_AVG_S) rejects
+    // symmetric push/pull transients by cancellation, but a large *asymmetric*
+    // or sustained disturbance can still survive the window average and reach
+    // this update — this caps how much attitude authority even a fully-passed
+    // correction gets in one call: 0.2 rad/s * 0.2 s window ≈ 0.04 rad
+    // (~2.3°). Applied by clamping the post-Kalman-update quaternion back
+    // toward its pre-update value via nlerp if the implied rotation exceeds
+    // this (see update_gravity()) — a deliberate approximation: the
+    // covariance P is already updated assuming the full correction, so
+    // clamping only the mean afterward makes P slightly overconfident
+    // relative to the mean. Same category of pragmatic simplification as the
+    // existing chi-squared hard-reject gate; revisit if this proves
+    // insufficient rather than chasing exact consistency.
+    static constexpr float GRAV_MAX_CORR_RAD = 0.04f;
 
     // ── Mocap position/velocity measurement update parameters ─────────────
     // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is

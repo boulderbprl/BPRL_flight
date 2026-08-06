@@ -39,6 +39,36 @@ def cmd_calibrate(ser, args):
     except EOFError:
         pass
 
+    # The $IMU stream reports g_imu[i], which is already bias-corrected
+    # (raw - currently stored calibration) on the firmware side. If a prior
+    # calibration is already saved, sampling it directly would only capture
+    # the *residual* bias and then overwrite the stored calibration with
+    # that residual, silently discarding most of the original correction.
+    # Clearing first guarantees the stream reflects true raw sensor data
+    # regardless of what was previously saved, so every run computes the
+    # full absolute bias.
+    console.print("Clearing any existing calibration so this run starts from raw sensor data...")
+    ser.write(b"CAL,clear\n")
+    ser.flush()
+    deadline = time.monotonic() + 2.0
+    buf = b""
+    cleared = False
+    while time.monotonic() < deadline:
+        chunk = ser.read(256)
+        if chunk:
+            buf += chunk
+            while b"\n" in buf:
+                line_b, buf = buf.split(b"\n", 1)
+                if line_b.decode("ascii", errors="replace").strip() == "CAL,OK":
+                    cleared = True
+                    break
+        if cleared:
+            break
+        time.sleep(0.05)
+    if not cleared:
+        console.print("[red]No CAL,OK received for CAL,clear — aborting (check connection).")
+        return
+
     console.print(f"Collecting {duration} s of IMU data...")
 
     sums_gyro  = [[0.0]*3 for _ in range(3)]

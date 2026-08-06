@@ -59,6 +59,11 @@ void StateManager::init()
         _lane_p[i] = _lane_q[i] = _lane_r[i] = 0.0f;
     for (int i = 0; i < NUM_LANES; ++i)
         _lane_weight_filt[i] = 0.0f;
+    for (int i = 0; i < NUM_LANES; ++i) {
+        _grav_accel_sum[i][0] = _grav_accel_sum[i][1] = _grav_accel_sum[i][2] = 0.0f;
+        _grav_accel_dt[i] = 0.0f;
+    }
+    _grav_window_dt = 0.0f;
 
     _initialized = true;
 }
@@ -86,7 +91,7 @@ void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw
  * Main update — called at 400 Hz from ControlThread
  * ══════════════════════════════════════════════════════════════════════════ */
 
-void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us)
+void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us, bool armed)
 {
     if (!_initialized) return;
 
@@ -97,9 +102,51 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     }
 
     // ── 1.5. Gravity-vector attitude + accel-bias update (gated on |a| ≈ g) ─
+    // Time-averaged over a STATEMGR_GRAVACC_AVG_S window rather than fused
+    // every tick — see that constant's comment. Accumulate this tick's
+    // Σ(accel*dt) contribution per lane; once the window elapses, fuse each
+    // lane's window-mean accel and reset. predict() above still uses raw
+    // imu[i].accel directly (translational dynamics need the fast path);
+    // only this tilt/accel-bias reference measurement is windowed.
+    //
+    // R_GRAVITY vs R_GRAVITY_FLIGHT_NOAID: weakened whenever armed, full stop
+    // — not conditioned on mocap/CAN connection. EKF3 has no direct
+    // accel-as-gravity-vector fusion in ANY aiding mode: when EKF3 has real
+    // aiding (GPS/optical-flow), tilt is corrected purely through velocity/
+    // position fusion's cross-covariance leak into attitude (see step 2's
+    // update_quaternion() and step 5's update_position()/update_ned_vel()
+    // below — the mocap path already works this same way, since its H has
+    // no quaternion columns either); when EKF3 has no aiding at all, tilt is
+    // constrained by the ultra-weak synthetic pseudo-measurement described
+    // in R_GRAVITY_FLIGHT_NOAID's comment. Neither case involves a direct
+    // gravity-vector measurement update, so update_gravity() — which has no
+    // EKF3 analog at all — should stay weak across the board while armed and
+    // let the CAN/mocap paths carry aided-mode tilt correction instead.
+    const float r_gravity_eff = armed ? R_GRAVITY_FLIGHT_NOAID : R_GRAVITY;
     for (int i = 0; i < NUM_LANES; ++i) {
-        if (imu[i].valid)
-            _lanes[i].update_gravity(imu[i].accel, R_GRAVITY);
+        if (imu[i].valid) {
+            _grav_accel_sum[i][0] += imu[i].accel[0] * dt;
+            _grav_accel_sum[i][1] += imu[i].accel[1] * dt;
+            _grav_accel_sum[i][2] += imu[i].accel[2] * dt;
+            _grav_accel_dt[i]     += dt;
+        }
+    }
+    _grav_window_dt += dt;
+    if (_grav_window_dt >= STATEMGR_GRAVACC_AVG_S) {
+        for (int i = 0; i < NUM_LANES; ++i) {
+            if (_grav_accel_dt[i] > 1e-6f) {
+                const float inv_dt = 1.0f / _grav_accel_dt[i];
+                const float accel_avg[3] = {
+                    _grav_accel_sum[i][0] * inv_dt,
+                    _grav_accel_sum[i][1] * inv_dt,
+                    _grav_accel_sum[i][2] * inv_dt
+                };
+                _lanes[i].update_gravity(accel_avg, r_gravity_eff);
+            }
+            _grav_accel_sum[i][0] = _grav_accel_sum[i][1] = _grav_accel_sum[i][2] = 0.0f;
+            _grav_accel_dt[i] = 0.0f;
+        }
+        _grav_window_dt = 0.0f;
     }
 
     // ── 2. IMX5 quaternion update on all lanes (200 Hz, asynchronous) ─────

@@ -405,7 +405,7 @@ static THD_FUNCTION(ControlThread, arg)
         chMtxUnlock(&esc_mtx);
 
         // Run all EKF lanes and derive outputs.
-        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us);
+        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
