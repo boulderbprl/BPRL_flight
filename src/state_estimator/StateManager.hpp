@@ -7,6 +7,11 @@
 #define STATEMGR_LP_UVWDOT_HZ     20.0f   // cutoff for u_dot/v_dot/w_dot (2nd-order; matches ArduPilot INS_ACCEL_FILTER default)
 #define STATEMGR_LP_UVW_HZ        15.0f   // cutoff for blended u/v/w fed to the controllers (2nd-order)
 #define STATEMGR_LP_PQRDOT_HZ     20.0f   // cutoff for p_dot/q_dot/r_dot
+// Optional 3rd (1st-order) stage cascaded after STATEMGR_LP_PQRDOT_HZ on
+// p_dot/q_dot only — a static A/B knob to test whether a 2+1 order cascade
+// helps INDI over the 2nd-order-only filter above. <=0 disables it
+// (lowpass_alpha() passthrough), leaving p_dot/q_dot exactly as before.
+#define STATEMGR_LP_PQRDOT_EXTRA_HZ 15.0f
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID
 // IMX5 angular rate blend weight: 0=pure onboard gyros, 1=pure IMX5
@@ -65,9 +70,14 @@
  * STATEMGR_LP_UVWDOT_HZ (matches ArduPilot's INS-level LowPassFilter2p on
  * raw accelerometer samples).
  *
- * p_dot/q_dot/r_dot: differentiated from the filtered p/q/r (post STATEMGR_LP_PQ_HZ/
- * STATEMGR_LP_R_HZ 2nd-order Butterworth), then lowpass filtered again at
- * STATEMGR_LP_PQRDOT_HZ.
+ * p_dot/q_dot: differentiated from the notch-filtered p/q — ahead of the
+ * STATEMGR_LP_PQ_HZ 2nd-order Butterworth used for the rate PID's P-term, so
+ * p_dot/q_dot (feeding the INDI law) don't inherit that stage's extra lag —
+ * then 2nd-order (Butterworth) lowpass filtered at STATEMGR_LP_PQRDOT_HZ,
+ * then an optional 3rd (1st-order) stage at STATEMGR_LP_PQRDOT_EXTRA_HZ
+ * (test knob for a 2+1 order cascade; <=0 disables it).
+ * r_dot differentiates the fully-filtered r (post STATEMGR_LP_R_HZ) and keeps
+ * the original 1st-order lowpass, since yaw has no INDI consumer for it.
  *
  * Assembles the full 19-element StateIdx state vector for g_state[].
  */
@@ -150,9 +160,13 @@ private:
     // Body acceleration: blended gravity+Coriolis-corrected IMU accel
     float _blended_ud, _blended_vd, _blended_wd;
 
-    // Angular acceleration via differentiation of blended rates + lowpass
+    // Angular acceleration via differentiation of blended rates + lowpass.
+    // _prev_p/_prev_q hold the previous *notch-filtered* p/q (pre STATEMGR_LP_PQ_HZ)
+    // since that's what p_dot/q_dot now differentiate; _prev_r holds the previous
+    // fully-filtered r, unchanged.
     float _prev_p,    _prev_q,    _prev_r;
     float _pdot_filt, _qdot_filt, _rdot_filt;
+    Biquad2pState _pdot_filt_state, _qdot_filt_state;  // 2nd-order LPF state for p_dot/q_dot
 
     // Motor vibration notch, applied to p/q/r before the lowpass below.
     // _notch_freq_hz is the slew-limited tracked center frequency (average
