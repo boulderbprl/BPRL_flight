@@ -1487,6 +1487,38 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_STRN, msg);
         }
 
+        /* ── JKFT — jerk fitting ───────────────────────────────────────── */
+        // Josh added this, it's probably dogshit, sorry in advance
+        {
+            constexpr float JKFT_MATRIX[5][2] = {
+                {  -0.0613f,   -0.0578f}, // s0
+                {   0.0842f,    0.0401f}, // s1
+                {  -0.0122f,    0.0789f}, // s2
+                {   0.0253f,   -0.0575f}, // s3
+                {  -0.4319f,  -33.6420f}, // p
+            };
+
+            const float jkft_inputs[5] = { (float)strain.val[0], 
+                                           (float)strain.val[1], 
+                                           (float)strain.val[2], 
+                                           (float)strain.val[3], 
+                                           (float)state[StateIdx::P]};
+
+            float z_jerk = 0.0f;
+            float roll_jerk = 0.0f;
+            for (uint8_t i = 0; i < 5; i++) {
+                z_jerk    += jkft_inputs[i] * JKFT_MATRIX[i][0];
+                roll_jerk += jkft_inputs[i] * JKFT_MATRIX[i][1];
+            }
+
+            LogMsgJKFT msg = {};
+            msg.time_us = t_us;
+            msg.JerkZ   = z_jerk;
+            msg.Pdd     = roll_jerk;
+            msg.valid   = (uint8_t)strain.valid;
+            logger.write(LOG_MSG_JKFT, msg);
+        }
+
         /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */
         {
             static constexpr uint8_t ids[3] = { LOG_MSG_IMU1, LOG_MSG_IMU2, LOG_MSG_IMU3 };

@@ -1,6 +1,8 @@
 #include "src/sensors/StrainRate.hpp"
 #include "src/coms/I2C.hpp"
 #include "src/coms/CAN.hpp"
+#include "src/threads.hpp"   // esc_mtx, g_rpm_gated
+#include <cstring>
 
 // ── CAN implementation ────────────────────────────────────────────────────────
 
@@ -39,12 +41,28 @@ void strain_rate_init(void)
  */
 static __attribute__((section(".nocache"))) uint8_t s_i2c_rx[8];
 
+/*
+ * Average of g_rpm_gated[4] (mechanical RPM, already fault-gated in
+ * ControlThread — see threads.hpp), sent to the Teensy ahead of the strain
+ * read on every poll. Bundled into one bus transaction via
+ * i2cMasterTransmitTimeout's combined write+repeated-start-read rather than
+ * a second registered device, since both sides talk to the same 0x11 target.
+ */
 static void strain_rate_i2c_poll(void *ctx)
 {
     (void)ctx;
 
+    uint32_t rpm_snap[4];
+    chMtxLock(&esc_mtx);
+    memcpy(rpm_snap, g_rpm_gated, sizeof(rpm_snap));
+    chMtxUnlock(&esc_mtx);
+    uint32_t rpm_avg = (rpm_snap[0] + rpm_snap[1] + rpm_snap[2] + rpm_snap[3] + 2U) / 4U;
+    uint16_t rpm_avg16 = (rpm_avg > 0xFFFFU) ? 0xFFFFU : (uint16_t)rpm_avg;
+    uint8_t  txbuf[2] = { (uint8_t)(rpm_avg16 & 0xFFU), (uint8_t)(rpm_avg16 >> 8) };
+
     i2cAcquireBus(&I2CD2);
-    msg_t status = i2cMasterReceiveTimeout(&I2CD2, 0x11, s_i2c_rx, sizeof(s_i2c_rx), TIME_US2I(1500));
+    msg_t status = i2cMasterTransmitTimeout(&I2CD2, 0x11, txbuf, sizeof(txbuf),
+                                             s_i2c_rx, sizeof(s_i2c_rx), TIME_US2I(1500));
     i2cReleaseBus(&I2CD2);
 
     if (status != MSG_OK) {

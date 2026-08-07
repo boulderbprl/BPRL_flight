@@ -34,6 +34,7 @@ constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + flight mode + arm 
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
 constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
 constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
+constexpr uint8_t LOG_MSG_JKFT = 0x12U;  // Jerk estimates (z and roll) based on roll rate and four strain channels (WIP)
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
@@ -111,6 +112,14 @@ struct __attribute__((packed)) LogMsgSTRN {
     uint8_t  valid; // 1 once at least one CAN frame has arrived
 };
 // Format: "QhhhhB"   Body: 8+4×2+1 = 17 B   Record: 20 B
+
+struct __attribute__((packed)) LogMsgJKFT {
+    uint64_t time_us;
+    float JerkZ;
+    float Pdd;
+    uint8_t  valid; // 1 once at least one strain rate CAN frame has arrived
+};
+// Format: "QffB"
 
 struct __attribute__((packed)) LogMsgIMU {
     uint64_t time_us;
@@ -238,6 +247,12 @@ constexpr LogDef kLogDefs[] = {
       "QhhhhB",
       "TimeUS,S0,S1,S2,S3,Valid",
       sizeof(LogMsgSTRN) },
+
+    { LOG_MSG_JKFT,
+      "JKFT",
+      "QffB",
+      "TimeUS,JerkZ,Pdd,Valid",
+      sizeof(LogMsgJKFT) },
 
     { LOG_MSG_IMU1,
       "IMU1",

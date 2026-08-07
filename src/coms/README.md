@@ -33,7 +33,7 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
+| `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 1.5 kHz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
 
 `imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).
 
