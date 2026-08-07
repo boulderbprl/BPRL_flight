@@ -285,7 +285,7 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 500 Hz  NORMALPRIO+20
+ * I2CThread — 200 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
@@ -1578,7 +1578,7 @@ void threads_start(const ThreadRates &rates)
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
     //   ControlThread   +22  400 Hz EKF + PID/mixer/DShot
-    //   I2CThread       +20  500 Hz aux-sensor polling
+    //   I2CThread       +20  200 Hz aux-sensor polling
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
     //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)

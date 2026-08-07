@@ -113,7 +113,7 @@ SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-d
 
 ## I2C — I2C2 (`I2C.hpp/.cpp`)
 
-**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 500 Hz via `i2c_poll_all()`.
+**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 200 Hz via `i2c_poll_all()`.
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 

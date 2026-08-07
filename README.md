@@ -117,7 +117,7 @@ BPRL_flight/
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
 | ControlThread | NORMALPRIO+22 | 400 Hz | Full 3-lane EKF (fuse sensors → g_state[]) → FlightStateMachine → MotorMixer → motor output, all in one tick |
-| I2CThread | NORMALPRIO+20 | 500 Hz | Poll I2C devices (strain rate sensor) |
+| I2CThread | NORMALPRIO+20 | 200 Hz | Poll I2C devices (strain rate sensor) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 1 Hz | LED heartbeat |
 | LogThread | NORMALPRIO-15 | 50 Hz (configurable per drone) | Snapshot all state → SD card (13 message types per tick, each individually enable/disable-able per drone) |

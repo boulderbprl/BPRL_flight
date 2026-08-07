@@ -25,11 +25,13 @@
  * update() and indi_adaptive_G_controller_spec.md at the repo root). kappa
  * is a separate, static, per-axis output-authority gain — decoupled from the
  * physical-effectiveness estimate so tuning one never silently retunes the
- * other. The estimator runs every tick this controller's update() is called
- * (i.e. whenever INDI is enabled in the drone's config, per
- * FlightStateMachine's shadow-mode dispatch), regardless of whether INDI is
- * the currently active controller — only the adaptation rate mu changes with
- * mode (see set_indi_active()).
+ * other. update() is called every tick this controller is enabled in the
+ * drone's config (per FlightStateMachine's shadow-mode dispatch), regardless
+ * of whether INDI is the currently active controller — but the NLMS
+ * regressor/step itself is decimated (NLMS_DECIMATION ticks) rather than
+ * formed every tick, since the regressor is filtered well below the 400 Hz
+ * tick rate (see the comment on NLMS_DECIMATION below). Only the adaptation
+ * rate mu changes with mode (see set_indi_active()).
  *
  * Yaw has no angle loop of its own (unlike roll/pitch), so nothing
  * previously corrected a rate estimate that isn't exactly mean-zero
@@ -135,15 +137,33 @@ private:
     Biquad2pState _tau_filt_state[2];   // [roll, pitch] 2nd-order stage
     float         _tau_extra_filt[2] = {};  // [roll, pitch] optional 1st-order stage memory
 
-    // Previous-tick filtered values, for the incremental NLMS regressor
-    // (Delta_tau_f, Delta_Omega_dot_f) — see spec section 5.1.
+    // Previous-step filtered values, for the incremental NLMS regressor
+    // (Delta_tau_f, Delta_Omega_dot_f) — see spec section 5.1. Only refreshed
+    // every NLMS_DECIMATION ticks (see below), so this is a Delta across the
+    // decimated window, not a single 400 Hz tick.
     float _prev_tau_f[2]        = {};  // [roll, pitch]
     float _prev_omegadot_f[2]   = {};  // [roll, pitch]
-    bool  _nlms_initialized     = false;  // false until the first post-reset sample seeds _prev_*
+    bool  _nlms_initialized     = false;  // false until the first post-reset decimated step seeds _prev_*
+
+    // Counts ticks since the last decimated NLMS step; shared by both axes
+    // since they're always evaluated together in the same update() call.
+    int _nlms_tick_count = 0;
 
     // Fixed control-loop period — matches Unmixer::RPM_FILT_DT_S's existing
     // precedent of a fixed rather than measured dt for this filter chain.
     static constexpr float NLMS_DT_S = 0.0025f;   // 400 Hz ControlThread
+
+    // The tau_f/omegadot_f low-pass filters below still run every tick (they
+    // need a continuous 400 Hz feed to hold their designed cutoff), but the
+    // NLMS Delta_tau_f/Delta_Omega_dot_f regressor is only formed and stepped
+    // once every NLMS_DECIMATION ticks. A per-tick (2.5 ms) Delta of a signal
+    // filtered at STATEMGR_LP_PQRDOT_HZ/_EXTRA_HZ (20/15 Hz) is dominated by
+    // filter ripple/measurement noise rather than real excitation — flight
+    // data showed doublet excitation visible at 50 Hz (20 ms) resolution but
+    // not at 400 Hz (2.5 ms) resolution. 8 ticks = 20 ms, roughly matching
+    // that filter bandwidth and the 50 Hz log rate — needs bench/flight
+    // tuning like the constants below.
+    static constexpr int NLMS_DECIMATION = 8;
 
     // NLMS safety margins (spec section 5.3/5.4) — adaptation-safety
     // constants, not physical per-drone identification data, so they start
@@ -151,7 +171,7 @@ private:
     // convention as YAW_HOLD_MAX_RATE below); promote to DroneConfig later
     // only if the two airframes need different values.
     static constexpr float NLMS_EPS                 = 1.0e-6f;  // division-blowup guard near zero excitation
-    static constexpr float NLMS_EXCITATION_MIN_NM    = 0.02f;   // |Delta_tau_f| below this: freeze the update (uninformative regression) — needs bench tuning
+    static constexpr float NLMS_EXCITATION_MIN_NM    = 0.02f;   // |Delta_tau_f| (over the decimated window) below this: freeze the update — was tuned against per-tick deltas, needs re-checking against the new window
     static constexpr float NLMS_MAX_STEP_FRAC        = 0.10f;   // max |G1_hat step| per update, as a fraction of the seed — needs bench tuning
     static constexpr float NLMS_MAX_DRIFT_FRAC       = 0.50f;   // max total drift of G1_hat from its seed — needs bench tuning
 
@@ -165,5 +185,5 @@ private:
     // filter/differencing memory.
     void _nlms_update_axis(float tau_now, float omegadot_now, float &g1, float seed,
                             Biquad2pState &filt_state, float &extra_filt,
-                            float &prev_tau_f, float &prev_omegadot_f);
+                            float &prev_tau_f, float &prev_omegadot_f, bool do_step);
 };
