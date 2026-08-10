@@ -155,6 +155,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/state_estimator/StateManager.cpp \
          src/controllers/PID.cpp \
          src/controllers/Attitude_PID.cpp \
+         src/controllers/Attitude_PID_Jerk.cpp \
          src/controllers/Attitude_INDI.cpp \
          src/controllers/AltControl.cpp \
          src/controllers/PosControl.cpp \

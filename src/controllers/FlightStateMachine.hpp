@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstring>
 #include "Attitude_PID.hpp"
+#include "Attitude_PID_Jerk.hpp"
 #include "Attitude_INDI.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
@@ -36,19 +37,25 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * but only in shadow, feeding get_ctun_diag() for the CTUN log. Flip that
  * flag to false to restore closed-loop pos-hold flight.
  *
- * Both AttitudePID and AttitudeINDI run every tick (shadow mode), so INDI's
- * internal controller state stays live and its output is always directly
- * comparable to whichever one actually flew (see get_indi_diag()). Only the
- * controller selected by _use_indi (default: false = PID) drives out_cmds:
+ * AttitudePID, AttitudeINDI, and AttitudePIDJerk all run every tick (shadow
+ * mode), so their internal controller state stays live and their output is
+ * always directly comparable to whichever one actually flew (see
+ * get_indi_diag() / get_jerk_diag()). Only the controller selected by
+ * _use_jerk (default: false = PID) drives out_cmds:
  *   false → AttitudePID cascade
- *   true  → AttitudeINDI (incremental NDI; roll/pitch INDI, yaw PID)
+ *   true  → AttitudePIDJerk (same cascade, roll axis gets a PI-on-jerk damping term)
+ * AttitudeINDI is always shadow-only now — this switch never selects it;
+ * it just keeps logging (LOG_MSG_INDI) for comparison.
  *
- * _use_indi is set every tick by ControlThread from the radio's INDI/PID
- * switch (channel 7, see radio_use_indi()) via set_use_indi() — it is not a
- * flight-mode-linked choice, so the pilot can flip attitude controllers in
- * any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change. Channel 7 is a
- * 3-position switch; only the 3rd (highest) position selects INDI, the
- * other two both mean PID.
+ * _use_jerk is set every tick by ControlThread from the radio's attitude-
+ * controller switch (channel 7, see radio_use_jerk()) via set_use_jerk() —
+ * it is not a flight-mode-linked choice, so the pilot can flip attitude
+ * controllers in any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change.
+ * Channel 7 is a 3-position switch; only the 3rd (highest) position selects
+ * PIDJ, the other two both mean plain PID. AttitudePIDJerk's jerk-PI gains
+ * (Attitude_PID_Jerk.hpp) are first-cut small values, not yet characterised
+ * against real jerk magnitude/authority — watch LOG_MSG_PIDJ vs OUTP closely
+ * on early tests.
  *
  * Output (out_cmds[3], thrust_out) feeds the unchanged MotorMixer.
  */
@@ -61,21 +68,27 @@ public:
     // input[5]:       [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
     // armed:          arm switch state from radio
     // rpm[4]:         per-motor mechanical RPM [FR, RL, FL, RR] (for INDI unmixer)
+    // roll_jerk:      fitted roll jerk estimate [rad/s^3] (JerkFit.hpp), for AttitudePIDJerk shadow only
     // out_cmds[3]:    normalised torque [roll, pitch, yaw] → MotorMixer
     // thrust_out:     throttle [0, 1] → MotorMixer
     void update(const float state_full[], const float euler[3],
                 const float input[], bool armed,
-                const uint32_t rpm[4],
+                const uint32_t rpm[4], float roll_jerk,
                 float out_cmds[3], float &thrust_out);
 
-    void set_use_indi(bool use_indi) { _use_indi = use_indi; }
+    void set_use_jerk(bool use_jerk) { _use_jerk = use_jerk; }
 
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
 
     // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
-    // Always populated from AttitudeINDI, regardless of _use_indi (shadow-mode logging).
+    // Always populated from AttitudeINDI (pure shadow — never selectable, see class comment).
     void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
+
+    // diag[4]: [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw]
+    // Always populated from AttitudePIDJerk, regardless of _use_jerk — this is
+    // AttitudePIDJerk's own output, which drives out_cmds when _use_jerk is true.
+    void get_jerk_diag(float diag[4]) const { memcpy(diag, _jerk_diag, sizeof(_jerk_diag)); }
 
     // TEMP (CTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
     // vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt,
@@ -90,21 +103,21 @@ private:
     // ── Mode dispatch helpers ────────────────────────────────────────────────
     void run_attitude(const float ctrl_state6[], const float euler[],
                       const float state_full[], const float input[],
-                      const uint32_t rpm[], float out_cmds[3]);
+                      const uint32_t rpm[], float roll_jerk, float out_cmds[3]);
 
     void mode_stabilize(const float ctrl_state6[], const float euler[],
                         const float state_full[], const float input[],
-                        const uint32_t rpm[],
+                        const uint32_t rpm[], float roll_jerk,
                         float out_cmds[3], float &thrust_out);
 
     void mode_alt_hold(const float ctrl_state6[], const float euler[],
                        const float state_full[], const float input[],
-                       const uint32_t rpm[],
+                       const uint32_t rpm[], float roll_jerk,
                        float out_cmds[3], float &thrust_out);
 
     void mode_pos_hold(const float ctrl_state6[], const float euler[],
                        const float state_full[], const float input[],
-                       const uint32_t rpm[],
+                       const uint32_t rpm[], float roll_jerk,
                        float out_cmds[3], float &thrust_out);
 
     // ── PosHold pilot-blend state ────────────────────────────────────────────
@@ -150,7 +163,7 @@ private:
     // ── State ────────────────────────────────────────────────────────────────
     FlightPhase _phase    = FlightPhase::DISARMED;
     FlightMode  _mode     = FlightMode::STABILIZE;
-    bool        _use_indi = false;
+    bool        _use_jerk = false;
 
     // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
     float _indi_diag[8] = {};
@@ -158,9 +171,13 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
-    AttitudePID  _pid;
-    AttitudeINDI _indi;
-    AltControl   _alt;
-    PosControl   _pos;
-    Unmixer      _unmixer;
+    // [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw] — see get_jerk_diag()
+    float _jerk_diag[4] = {};
+
+    AttitudePID     _pid;
+    AttitudePIDJerk _pid_jerk;
+    AttitudeINDI    _indi;
+    AltControl      _alt;
+    PosControl      _pos;
+    Unmixer         _unmixer;
 };

@@ -22,6 +22,7 @@
 #include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
+#include "src/sensors/JerkFit.hpp"
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
 #include "src/coms/MAVLink.hpp"
@@ -43,10 +44,11 @@ float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+float   g_jerk_diag[4]       = {};   // [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
-bool    g_use_indi           = false; // attitude controller switch from radio (false=PID, true=INDI)
+bool    g_use_jerk           = false; // attitude controller switch from radio (false=PID, true=PIDJ; positions 1-2=PID, 3=PIDJ). AttitudeINDI is always shadow-run, never selected by this switch.
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -438,16 +440,16 @@ static THD_FUNCTION(ControlThread, arg)
         float euler[3];
         float input[InputIdx::N_INPUTS];
         bool  armed;
-        bool  use_indi;
+        bool  use_jerk;
         chMtxLock(&state_mtx);
         memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
         memcpy(euler,     g_euler,  sizeof(euler));
         memcpy(input,     g_input,  sizeof(input));
         armed    = g_armed;
-        use_indi = g_use_indi;
+        use_jerk = g_use_jerk;
         chMtxUnlock(&state_mtx);
 
-        flight_sm.set_use_indi(use_indi);
+        flight_sm.set_use_jerk(use_jerk);
 
         ESCTelemetry sm_telem[4];
         dshot_get_telemetry(sm_telem);
@@ -460,15 +462,25 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
         chMtxUnlock(&esc_mtx);
 
+        // Strain-fit roll jerk estimate (AttitudePIDJerk shadow term, see JerkFit.hpp).
+        StrainRateRaw strain_snap;
+        chMtxLock(&strainRate_mtx);
+        strain_snap = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+        const float roll_jerk = estimate_jerk(strain_snap, ctrl_full[StateIdx::P]).roll_jerk;
+
         float torque_cmds[3];
         float thrust;
-        flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
+        flight_sm.update(ctrl_full, euler, input, armed, rpm, roll_jerk, torque_cmds, thrust);
 
         float indi_diag[8];
         flight_sm.get_indi_diag(indi_diag);
 
         float ctun_diag[12];
         flight_sm.get_ctun_diag(ctun_diag);
+
+        float jerk_diag[4];
+        flight_sm.get_jerk_diag(jerk_diag);
 
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
@@ -483,6 +495,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
+        memcpy(g_jerk_diag, jerk_diag, sizeof(g_jerk_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode = (int)flight_sm.mode();
         chMtxUnlock(&state_mtx);
@@ -515,7 +528,7 @@ static THD_FUNCTION(RadioThread, arg)
         g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
         g_input[InputIdx::INDI_STK]    = radio_indi();
         g_armed    = radio_armed();
-        g_use_indi = radio_use_indi();
+        g_use_jerk = radio_use_jerk();
         chMtxUnlock(&state_mtx);
 
         TIMING_TICK_END(tid);
@@ -1005,7 +1018,7 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
  *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
- *        <use_indi>             ← active attitude controller (0=PID, 1=INDI)
+ *        <use_jerk>             ← active attitude controller (0=PID, 1=PIDJ)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -1042,7 +1055,7 @@ static THD_FUNCTION(DebugThread, arg)
         int   primary_lane;
         bool  armed;
         int   flight_mode;
-        bool  use_indi;
+        bool  use_jerk;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
         pitch    = g_euler[1];
@@ -1062,7 +1075,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
         flight_mode = g_flight_mode;
-        use_indi = g_use_indi;
+        use_jerk = g_use_jerk;
         for (int li = 0; li < 3; ++li) {
             lane_roll[li]  = s_lane_roll[li];
             lane_pitch[li] = s_lane_pitch[li];
@@ -1167,7 +1180,7 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode, (int)use_indi);
+                flight_mode, (int)use_jerk);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1329,7 +1342,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8], ctun_diag[12];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8], ctun_diag[12], jerk_diag[4];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1338,6 +1351,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(ctrl,      g_ctrl,      sizeof(ctrl));
         memcpy(indi_diag, g_indi_diag, sizeof(indi_diag));
         memcpy(ctun_diag, g_ctun_diag, sizeof(ctun_diag));
+        memcpy(jerk_diag, g_jerk_diag, sizeof(jerk_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -1443,6 +1457,17 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_INDI, msg);
         }
 
+        /* ── PIDJ — shadow AttitudePIDJerk diagnostics (always logged) ── */
+        {
+            LogMsgPIDJ msg = {};
+            msg.time_us   = t_us;
+            msg.roll_jerk = jerk_diag[0];
+            msg.cmd_roll  = jerk_diag[1];
+            msg.cmd_pitch = jerk_diag[2];
+            msg.cmd_yaw   = jerk_diag[3];
+            logger.write(LOG_MSG_PIDJ, msg);
+        }
+
 #if LOG_CTUN_ENABLED
         /* ── CTUN — TEMP pos-hold NE tuning diagnostics ───────────────── */
         {
@@ -1490,31 +1515,12 @@ static THD_FUNCTION(LogThread, arg)
         /* ── JKFT — jerk fitting ───────────────────────────────────────── */
         // Josh added this, it's probably dogshit, sorry in advance
         {
-            constexpr float JKFT_MATRIX[5][2] = {
-                {  -0.0613f,   -0.0578f}, // s0
-                {   0.0842f,    0.0401f}, // s1
-                {  -0.0122f,    0.0789f}, // s2
-                {   0.0253f,   -0.0575f}, // s3
-                {  -0.4319f,  -33.6420f}, // p
-            };
-
-            const float jkft_inputs[5] = { (float)strain.val[0], 
-                                           (float)strain.val[1], 
-                                           (float)strain.val[2], 
-                                           (float)strain.val[3], 
-                                           (float)state[StateIdx::P]};
-
-            float z_jerk = 0.0f;
-            float roll_jerk = 0.0f;
-            for (uint8_t i = 0; i < 5; i++) {
-                z_jerk    += jkft_inputs[i] * JKFT_MATRIX[i][0];
-                roll_jerk += jkft_inputs[i] * JKFT_MATRIX[i][1];
-            }
+            const JerkEstimate jerk = estimate_jerk(strain, state[StateIdx::P]);
 
             LogMsgJKFT msg = {};
             msg.time_us = t_us;
-            msg.JerkZ   = z_jerk;
-            msg.Pdd     = roll_jerk;
+            msg.JerkZ   = jerk.z_jerk;
+            msg.Pdd     = jerk.roll_jerk;
             msg.valid   = (uint8_t)strain.valid;
             logger.write(LOG_MSG_JKFT, msg);
         }

@@ -130,7 +130,7 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
-`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation. `radio_use_indi()` is `radio_indi() > 0.33f` — a thresholded bool built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation. `radio_use_jerk()` is `radio_indi() > 0.33f` — a thresholded bool built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection. Despite the name, `radio_indi()` no longer selects `AttitudeINDI` (pure shadow now) — it selects `AttitudePIDJerk` vs `AttitudePID`.
 
 Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
 

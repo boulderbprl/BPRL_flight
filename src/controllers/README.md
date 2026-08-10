@@ -29,9 +29,10 @@ FlightStateMachine  (400 Hz)
           AltControl::alt_hold_from_rate() (D vel → thrust_out)          │
           Attitude (with lean angles overriding roll/pitch targets)  ─────┤
                                                                           │
-     Attitude block (shared, dispatched by _use_indi flag):              │
+     Attitude block (shared, dispatched by _use_jerk flag):              │
        false → AttitudePID::update()                                ◄────┘
-       true  → AttitudeINDI::update()
+       true  → AttitudePIDJerk::update()  (roll axis: PID - PI(0, roll_jerk))
+     AttitudeINDI::update() also always runs, pure shadow, never selected
                     └─ Unmixer::compute() (RPM → torque N·m)
      │
      ▼
@@ -75,12 +76,14 @@ Mode changes reset all controllers.
 
 ### Attitude controller selection
 
-The attitude controller is independent of the flight mode and is selected by `set_use_indi(bool)` at runtime (default: PID):
+The attitude controller is independent of the flight mode and is selected by `set_use_jerk(bool)` at runtime (default: PID), driven by the radio's channel-7 3-position switch (`radio_use_jerk()`; positions 1-2 = PID, 3 = PIDJ):
 
 | Flag | Controller |
 |---|---|
 | `false` | `AttitudePID` — cascade P + PID |
-| `true` | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
+| `true` | `AttitudePIDJerk` — same cascade, roll axis subtracts a PI controller driving bias-corrected `roll_jerk` to 0 (see `Attitude_PID_Jerk.hpp`) |
+
+`AttitudeINDI` always runs too, but purely in shadow — it's never selectable, it just keeps logging (`LOG_MSG_INDI`) for comparison.
 
 ---
 

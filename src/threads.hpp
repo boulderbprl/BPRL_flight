@@ -57,10 +57,11 @@ extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
 extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+extern float   g_jerk_diag[4];       // [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
-extern bool    g_use_indi;           // attitude controller switch from radio (false=PID, true=INDI)
+extern bool    g_use_jerk;           // attitude controller switch from radio (false=PID, true=PIDJ; positions 1-2=PID, 3=PIDJ). AttitudeINDI is always shadow-run, never selected by this switch.
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602

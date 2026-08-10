@@ -38,10 +38,11 @@ constexpr uint8_t LOG_MSG_JKFT = 0x12U;  // Jerk estimates (z and roll) based on
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of _use_indi)
+constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged; not selectable, see LOG_MSG_PIDJ)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
+constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics (always logged; flies when the channel-7 switch selects it — see Attitude_PID_Jerk.hpp)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -80,7 +81,7 @@ struct __attribute__((packed)) LogMsgRCIN {
     float    yaw_stk;     // [-1, 1]  yaw rate demand from RC
     float    thr_stk;     // [0, 1]   throttle from RC
     float    flight_mode; // [-1, 1]  raw flight-mode switch; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
-    float    indi_stk;    // [-1, 1]  raw INDI/PID switch (channel 7); >0.33=INDI, else PID
+    float    indi_stk;    // [-1, 1]  raw attitude-ctrl switch (channel 7); >0.33=PIDJ, else PID (AttitudeINDI is shadow-only, not selected by this switch)
     uint8_t  armed;       // 0=disarmed, 1=armed
 };
 // Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
@@ -115,8 +116,8 @@ struct __attribute__((packed)) LogMsgSTRN {
 
 struct __attribute__((packed)) LogMsgJKFT {
     uint64_t time_us;
-    float JerkZ;
-    float Pdd;
+    float JerkZ; // m/s^3, raw fit output (no bias correction)
+    float Pdd;   // rad/s^3, bias-corrected (see JerkFit.hpp::ROLL_JERK_BIAS)
     uint8_t  valid; // 1 once at least one strain rate CAN frame has arrived
 };
 // Format: "QffB"
@@ -147,8 +148,24 @@ struct __attribute__((packed)) LogMsgINDI {
     float    accel_pitch;  // rad/s²  INDI rate-PID commanded angular acceleration, pitch
 };
 // Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
-// Always populated regardless of FlightStateMachine::_use_indi — this is INDI
-// running in shadow mode alongside whichever controller actually flies (OUTP).
+// Always populated — AttitudeINDI is pure shadow now, never selectable (see
+// FlightStateMachine::_use_jerk), running alongside whichever of
+// AttitudePID/AttitudePIDJerk actually flies (OUTP).
+
+struct __attribute__((packed)) LogMsgPIDJ {
+    uint64_t time_us;
+    float    roll_jerk; // rad/s^3  jerk estimate fed into the roll rate loop's damping term (JerkFit.hpp)
+    float    cmd_roll;  // [-1, 1]  normalized roll torque commanded by AttitudePIDJerk (includes jerk term)
+    float    cmd_pitch; // [-1, 1]  normalized pitch torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
+    float    cmd_yaw;   // [-1, 1]  normalized yaw torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
+};
+// Format: "Qffff"   Body: 8+4×4 = 24 B   Record: 27 B
+// Always populated, regardless of FlightStateMachine::_use_jerk — this is
+// AttitudePIDJerk's own output, which drives OUTP when the channel-7 switch
+// selects PIDJ (3rd position). Its jerk-PI gains (see Attitude_PID_Jerk.hpp)
+// are first-cut small values — compare cmd_roll here against plain PID's
+// OUTP.roll_tq to see how much correction it's actually contributing before
+// pushing the gains up.
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;
@@ -302,6 +319,12 @@ constexpr LogDef kLogDefs[] = {
       "QffffffB",
       "TimeUS,X,Y,Z,VX,VY,VZ,Valid",
       sizeof(LogMsgMOCP) },
+
+    { LOG_MSG_PIDJ,
+      "PIDJ",
+      "Qffff",
+      "TimeUS,RollJerk,CmdR,CmdP,CmdY",
+      sizeof(LogMsgPIDJ) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);
