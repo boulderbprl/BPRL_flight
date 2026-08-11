@@ -82,14 +82,28 @@ public:
     //   _num_controllers == 3 (PID + INDI + PID+PI all enabled): the switch
     //     has exactly as many positions as there are controllers, so each
     //     position selects its same-numbered list index directly.
+    //
+    // PID (list index 0) is the only controller whose output isn't anchored
+    // to the real current_torque measurement (unlike INDI/PID+PI, which seed
+    // from it every tick — see Attitude_INDI.cpp), so its shadow-mode
+    // integrators can drift arbitrarily far from whatever's actually being
+    // commanded while another controller flies. Reset it on the edge into
+    // PID so it starts from a clean P-only response instead of handing the
+    // motors a stale, possibly wound-up integrator.
     void set_active_controller(int radio_switch_pos)
     {
+        const int prev_index = _active_index;
+
         if (_num_controllers >= 3) {
             _active_index = (radio_switch_pos < 0) ? 0
                            : (radio_switch_pos >= _num_controllers) ? _num_controllers - 1
                            : radio_switch_pos;
         } else {
             _active_index = (radio_switch_pos >= 2 && _num_controllers > 1) ? 1 : 0;
+        }
+
+        if (_active_index == 0 && prev_index != 0) {
+            _pid.reset_all();
         }
     }
 

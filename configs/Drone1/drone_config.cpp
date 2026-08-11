@@ -31,15 +31,15 @@ const DroneConfig kDroneConfig = {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        0.0035f, // g1_seed_roll (was indi_gain_roll)
-        0.0045f, // g1_seed_pitch (was indi_gain_pitch)
+        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        0.005f, // g1_seed_roll (was indi_gain_roll)
+        0.0065f, // g1_seed_pitch (was indi_gain_pitch)
         1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
         1.0f,    // indi_output_gain_pitch (kappa)
         0.05f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
         0.005f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
-        1.5f,    // yaw_gain
+        3.0f,    // yaw_gain
     },
     
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
