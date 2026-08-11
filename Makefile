@@ -134,10 +134,14 @@ include $(CHIBIOS)/os/various/fatfs_bindings/fatfs.mk
 # CubeBlueH7: same flash layout as the generic ChibiOS script (org=0x08000000,
 # no bootloader offset), but with its own .nocache placement fixed to match
 # STM32_NOCACHE_RBAR/RASR in cfg/mcuconf.h — see boards/CubeBlueH7/STM32H743xI.ld.
+# OrqaH7QuadCore: application starts at 0x08060000 (after 384 KB BL) — see
+# boards/OrqaH7QuadCore/STM32H743xI_app.ld.
 ifeq ($(BOARD_FULL),CubeOrangePlus)
     LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
 else ifeq ($(BOARD_FULL),CubeBlueH7)
     LDSCRIPT = $(BOARDDIR)/STM32H743xI.ld
+else ifeq ($(BOARD_FULL),OrqaH7QuadCore)
+    LDSCRIPT = $(BOARDDIR)/STM32H743xI_app.ld
 else
     LDSCRIPT = $(STARTUPLD)/STM32H743xI.ld
 endif
@@ -169,6 +173,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/IMUs/ICM20602.cpp \
          src/coms/IMUs/ICM20948.cpp \
          src/coms/Baro/MS5611.cpp \
+         src/coms/Baro/DPS310.cpp \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \

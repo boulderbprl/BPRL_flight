@@ -14,6 +14,9 @@
 #include "src/coms/SPI.hpp"
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
+#if defined(BPRL_BOARD_ORQA)
+#include "src/coms/Baro/DPS310.hpp"
+#endif
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
 #include "src/coms/Radio.hpp"
@@ -195,6 +198,39 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
+#elif defined(BPRL_BOARD_ORQA)
+        // Only two physical IMUs on this board — g_imu[2] is never written
+        // and stays valid=false; StateManager already treats an invalid
+        // lane as absent. Rotations are transcribed from ArduPilot's
+        // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
+        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180), NOT
+        // bench-verified against a physical unit — confirm on the bench
+        // (tilt nose-down, check pitch sign in $TEL/$IMU telemetry) before
+        // trusting attitude output.
+        if (imu1.read(a, g)) {
+            // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
+            const float ra[3] = { -a[1], -a[0], -a[2] };
+            const float rg[3] = { -g[1], -g[0], -g[2] };
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
+            }
+            g_imu[0].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu2.read(a, g)) {
+            // ROTATION_PITCH_180 → NED z-down: [-x, y, -z]
+            const float ra[3] = { -a[0], a[1], -a[2] };
+            const float rg[3] = { -g[0], g[1], -g[2] };
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
+            }
+            g_imu[1].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
 #else
         if (imu1.read(a, g)) {
             // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
@@ -235,6 +271,9 @@ static THD_FUNCTION(SPIThread, arg)
         }
 #endif
 
+#if !defined(BPRL_BOARD_ORQA)
+        // BPRL_BOARD_ORQA's DPS310 is I2C, not SPI — polled from I2CThread
+        // instead (see src/coms/Baro/DPS310.hpp), so there is no baro1 here.
         if (kDroneConfig.sensors.has_baro) {
             float baro_p, baro_t, baro_alt;
             if (baro1.read(baro_p, baro_t, baro_alt)) {
@@ -247,6 +286,7 @@ static THD_FUNCTION(SPIThread, arg)
                 chMtxUnlock(&baro_mtx);
             }
         }
+#endif
 
         TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -292,6 +332,14 @@ static THD_FUNCTION(I2CThread, arg)
 {
     chRegSetThreadName("i2c");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+
+#if defined(BPRL_BOARD_ORQA)
+    // Blocking reset + coefficient read (~40 ms) — done here, once, before
+    // the polling loop starts, mirroring how SPIThread calls spi_drv_init()
+    // itself rather than main() (see src/coms/SPI.hpp).
+    dps310_init();
+#endif
+
     const int tid = TIMING_REGISTER("i2c", period);
 
     systime_t next = chVTGetSystemTime();

@@ -43,9 +43,9 @@ struct MocapRaw {
 struct BaroRaw {
     float pressure_pa;    // Pa, compensated
     float temperature_c;  // °C, compensated
-    float alt_m;          // m, positive UP, relative to MS5611::init() boot-time reference
-    bool  has_new;        // fresh sample this tick — set by SPIThread, cleared by ControlThread
-    bool  valid;          // true once MS5611 init + warm-up zero-reference capture completed
+    float alt_m;          // m, positive UP, relative to a boot-time reference (MS5611 warm-up on the Cube boards, DPS310 warm-up on Orqa)
+    bool  has_new;        // fresh sample this tick — set by SPIThread (Cube boards) or I2CThread (Orqa), cleared by ControlThread
+    bool  valid;          // true once the barometer's init + warm-up zero-reference capture completed
 };
 
 /* ── Shared flight state — access only under respective mutex ─────────────

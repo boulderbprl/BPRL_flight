@@ -80,10 +80,27 @@
 #define STM32_LSI_ENABLED                   TRUE
 #define STM32_CSI_ENABLED                   TRUE
 #define STM32_HSI48_ENABLED                 TRUE
-#define STM32_HSECLK                    24000000U
 #define STM32_HSE_ENABLED                   TRUE
 #define STM32_LSE_ENABLED                   FALSE  /* no 32kHz crystal; frees PC14/PC15 */
 #define STM32_HSIDIV                        STM32_HSIDIV_DIV1
+
+/*
+ * OrqaH7QuadCore has an 8 MHz HSE crystal vs. the Cube boards' 24 MHz.
+ * DIVM is adjusted so HSE/DIVM (the PLL reference clock) stays 8 MHz either
+ * way — 24 MHz/3 == 8 MHz/1 — so DIVN/DIVP/DIVQ/DIVR below need no changes:
+ * every PLL output frequency is identical across both crystal options.
+ */
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_HSECLK                     8000000U
+#define STM32_PLL1_DIVM_VALUE               1
+#define STM32_PLL2_DIVM_VALUE               1
+#define STM32_PLL3_DIVM_VALUE               1
+#else
+#define STM32_HSECLK                    24000000U
+#define STM32_PLL1_DIVM_VALUE               3
+#define STM32_PLL2_DIVM_VALUE               3
+#define STM32_PLL3_DIVM_VALUE               3
+#endif
 
 /*
  * PLLs static settings.
@@ -95,7 +112,6 @@
 #define STM32_PLL1_P_ENABLED                TRUE
 #define STM32_PLL1_Q_ENABLED                TRUE
 #define STM32_PLL1_R_ENABLED                TRUE
-#define STM32_PLL1_DIVM_VALUE               3
 #define STM32_PLL1_DIVN_VALUE               100
 #define STM32_PLL1_FRACN_VALUE              0
 #define STM32_PLL1_DIVP_VALUE               2
@@ -105,7 +121,6 @@
 #define STM32_PLL2_P_ENABLED                TRUE
 #define STM32_PLL2_Q_ENABLED                TRUE
 #define STM32_PLL2_R_ENABLED                TRUE
-#define STM32_PLL2_DIVM_VALUE               3
 #define STM32_PLL2_DIVN_VALUE               100
 #define STM32_PLL2_FRACN_VALUE              0
 #define STM32_PLL2_DIVP_VALUE               40
@@ -115,7 +130,6 @@
 #define STM32_PLL3_P_ENABLED                TRUE
 #define STM32_PLL3_Q_ENABLED                TRUE
 #define STM32_PLL3_R_ENABLED                TRUE
-#define STM32_PLL3_DIVM_VALUE               3
 #define STM32_PLL3_DIVN_VALUE               100
 #define STM32_PLL3_FRACN_VALUE              0
 #define STM32_PLL3_DIVP_VALUE               8
@@ -384,7 +398,11 @@
 #define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — future sensor (SD3) */
 #define STM32_SERIAL_USE_UART4              FALSE
 #define STM32_SERIAL_USE_UART5              FALSE
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_SERIAL_USE_USART6             TRUE   /* TX6/RX6 — CRSF radio (SD6) */
+#else
 #define STM32_SERIAL_USE_USART6             FALSE  /* FMU↔IOMCU bridge; not used by firmware */
+#endif
 #define STM32_SERIAL_USE_UART7              FALSE
 #define STM32_SERIAL_USE_UART8              FALSE
 #define STM32_SERIAL_USE_LPUART1            FALSE
@@ -439,9 +457,20 @@
 
 /*
  * ST driver system settings.
+ *
+ * BPRL_BOARD_ORQA's DShot driver claims TIM2/TIM3/TIM4/TIM5 outright (one
+ * motor per timer — see src/coms/DShot.cpp), which would silently fight the
+ * kernel's own system tick if it also ran on TIM2 here. TIM12 is unused by
+ * everything else in this project (not a DShot lane, no GPIO/PWM use) and is
+ * a supported ST timer, so it's the Orqa-only tick source; the Cube boards
+ * keep TIM2, unchanged.
  */
 #define STM32_ST_IRQ_PRIORITY               8
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_ST_USE_TIMER                  12
+#else
 #define STM32_ST_USE_TIMER                  2
+#endif
 
 /*
  * TRNG driver system settings.
