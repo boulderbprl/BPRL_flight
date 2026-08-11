@@ -148,9 +148,9 @@ void Logger::close()
 {
     if (!_open) return;
     flush();
-    // Shrink the file from the f_expand()-reserved 128 MB back to the actual
-    // bytes written (f_truncate() cuts at the current write position, which
-    // is exactly the real logged size since s_file is never seeked).
+    // Shrink the file from the f_expand()-reserved PRE_ALLOC_SIZE back to the
+    // actual bytes written (f_truncate() cuts at the current write position,
+    // which is exactly the real logged size since s_file is never seeked).
     f_truncate(&s_file);
     f_sync(&s_file);
     f_close(&s_file);

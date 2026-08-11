@@ -2,6 +2,8 @@
 
 CrsfParser g_crsf;
 
+// Full-duplex two-wire UART on every board (Cube: USART2/TELEM1; Orqa:
+// USART6/TX6-RX6) — no HDSEL needed on either.
 static const SerialConfig crsf_cfg = {
     420000,                   // 420 kbaud (ELRS standard; TBS spec is 416666)
     0,                        // 8 data bits, no parity
@@ -39,13 +41,21 @@ void CrsfParser::unpack(const uint8_t *data, uint16_t *ch)
 
 void CrsfParser::init()
 {
-    sdStart(&SD2, &crsf_cfg); // TELEM1 = USART2 (PD5/PD6);
+#if defined(BPRL_BOARD_ORQA)
+    sdStart(&SD6, &crsf_cfg); // TX6/RX6 = USART6 (PC6/PC7)
+#else
+    sdStart(&SD2, &crsf_cfg); // TELEM1 = USART2 (PD5/PD6)
+#endif
 }
 
 void CrsfParser::update()
 {
     uint8_t byte;
+#if defined(BPRL_BOARD_ORQA)
+    while (chnReadTimeout(&SD6, &byte, 1, TIME_IMMEDIATE) == 1) {
+#else
     while (chnReadTimeout(&SD2, &byte, 1, TIME_IMMEDIATE) == 1) {
+#endif
         switch (_state) {
         case State::WAIT_SYNC:
             if (byte == 0xC8u) {

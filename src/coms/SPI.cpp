@@ -12,7 +12,51 @@
  * pin map and rationale. Baro is on the same pin/mode for both boards.
  */
 
-#if defined(BPRL_BOARD_CUBEBLUE)
+#if defined(BPRL_BOARD_ORQA)
+
+// ── IMU1: ICM-42688 — SPI1  CS=PA4  MODE3 (CPOL=1, CPHA=1) ───────────────────
+// SPI1 = PLL1_Q = 50 MHz (same as the Cube boards — DIVM change for the 8 MHz
+// HSE keeps every PLL output frequency identical, see cfg/mcuconf.h).
+static const SPIConfig imu1_init = {
+    false, nullptr, GPIOA, 4U,
+    SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+static const SPIConfig imu1_fast = {
+    false, nullptr, GPIOA, 4U,
+    SPI_CFG1_MBR_DIV8  | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
+// ── IMU2: ICM-42688 — SPI4  CS=PE11  MODE3 ────────────────────────────────────
+// SPI4 = PCLK2 = 100 MHz (unchanged from the Cube boards).
+static const SPIConfig imu2_init = {
+    false, nullptr, GPIOE, 11U,
+    SPI_CFG1_MBR_DIV128 | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+static const SPIConfig imu2_fast = {
+    false, nullptr, GPIOE, 11U,
+    SPI_CFG1_MBR_DIV16  | SPI_CFG1_DSIZE_VALUE(7),
+    SPI_CFG2_CPHA | SPI_CFG2_CPOL,
+    nullptr, nullptr
+};
+
+ICM42688 imu1;
+ICM42688 imu2;
+
+void spi_drv_init(void)
+{
+    imu1.init(&SPID1, &imu1_init, &imu1_fast);
+    imu2.init(&SPID4, &imu2_init, &imu2_fast);
+    // No SPI baro on this board — DPS310 is I2C, initialized/polled from
+    // I2CThread (see src/coms/Baro/DPS310.hpp).
+}
+
+#elif defined(BPRL_BOARD_CUBEBLUE)
 
 // ── IMU1: ICM-20948 — SPI1  CS=PC2  MODE3 (CPOL=1, CPHA=1) ───────────────────
 static const SPIConfig imu1_init = {
@@ -104,7 +148,9 @@ ICM45686 imu3;
 
 #endif
 
-// ── BARO1: MS5611 — SPI1  CS=PD7  MODE3 (same on both boards) ────────────────
+#if !defined(BPRL_BOARD_ORQA)
+// ── BARO1: MS5611 — SPI1  CS=PD7  MODE3 (same on both Cube boards) ───────────
+// Not compiled for BPRL_BOARD_ORQA — that board's DPS310 is I2C, see above.
 static const SPIConfig baro1_init = {
     false, nullptr, GPIOD, 7U,
     SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
@@ -127,3 +173,5 @@ void spi_drv_init(void)
     imu3.init(&SPID4, &imu3_init, &imu3_fast);
     baro1.init(&SPID1, &baro1_init, &baro1_fast);
 }
+
+#endif // !BPRL_BOARD_ORQA

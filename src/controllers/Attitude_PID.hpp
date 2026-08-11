@@ -1,8 +1,12 @@
 #pragma once
 #include "PID.hpp"
+#include "AttitudeController.hpp"
+#include "configs/DroneConfig.hpp"
 
 /*
  * Cascade attitude controller (PID) — outer attitude loop + inner rate loop.
+ * Implements AttitudeController — see that header for the shared update()
+ * signature and how FlightStateMachine's controller list drives it.
  *
  * Outer loop: attitude error [rad]  → angular rate target [rad/s]
  * Inner loop: rate error [rad/s]    → normalised torque output [-1, 1]
@@ -16,18 +20,24 @@
  * tracks the current heading so there's no stored error to fight when the
  * stick recentres. Mirrors the same trim in AttitudeINDI.
  *
- * Conventions:
- *   state[0..2]  roll, pitch, yaw in radians
- *   state[3..5]  p, q, r body-frame rates in rad/s
- *   input[1..3]  roll_tgt, pitch_tgt, yaw_rate_tgt [-1, 1]
- *   out_cmds[3]  normalised torque [roll, pitch, yaw] in [-1, 1]
+ * Conventions (own 6-element internal state, built from euler[]/state_full[]
+ * inside update() to match the shared AttitudeController interface):
+ *   state6[0..2]  roll, pitch, yaw in radians
+ *   state6[3..5]  p, q, r body-frame rates in rad/s
+ *   input[1..3]   roll_tgt, pitch_tgt, yaw_rate_tgt [-1, 1]
+ *   out_cmds[3]   normalised torque [roll, pitch, yaw] in [-1, 1]
+ *
+ * current_torque/unmixer (from the shared interface) are unused here — this
+ * controller doesn't need RPM-derived torque feedback, unlike AttitudeINDI.
  */
-class AttitudePID {
+class AttitudePID : public AttitudeController {
 public:
-    AttitudePID();
+    explicit AttitudePID(const AttitudePidGains &g);
 
-    void update(const float state[], const float input[], float out_cmds[3]);
-    void reset_all();
+    void update(const float euler[3], const float state_full[], const float input[],
+                const float current_torque[2], const Unmixer &unmixer,
+                float out_cmds[3]) override;
+    void reset_all() override;
 
 private:
     PID _roll_att;
@@ -37,10 +47,10 @@ private:
     PID _yaw_rate;
     PID _yaw_hold;   // heading-lock trim: heading error [rad] -> corrective rate [rad/s]
 
+    float _yaw_stick_gain;     // from DroneConfig; was YAW_STICK_GAIN
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
 
-    static constexpr float YAW_STICK_GAIN     = 3.0f;
     static constexpr float YAW_STICK_DEADBAND = 0.10f;  // normalised stick [-1,1], matches FlightStateMachine::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE  = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
 };

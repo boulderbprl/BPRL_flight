@@ -2,6 +2,551 @@
 #include "ch.h"
 #include "hal.h"
 #include <cstring>
+#include <cstdint>
+
+/*
+ * DShot600 bidirectional.
+ *
+ * BPRL_BOARD_ORQA: 2 motors per timer (TIM4 CH1/CH2, TIM2 CH1/CH2), burst-DMA
+ * TX + time-multiplexed IC per timer — see the BPRL_BOARD_ORQA branch below.
+ * Cube boards (default): single-stream burst DMA TX + dedicated IC on TIM1
+ * (3 motors sharing one timer via ArduPilot's CC2 cross-capture trick) +
+ * TIM4 (1 motor) — see the #else branch below, unchanged from before this
+ * board was added.
+ *
+ * Shared across both: DShot600 bit timing, the GCR decode table/algorithm,
+ * and the DShot frame/CRC construction — none of this is hardware-specific.
+ */
+
+/* ── DShot600 timing (200 MHz timer clock, PSC = 0) ─────────────────────── */
+static constexpr uint32_t DS_ARR         = 333U;
+static constexpr uint32_t DS_T0H         = 125U;
+static constexpr uint32_t DS_T1H         = 250U;
+static constexpr uint32_t GCR_BIT_TICKS  = (DS_ARR + 1U) * 4U / 5U; // 267
+
+/* ── GCR decode table (shared) ───────────────────────────────────────────── */
+static constexpr uint8_t kGcrDecode[32] = {
+    0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0xFF, 0xFF, 0xFF,
+    0xFF, 0x09, 0x0A, 0x0B,
+    0xFF, 0x0D, 0x0E, 0x0F,
+    0xFF, 0xFF, 0x02, 0x03,
+    0xFF, 0x05, 0x06, 0x07,
+    0xFF, 0x00, 0x08, 0x01,
+    0xFF, 0x04, 0x0C, 0xFF,
+};
+
+/* ── make_frame (shared) ─────────────────────────────────────────────────── */
+static uint16_t make_frame(uint16_t thr)
+{
+    uint16_t val = (uint16_t)(thr << 1);                        // telem bit = 0
+    uint16_t crc = (~(val ^ (val >> 4) ^ (val >> 8))) & 0x0FU; // inverted → bidir
+    return (uint16_t)((val << 4) | crc);
+}
+
+/* ── decode_gcr (shared) ─────────────────────────────────────────────────── */
+/*
+ * Decode 21-bit GCR from CCR timestamps captured by DMA.
+ * Matches ArduPilot/BetaFlight bdshot_decode_telemetry_packet exactly.
+ *
+ * GCR encoding: a run of n consecutive identical bits is represented as a
+ * '1' at the MSB followed by (n-1) '0's.  This is the transition-marking
+ * convention — it is level-independent (no need to track HIGH vs LOW).
+ *   n=1 → 0b1         n=2 → 0b10        n=3 → 0b100
+ * Building the 21-bit word: for each inter-edge interval of n bit-widths:
+ *   bits = (bits << n) | (1 << (n-1))
+ *
+ * CRC: the ESC response uses the INVERTED nibble sum (same as the bidir TX
+ * frame from the FC).  The 4 nibbles of the decoded 20-bit frame satisfy
+ *   n0 ^ n1 ^ n2 ^ n3 == 0xF
+ * which is equivalent to (frame ^ frame>>4 ^ frame>>8 ^ frame>>12) & 0xF == 0xF.
+ */
+static bool decode_gcr(const uint32_t *buf, uint8_t n_edges, uint32_t *erpm_out)
+{
+    if (n_edges < 2U) return false;
+
+    uint32_t bits        = 0U;
+    uint32_t bits_filled = 0U;
+
+    for (uint8_t i = 0U; i < n_edges && bits_filled < 21U; i++) {
+        uint32_t n;
+        if (i + 1U < n_edges) {
+            uint32_t diff = buf[i + 1U] - buf[i];
+            n = (diff + GCR_BIT_TICKS / 2U) / GCR_BIT_TICKS;
+            if (n == 0U) n = 1U;
+        } else {
+            n = 21U - bits_filled;
+        }
+        if (n > 21U - bits_filled) n = 21U - bits_filled;
+
+        /* Transition-marking: '1' at MSB of the run, '0' below it. */
+        bits = (bits << n) | (1U << (n - 1U));
+        bits_filled += n;
+    }
+
+    if (bits_filled < 21U) return false;
+
+    /* Decode 4 × 5-bit GCR codes → 4-bit nibbles → 20-bit value. */
+    uint32_t gcr20 = bits & 0xFFFFFU;
+    uint16_t frame = 0U;
+    for (int g = 3; g >= 0; g--) {
+        uint8_t code   = (uint8_t)((gcr20 >> (g * 5U)) & 0x1FU);
+        uint8_t nibble = kGcrDecode[code];
+        if (nibble == 0xFF) return false;
+        frame = (uint16_t)((frame << 4U) | nibble);
+    }
+
+    /* Inverted nibble CRC: the XOR of all four nibbles must equal 0xF. */
+    uint16_t csum = frame ^ (frame >> 4U) ^ (frame >> 8U) ^ (frame >> 12U);
+    if ((csum & 0x0FU) != 0x0FU) return false;
+
+    /* eRPM: [15:12]=nibble0 is CRC, [11:9]=3-bit exponent, [8:0]=9-bit mantissa.
+     * The encoded value is the electrical revolution PERIOD in microseconds.
+     * eRPM = 60,000,000 / period_us  (same as ArduPilot's conversion). */
+    uint16_t val      = (frame >> 4U) & 0xFFFU;
+    uint16_t exponent = (val >> 9U) & 0x7U;
+    uint16_t mantissa =  val         & 0x1FFU;
+    uint32_t period   = (uint32_t)mantissa << exponent;
+    *erpm_out = (period > 0U) ? (60000000U / period) : 0U;
+    return true;
+}
+
+/* ── Telemetry & diagnostics (shared storage — one slot per motor) ──────── */
+static ESCTelemetry s_telem[4]         = {};
+static uint8_t      s_last_edge_cnt[4] = {};
+static uint32_t     s_last_edges[4][5] = {};
+
+/* ── Phase state machine (shared enum) ───────────────────────────────────── */
+enum class DshotPhase : uint8_t { IDLE, TX, IC };
+
+#if defined(BPRL_BOARD_ORQA)
+
+/*
+ * BPRL_BOARD_ORQA motor layout — the board's main "ESC" JST-GH connector
+ * (OrqaH7QuadCoreTop.png pinout diagram), pads MOT1-4, two motors per timer
+ * (boards/OrqaH7QuadCore/board.h):
+ *   Motor 0 (FR) → PD12 = TIM4_CH1 — MOT1  ┐ share TIM4
+ *   Motor 1 (RL) → PD13 = TIM4_CH2 — MOT2  ┘
+ *   Motor 2 (FL) → PA1  = TIM2_CH2 — MOT3  ┐ share TIM2
+ *   Motor 3 (RR) → PA0  = TIM2_CH1 — MOT4  ┘
+ *
+ * NOT the 4 pads ArduPilot's hwdef.dat flags BIDIR (those are PWM1/3/5/7 —
+ * one per timer across FOUR different timers, spread across both the ESC
+ * connector and the separate MFC connector). A standard 4-in-1 ESC's single
+ * cable plugs into MOT1-4 on the ESC connector only, which this board wires
+ * to just two timers (TIM4, TIM2) via their CH1/CH2 pair.
+ *
+ * TX (DShot command frames) uses one DMAR burst-of-4 stream per group,
+ * exactly like the Cube boards' TIM1 below (DBL=3, DBA=CCR1, FIFO
+ * MBURST/PBURST=INCR4) — CH1/CH2 carry the two real motors, CH3/CH4 are
+ * dummy zero columns (never CCxE-enabled, so they drive nothing). This is
+ * NOT two independent streams both listening to the same TIMx_UP request:
+ * that was tried and measured broken (see BPRL memory / git history on the
+ * CubeBlue bring-up) — DMAMUX delivers each hardware request to only one
+ * subscribed stream at a time (round-robin), not a broadcast, so two
+ * streams sharing one request line each only see every-other UEV and the
+ * ESC never receives a complete, correctly-timed frame.
+ *
+ * IC (bidir telemetry capture) can only usefully target one channel's CCRx
+ * at a time via DMAR, so each timer's two motors take turns: one dedicated
+ * IC stream per timer, alternating slot 0 (CH1) / slot 1 (CH2) each DShot
+ * cycle — the same rotation idea as the Cube boards' TIM1 3-motor rotation
+ * below, just 2-wide instead of 3-wide, and without needing that branch's
+ * CC1/CC2 cross-capture trick since both channels here have their own
+ * direct DMAMUX capture request IDs.
+ *
+ * DMAMUX1 request IDs and TIMx_IRQn numbers verified directly against
+ * ChibiOS's stm32_dmamux.h / stm32h743xx.h — not transcribed from memory.
+ */
+
+static constexpr uint32_t DMAMUX_TIM2_CH1 = 18U;
+static constexpr uint32_t DMAMUX_TIM2_CH2 = 19U;
+static constexpr uint32_t DMAMUX_TIM2_UP  = 22U;
+static constexpr uint32_t DMAMUX_TIM4_CH1 = 29U;
+static constexpr uint32_t DMAMUX_TIM4_CH2 = 30U;
+static constexpr uint32_t DMAMUX_TIM4_UP  = 32U;
+
+/* Timer DCR word offsets (DBA = byte_offset / 4). */
+static constexpr uint32_t DBA_CCR1 = 13U;  // 0x34/4
+static constexpr uint32_t DBA_CCR2 = 14U;  // 0x38/4
+
+static void reset_tim2(void) { rccResetTIM2(); }
+static void reset_tim4(void) { rccResetTIM4(); }
+
+struct DshotGroup {
+    TIM_TypeDef *tim;
+    void       (*rcc_reset)(void);
+    uint32_t     dmamux_up;
+    uint32_t     dmamux_ch[2];  // [0]=CH1's own capture request, [1]=CH2's
+    uint32_t     dba[2];        // [0]=DBA_CCR1, [1]=DBA_CCR2
+    uint8_t      lane[2];       // motor index driven by CH1, CH2
+};
+
+// lane == kDroneConfig.mixer motor_out[] index (FR/RL/FL/RR).
+static const DshotGroup kGroups[2] = {
+    { TIM4, reset_tim4, DMAMUX_TIM4_UP, { DMAMUX_TIM4_CH1, DMAMUX_TIM4_CH2 },
+      { DBA_CCR1, DBA_CCR2 }, { 0, 1 } },  // CH1=MOT1=FR, CH2=MOT2=RL
+    { TIM2, reset_tim2, DMAMUX_TIM2_UP, { DMAMUX_TIM2_CH1, DMAMUX_TIM2_CH2 },
+      { DBA_CCR1, DBA_CCR2 }, { 3, 2 } },  // CH1=MOT4=RR, CH2=MOT3=FL
+};
+
+/* DMA TX buffer: one DMAR burst-of-4 stream per group — interleaved stride-4
+ * [CCR1(real), CCR2(real), CCR3(dummy=0), CCR4(dummy=0)] × 19 rows (pre-word
+ * + 16 data bits + 2 trailing zeros) = 76 words, matching the Cube boards'
+ * TIM1 buffer shape exactly. IC buffer: 22 words (21-bit GCR response +
+ * margin), one per group (reused for whichever channel is currently the
+ * telemetry slot). Both .nocache — bypasses D-cache on STM32H743 (see Cube
+ * boards' branch for the full rationale, identical here). */
+static uint32_t s_tx_buf[2][76] __attribute__((aligned(32), section(".nocache")));
+static uint32_t s_ic_buf[2][22] __attribute__((aligned(32), section(".nocache")));
+
+static volatile DshotPhase       s_phase[2]          = {};
+static const stm32_dma_stream_t *s_dma_tx[2]         = {};  // [group]
+static const stm32_dma_stream_t *s_dma_ic[2]         = {};  // [group]
+static volatile uint32_t         s_dma_tc_count[2]   = {};
+static volatile uint32_t         s_ic_done_count[2]  = {};
+static uint8_t                   s_telem_slot[2]     = {};  // which channel (0=CH1/1=CH2) is captured next
+
+static void start_ic(int g);
+static void finish_ic(int g, uint8_t n_edges);
+
+/* Configure both channels of a group's timer for PWM output-compare mode
+ * (active-low DShot TX) simultaneously — both MOT pads of a timer are
+ * always driven together, unlike the IC side which only ever owns one
+ * channel at a time. Always CH1+CH2 on this board (never CH3/CH4). */
+static void oc_setup_pair12(TIM_TypeDef *tim)
+{
+    tim->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | STM32_TIM_CCMR1_OC1PE
+               | STM32_TIM_CCMR1_OC2M(6) | STM32_TIM_CCMR1_OC2PE;
+    tim->CCMR2 = 0U;
+    tim->CCR1  = 0U;
+    tim->CCR2  = 0U;
+    tim->CCER  = STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1E
+               | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E;
+}
+
+/* Configure a single channel (1 or 2) for input-capture mode, direct (own
+ * pin), both-edge, 4-sample filter — matches the Cube boards' IC config.
+ * Only ch 1/2 are ever used on this board (CH3/CH4 aren't wired to a MOT
+ * pad on either group's timer). */
+static void ic_setup(TIM_TypeDef *tim, uint8_t ch)
+{
+    tim->CCMR1 = 0U; tim->CCMR2 = 0U; tim->CCER = 0U;
+    if (ch == 1U) {
+        tim->CCMR1 = STM32_TIM_CCMR1_CC1S(1) | STM32_TIM_CCMR1_IC1F(2);
+        tim->CCER  = STM32_TIM_CCER_CC1E | STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1NP;
+    } else { // 2
+        tim->CCMR1 = STM32_TIM_CCMR1_CC2S(1) | STM32_TIM_CCMR1_IC2F(2);
+        tim->CCER  = STM32_TIM_CCER_CC2E | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2NP;
+    }
+}
+
+static uint32_t ccxde_bit(uint8_t ch)
+{
+    return (ch == 1U) ? TIM_DIER_CC1DE : TIM_DIER_CC2DE;
+}
+
+/* Equivalent to ArduPilot bdshot_reset_pwm() = pwmStop()+pwmStart(), applied
+ * to both groups' timers. rccResetTIMx() performs a full APB peripheral
+ * reset (all regs -> 0); CNT is staggered by a half period per group so
+ * both timers' DMA bursts don't land on the AHB matrix at the same instant
+ * (same idea as the Cube boards' TIM1/TIM4 half-period stagger below). Both
+ * channels of a group's timer are configured together — MOT1/MOT2 (or
+ * MOT3/MOT4) are always driven simultaneously during TX. */
+static void reset_pwm_for_tx(void)
+{
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        G.rcc_reset();
+        G.tim->PSC  = 0U;
+        G.tim->ARR  = DS_ARR;
+        G.tim->CR2  = 0U;
+        oc_setup_pair12(G.tim);
+        G.tim->EGR  = TIM_EGR_UG;
+        G.tim->SR   = 0U;
+        G.tim->DIER = TIM_DIER_UDE;
+        /* Burst-of-4 starting at CCR1: CH1/CH2 real, CH3/CH4 dummy — see
+         * build_tx_buf. Re-pointed to a single register by start_ic() during
+         * the IC phase; restored here every dshot_write() cycle. */
+        G.tim->DCR  = (3U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
+        G.tim->CNT  = static_cast<uint32_t>(g) * (DS_ARR + 1U) / 2U;
+        G.tim->SR   = 0U;
+        G.tim->CR1  = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
+    }
+}
+
+/* Interleaved stride-4 layout per group: [CH1_bit, CH2_bit, 0, 0] × 19 rows
+ * (pre-word + 16 data bits + 2 trailing zeros), matching the Cube boards'
+ * TIM1 buffer shape — see that branch's build_tx_buf for the full rationale
+ * (OC-preload one-UEV delay absorbed by the pre-word row). */
+static void build_tx_buf(const uint16_t throttle[4])
+{
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        const uint16_t frame0 = make_frame(throttle[G.lane[0]]);
+        const uint16_t frame1 = make_frame(throttle[G.lane[1]]);
+
+        s_tx_buf[g][0] = 0U; s_tx_buf[g][1] = 0U;
+        s_tx_buf[g][2] = 0U; s_tx_buf[g][3] = 0U;
+
+        for (int b = 15; b >= 0; b--) {
+            const int row = (16 - b) * 4;
+            s_tx_buf[g][row + 0] = (frame0 & (1U << b)) ? DS_T1H : DS_T0H;
+            s_tx_buf[g][row + 1] = (frame1 & (1U << b)) ? DS_T1H : DS_T0H;
+            s_tx_buf[g][row + 2] = 0U;
+            s_tx_buf[g][row + 3] = 0U;
+        }
+        for (int i = 68; i < 76; i++) s_tx_buf[g][i] = 0U;
+    }
+}
+
+/* TX-complete callback for a group's single burst DMAR stream. */
+static void dshot_dma_tc_tx(void *p, uint32_t flags)
+{
+    (void)flags;
+    const int g = static_cast<int>(reinterpret_cast<intptr_t>(p));
+    if (s_phase[g] != DshotPhase::TX) return;
+
+    s_dma_tc_count[g]++;
+    kGroups[g].tim->CR1 &= ~TIM_CR1_CEN;
+    s_phase[g] = DshotPhase::IC;
+    start_ic(g);
+}
+
+/* IC-complete callback for a group's dedicated telemetry-capture stream. */
+static void dshot_dma_tc_ic(void *p, uint32_t flags)
+{
+    (void)flags;
+    const int g = static_cast<int>(reinterpret_cast<intptr_t>(p));
+    if (s_phase[g] != DshotPhase::IC) return;
+
+    kGroups[g].tim->DIER = 0U;
+    kGroups[g].tim->CR1 &= ~TIM_CR1_CEN;
+    s_phase[g] = DshotPhase::IDLE;
+    s_ic_done_count[g]++;
+    finish_ic(g, 22U);
+}
+
+static void start_ic(int g)
+{
+    const DshotGroup &G = kGroups[g];
+    const uint8_t slot = s_telem_slot[g];   // 0=CH1, 1=CH2
+    const uint8_t ch   = static_cast<uint8_t>(slot + 1U);
+
+    dmaSetRequestSource(s_dma_ic[g], G.dmamux_ch[slot]);
+    dmaStreamSetPeripheral(s_dma_ic[g], &G.tim->DMAR);
+    dmaStreamSetMemory0(s_dma_ic[g], s_ic_buf[g]);
+    dmaStreamSetTransactionSize(s_dma_ic[g], 22U);
+    s_dma_ic[g]->stream->FCR = 0U;   // direct mode
+    dmaStreamSetMode(s_dma_ic[g],
+          DMA_SxCR_MINC
+        | (0x2U << DMA_SxCR_MSIZE_Pos)
+        | (0x2U << DMA_SxCR_PSIZE_Pos)
+        | (0x0U << DMA_SxCR_DIR_Pos)   // P->M
+        | (0x3U << DMA_SxCR_PL_Pos)
+        | DMA_SxCR_TCIE);
+
+    /* Point DCR at this slot's own CCR — the TX streams never touch DMAR/DCR
+     * (they write their CCRx directly), so this is safe to change here. */
+    G.tim->DCR  = (0U << TIM_DCR_DBL_Pos) | (G.dba[slot] << TIM_DCR_DBA_Pos);
+    ic_setup(G.tim, ch);
+    G.tim->ARR  = 20000U;  // 100 µs hardware timeout
+    G.tim->CNT  = 0U;
+    G.tim->SR   = 0U;
+    G.tim->DIER = ccxde_bit(ch) | TIM_DIER_UIE;
+
+    dmaStreamEnable(s_dma_ic[g]);
+    /* URS=1: only counter overflow (not software EGR=UG) sets UIF. */
+    G.tim->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
+}
+
+static void finish_ic(int g, uint8_t n_edges)
+{
+    const DshotGroup &G  = kGroups[g];
+    const uint8_t slot   = s_telem_slot[g];
+    const int     lane   = G.lane[slot];
+
+    s_last_edge_cnt[lane] = n_edges;
+    uint8_t keep = (n_edges < 5U) ? n_edges : 5U;
+    for (uint8_t k = 0; k < keep; k++) s_last_edges[lane][k] = s_ic_buf[g][k];
+
+    uint32_t erpm = 0U;
+    if (decode_gcr(s_ic_buf[g], n_edges, &erpm)) {
+        s_telem[lane].erpm  = erpm;
+        s_telem[lane].valid = true;
+    } else {
+        s_telem[lane].valid = false;
+    }
+
+    s_telem_slot[g] = slot ^ 1U;  // alternate CH1/CH2 each cycle
+}
+
+/* Shared UIE-timeout ISR body — the 2 fixed-name vectors below each call
+ * this with their own group index (vector names are fixed by the
+ * CMSIS/ChibiOS ISR table, so the dispatch itself can't be table-driven). */
+static void tim_timeout_isr(int g)
+{
+    const DshotGroup &G = kGroups[g];
+    uint32_t sr = G.tim->SR;
+    G.tim->SR = 0U;
+
+    if ((sr & TIM_SR_UIF) && (s_phase[g] == DshotPhase::IC)) {
+        G.tim->DIER = 0U;
+        G.tim->CR1 &= ~TIM_CR1_CEN;
+        dmaStreamDisable(s_dma_ic[g]);
+        uint8_t captured = static_cast<uint8_t>(22U - dmaStreamGetTransactionSize(s_dma_ic[g]));
+        s_phase[g] = DshotPhase::IDLE;
+        s_ic_done_count[g]++;
+        finish_ic(g, captured);
+    }
+}
+
+OSAL_IRQ_HANDLER(STM32_TIM4_HANDLER)
+{
+    OSAL_IRQ_PROLOGUE();
+    tim_timeout_isr(0);
+    OSAL_IRQ_EPILOGUE();
+}
+
+OSAL_IRQ_HANDLER(STM32_TIM2_HANDLER)
+{
+    OSAL_IRQ_PROLOGUE();
+    tim_timeout_isr(1);
+    OSAL_IRQ_EPILOGUE();
+}
+
+/* One DMAR burst-of-4 stream per group — same mechanism as the Cube boards'
+ * TIM1 TX below (FIFO full-threshold + INCR4 burst so all 4 CCRx words
+ * drain atomically per single TIMx_UP request). CH3/CH4 columns are always
+ * zero and never CCxE-enabled, so they're inert padding to reach a burst
+ * size the DMA controller actually supports (INCR2 doesn't exist — see the
+ * branch comment above for why two separate streams don't work instead). */
+static void arm_tx_dma(void)
+{
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        const stm32_dma_stream_t *dma = s_dma_tx[g];
+        dmaSetRequestSource(dma, G.dmamux_up);
+        dmaStreamSetPeripheral(dma, &G.tim->DMAR);
+        dmaStreamSetMemory0(dma, s_tx_buf[g]);
+        dmaStreamSetTransactionSize(dma, 76U);
+        dma->stream->FCR = DMA_SxFCR_DMDIS | DMA_SxFCR_FTH;
+        dmaStreamSetMode(dma,
+              DMA_SxCR_MINC
+            | (0x2U << DMA_SxCR_MSIZE_Pos)
+            | (0x2U << DMA_SxCR_PSIZE_Pos)
+            | (0x1U << DMA_SxCR_DIR_Pos)   // M->P
+            | (0x3U << DMA_SxCR_PL_Pos)
+            | DMA_SxCR_TCIE
+            | DMA_SxCR_MBURST_0            // MBURST=INCR4
+            | DMA_SxCR_PBURST_0);          // PBURST=INCR4
+        dmaStreamEnable(dma);
+        s_phase[g] = DshotPhase::TX;
+    }
+}
+
+static const stm32_dma_stream_t *alloc_or_halt(uint32_t priority, stm32_dmaisr_t func, void *param,
+                                                const char *msg)
+{
+    const stm32_dma_stream_t *dma = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY, priority, func, param);
+    osalDbgAssert(dma != nullptr, msg);
+    (void)msg;  // osalDbgAssert's reason string is unused when compiled without assertions
+    if (dma == nullptr) {
+        for (;;) {
+            for (int i = 0; i < 20; i++) {
+                palToggleLine(LINE_LED_ACTIVITY);
+                volatile uint32_t n = 2000000U; while (n--) {}
+            }
+            volatile uint32_t n = 16000000U; while (n--) {}
+        }
+    }
+    return dma;
+}
+
+void dshot_init(void)
+{
+    RCC->APB1LENR |= RCC_APB1LENR_TIM2EN | RCC_APB1LENR_TIM4EN;
+    RCC->AHB1ENR  |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMA2EN;
+    RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOAEN | RCC_AHB4ENR_GPIODEN;
+
+    /* GPIO: AF mode once, never changed. Medium speed (not high/very-high) —
+     * BiDir DShot requires this to avoid ringing on the IC->OC output
+     * reconnect transition, matching ArduPilot bdshot (same requirement as
+     * the Cube boards' branch, expressed here via palSetPadMode instead of
+     * raw register writes — equivalent effect, easier to verify per-pin).
+     * PD12/PD13 = TIM4_CH1/CH2 = MOT1/MOT2, AF2. PA0/PA1 = TIM2_CH1/CH2 =
+     * MOT4/MOT3, AF1. */
+    palSetPadMode(GPIOD, 12U, PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOD, 13U, PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOA, 0U,  PAL_MODE_ALTERNATE(1) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOA, 1U,  PAL_MODE_ALTERNATE(1) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+
+    reset_pwm_for_tx();   // starts both timers running in OC/TX mode
+
+    for (int g = 0; g < 2; g++) {
+        s_dma_tx[g] = alloc_or_halt(STM32_IRQ_TIM4_PRIORITY, dshot_dma_tc_tx,
+                                     reinterpret_cast<void *>(static_cast<intptr_t>(g)),
+                                     "DMA alloc DShot TX");
+        s_dma_ic[g] = alloc_or_halt(STM32_IRQ_TIM4_PRIORITY, dshot_dma_tc_ic,
+                                     reinterpret_cast<void *>(static_cast<intptr_t>(g)),
+                                     "DMA alloc DShot IC");
+    }
+
+    /* Drive a continuous zero-throttle DShot stream from boot (s_tx_buf is
+     * all-zero from static init at this point) rather than leaving the line
+     * idle — matches the Cube boards' TIM4 lane, which does the same. */
+    arm_tx_dma();
+
+    nvicEnableVector(TIM2_IRQn, STM32_IRQ_TIM2_PRIORITY);
+    nvicEnableVector(TIM4_IRQn, STM32_IRQ_TIM4_PRIORITY);
+}
+
+void dshot_write(const uint16_t throttle[4])
+{
+    build_tx_buf(throttle);
+
+    /* Abort any in-flight IC, full IC->OC reset (matches ArduPilot
+     * bdshot_reset_pwm), then re-arm TX on both groups. */
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        G.tim->CR1 &= ~TIM_CR1_CEN;
+        G.tim->DIER = 0U;
+        G.tim->SR   = 0U;
+        dmaStreamDisable(s_dma_tx[g]);
+        dmaStreamDisable(s_dma_ic[g]);
+        s_phase[g] = DshotPhase::IDLE;
+    }
+
+    reset_pwm_for_tx();
+    arm_tx_dma();
+}
+
+void dshot_get_telemetry(ESCTelemetry out[4])
+{
+    chSysLock();
+    memcpy(out, s_telem, 4 * sizeof(ESCTelemetry));
+    chSysUnlock();
+}
+
+void dshot_get_diag(DShotDiag *out)
+{
+    chSysLock();
+    // dma_tc/cc_isr are per-timer (TIM4=group0, TIM2=group1) — a natural
+    // fit for DShotDiag's [2]-sized fields now that this board also uses
+    // exactly 2 physical DShot timers, same as the Cube boards branch.
+    out->dma_tc[0] = s_dma_tc_count[0];
+    out->dma_tc[1] = s_dma_tc_count[1];
+    out->cc_isr[0] = s_ic_done_count[0];
+    out->cc_isr[1] = s_ic_done_count[1];
+    for (int c = 0; c < 4; c++) {
+        out->edge_cnt[c] = s_last_edge_cnt[c];
+        for (int k = 0; k < 5; k++)
+            out->edges[c][k] = s_last_edges[c][k];
+    }
+    chSysUnlock();
+}
+
+#else // Cube boards (BPRL_BOARD_CUBEBLUE or BPRL_BOARD_CUBEORANGEPLUS)
 
 /*
  * DShot600 bidirectional — single-stream burst DMA TX + dedicated IC, matching ArduPilot.
@@ -62,12 +607,6 @@
  *   M2 FL (PD13):  400 Hz  (TIM4, every frame)
  */
 
-/* ── DShot600 timing (200 MHz timer clock, PSC = 0) ─────────────────────── */
-static constexpr uint32_t DS_ARR         = 333U;
-static constexpr uint32_t DS_T0H         = 125U;
-static constexpr uint32_t DS_T1H         = 250U;
-static constexpr uint32_t GCR_BIT_TICKS  = (DS_ARR + 1U) * 4U / 5U; // 267
-
 /* ── DMAMUX1 request IDs (stm32_dmamux.h, STM32H7xx) ────────────────────── */
 static constexpr uint32_t DMAMUX_TIM1_CH2 = 12U;
 static constexpr uint32_t DMAMUX_TIM1_CH3 = 13U;
@@ -79,18 +618,6 @@ static constexpr uint32_t DMAMUX_TIM4_UP  = 32U;
 static constexpr uint32_t DBA_CCR1 = 13U;  // 0x34/4
 static constexpr uint32_t DBA_CCR2 = 14U;  // 0x38/4
 static constexpr uint32_t DBA_CCR3 = 15U;  // 0x3C/4
-
-/* ── GCR decode table ────────────────────────────────────────────────────── */
-static constexpr uint8_t kGcrDecode[32] = {
-    0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0xFF, 0xFF, 0xFF,
-    0xFF, 0x09, 0x0A, 0x0B,
-    0xFF, 0x0D, 0x0E, 0x0F,
-    0xFF, 0xFF, 0x02, 0x03,
-    0xFF, 0x05, 0x06, 0x07,
-    0xFF, 0x00, 0x08, 0x01,
-    0xFF, 0x04, 0x0C, 0xFF,
-};
 
 /* ── DMA TX buffers (.nocache — bypasses D-cache on STM32H743) ───────────── */
 /* Interleaved stride-4: [CCR1, CCR2, CCR3, CCR4_dummy] × 19 rows = 76 words.
@@ -108,7 +635,6 @@ static uint32_t s_ic_buf_tim1[22] __attribute__((aligned(32), section(".nocache"
 static uint32_t s_ic_buf_tim4[22] __attribute__((aligned(32), section(".nocache")));
 
 /* ── Phase state machine ─────────────────────────────────────────────────── */
-enum class DshotPhase : uint8_t { IDLE, TX, IC };
 static volatile DshotPhase s_phase_tim1 = DshotPhase::IDLE;
 static volatile DshotPhase s_phase_tim4 = DshotPhase::IDLE;
 
@@ -130,11 +656,8 @@ static constexpr uint32_t kCC2S_TI1 = (2U << 8);  // 0b10 = CH1's pin (cross)
 static constexpr uint32_t kIC2F     = (2U << 12); // IC2F = 4-sample noise filter
 
 /* ── Telemetry & diagnostics ─────────────────────────────────────────────── */
-static ESCTelemetry      s_telem[4]           = {};
 static volatile uint32_t s_dma_tc_count[2]   = {};  // TX TC per timer
 static volatile uint32_t s_ic_done_count[2]  = {};  // IC complete per timer
-static uint8_t  s_last_edge_cnt[4]           = {};
-static uint32_t s_last_edges[4][5]           = {};
 
 /* ── DMA stream handles ──────────────────────────────────────────────────── */
 static const stm32_dma_stream_t *s_dma_tx_tim1  = nullptr;  // TIM1 TX burst → DMAR
@@ -142,14 +665,12 @@ static const stm32_dma_stream_t *s_dma_ic_tim1  = nullptr;  // TIM1 IC capture
 static const stm32_dma_stream_t *s_dma_tim4     = nullptr;  // TIM4 TX + IC
 
 /* ── Forward declarations ────────────────────────────────────────────────── */
-static uint16_t make_frame(uint16_t thr);
 static void     build_tx_buf(const uint16_t throttle[4]);
 static void     reset_pwm_for_tx(void);
 static void     start_ic_tim1(void);
 static void     start_ic_tim4(void);
 static void     finish_ic_tim1(uint8_t n_edges);
 static void     finish_ic_tim4(uint8_t n_edges);
-static bool     decode_gcr(const uint32_t *buf, uint8_t n_edges, uint32_t *erpm_out);
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * DMA TC callbacks (priority 7 — fires before any OS tick can delay it)
@@ -246,14 +767,6 @@ OSAL_IRQ_HANDLER(STM32_TIM4_HANDLER)
     OSAL_IRQ_EPILOGUE();
 }
 
-/* ── make_frame ──────────────────────────────────────────────────────────── */
-static uint16_t make_frame(uint16_t thr)
-{
-    uint16_t val = (uint16_t)(thr << 1);                        // telem bit = 0
-    uint16_t crc = (~(val ^ (val >> 4) ^ (val >> 8))) & 0x0FU; // inverted → bidir
-    return (uint16_t)((val << 4) | crc);
-}
-
 /* ── build_tx_buf ────────────────────────────────────────────────────────── */
 static void build_tx_buf(const uint16_t throttle[4])
 {
@@ -327,7 +840,8 @@ static void reset_pwm_for_tx(void)
     TIM4->SR    = 0U;
     TIM4->DIER  = TIM_DIER_UDE;
     TIM4->DCR   = (0U << TIM_DCR_DBL_Pos) | (DBA_CCR2 << TIM_DCR_DBA_Pos);
-    TIM4->CNT   = DS_ARR / 2U;   // half-period offset → interleaves DMA bursts
+    /* Phase offset: TIM4 UEV fires ~0.84µs before TIM1 (interleaves DMA bursts). */
+    TIM4->CNT   = DS_ARR / 2U;
     TIM4->SR    = 0U;
     TIM4->CR1   = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
 }
@@ -459,73 +973,6 @@ static void finish_ic_tim4(uint8_t n_edges)
     } else {
         s_telem[2].valid = false;
     }
-}
-
-/* ── decode_gcr ──────────────────────────────────────────────────────────── */
-/*
- * Decode 21-bit GCR from CCR timestamps captured by DMA.
- * Matches ArduPilot/BetaFlight bdshot_decode_telemetry_packet exactly.
- *
- * GCR encoding: a run of n consecutive identical bits is represented as a
- * '1' at the MSB followed by (n-1) '0's.  This is the transition-marking
- * convention — it is level-independent (no need to track HIGH vs LOW).
- *   n=1 → 0b1         n=2 → 0b10        n=3 → 0b100
- * Building the 21-bit word: for each inter-edge interval of n bit-widths:
- *   bits = (bits << n) | (1 << (n-1))
- *
- * CRC: the ESC response uses the INVERTED nibble sum (same as the bidir TX
- * frame from the FC).  The 4 nibbles of the decoded 20-bit frame satisfy
- *   n0 ^ n1 ^ n2 ^ n3 == 0xF
- * which is equivalent to (frame ^ frame>>4 ^ frame>>8 ^ frame>>12) & 0xF == 0xF.
- */
-static bool decode_gcr(const uint32_t *buf, uint8_t n_edges, uint32_t *erpm_out)
-{
-    if (n_edges < 2U) return false;
-
-    uint32_t bits        = 0U;
-    uint32_t bits_filled = 0U;
-
-    for (uint8_t i = 0U; i < n_edges && bits_filled < 21U; i++) {
-        uint32_t n;
-        if (i + 1U < n_edges) {
-            uint32_t diff = buf[i + 1U] - buf[i];
-            n = (diff + GCR_BIT_TICKS / 2U) / GCR_BIT_TICKS;
-            if (n == 0U) n = 1U;
-        } else {
-            n = 21U - bits_filled;
-        }
-        if (n > 21U - bits_filled) n = 21U - bits_filled;
-
-        /* Transition-marking: '1' at MSB of the run, '0' below it. */
-        bits = (bits << n) | (1U << (n - 1U));
-        bits_filled += n;
-    }
-
-    if (bits_filled < 21U) return false;
-
-    /* Decode 4 × 5-bit GCR codes → 4-bit nibbles → 20-bit value. */
-    uint32_t gcr20 = bits & 0xFFFFFU;
-    uint16_t frame = 0U;
-    for (int g = 3; g >= 0; g--) {
-        uint8_t code   = (uint8_t)((gcr20 >> (g * 5U)) & 0x1FU);
-        uint8_t nibble = kGcrDecode[code];
-        if (nibble == 0xFF) return false;
-        frame = (uint16_t)((frame << 4U) | nibble);
-    }
-
-    /* Inverted nibble CRC: the XOR of all four nibbles must equal 0xF. */
-    uint16_t csum = frame ^ (frame >> 4U) ^ (frame >> 8U) ^ (frame >> 12U);
-    if ((csum & 0x0FU) != 0x0FU) return false;
-
-    /* eRPM: [15:12]=nibble0 is CRC, [11:9]=3-bit exponent, [8:0]=9-bit mantissa.
-     * The encoded value is the electrical revolution PERIOD in microseconds.
-     * eRPM = 60,000,000 / period_us  (same as ArduPilot's conversion). */
-    uint16_t val      = (frame >> 4U) & 0xFFFU;
-    uint16_t exponent = (val >> 9U) & 0x7U;
-    uint16_t mantissa =  val         & 0x1FFU;
-    uint32_t period   = (uint32_t)mantissa << exponent;
-    *erpm_out = (period > 0U) ? (60000000U / period) : 0U;
-    return true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -752,3 +1199,5 @@ void dshot_get_diag(DShotDiag *out)
     }
     chSysUnlock();
 }
+
+#endif

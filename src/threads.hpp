@@ -17,14 +17,14 @@ struct CANIMURaw {
     // Quaternion NED→Body from IMX5 CID_INS_QUATN2B [W,X,Y,Z], Hamilton convention.
     // Replaces the previous Euler-angle fields (roll, pitch, yaw).
     float q0, q1, q2, q3;   // unit quaternion components (decoded from int16/10000)
-    bool  has_new_quat;      // set by CAN callback; cleared after StateEstThread consumes it
+    bool  has_new_quat;      // set by CAN callback; cleared after ControlThread consumes it
     uint32_t quat_timestamp_us;  // chVTGetSystemTimeX()-derived us at which has_new_quat was set
 
     // Body-frame angular rates from IMX5 (100 Hz, CAN IDs 0x02–0x04)
     float p, q, r;           // rad/s
     // Body-frame specific force from IMX5 (100 Hz, same CAN frames as rates)
     float ax, ay, az;        // m/s²
-    bool  has_new_rates;     // set by CAN callback; cleared after StateEstThread consumes it
+    bool  has_new_rates;     // set by CAN callback; cleared after ControlThread consumes it
     uint32_t rates_timestamp_us; // chVTGetSystemTimeX()-derived us at which has_new_rates was set
 
     bool  valid;             // true while IMX5 frames are arriving
@@ -34,18 +34,18 @@ struct MocapRaw {
     float x, y, z;    // NED position (m)
     float vx, vy, vz; // NED velocity (m/s)
     float yaw;        // NED heading (rad) — absolute, mocap-frame-referenced
-    bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
-    bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by StateEstThread
-    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by StateEstThread
+    bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
+    bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by ControlThread
+    bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
     bool  valid;       // mocap link connected and receiving
 };
 
 struct BaroRaw {
     float pressure_pa;    // Pa, compensated
     float temperature_c;  // °C, compensated
-    float alt_m;          // m, positive UP, relative to MS5611::init() boot-time reference
-    bool  has_new;        // fresh sample this tick — set by SPIThread, cleared by StateEstThread
-    bool  valid;          // true once MS5611 init + warm-up zero-reference capture completed
+    float alt_m;          // m, positive UP, relative to a boot-time reference (MS5611 warm-up on the Cube boards, DPS310 warm-up on Orqa)
+    bool  has_new;        // fresh sample this tick — set by SPIThread (Cube boards) or I2CThread (Orqa), cleared by ControlThread
+    bool  valid;          // true once the barometer's init + warm-up zero-reference capture completed
 };
 
 /* ── Shared flight state — access only under respective mutex ─────────────
@@ -53,18 +53,19 @@ struct BaroRaw {
 extern mutex_t state_mtx;
 extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
-extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, indi switch)
+extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, controller-select switch)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
-extern float   g_indi_diag[8];       // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
+extern float   g_indi_diag[10];      // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 extern float   g_jerk_diag[4];       // [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
-extern bool    g_use_jerk;           // attitude controller switch from radio (false=PID, true=PIDJ; positions 1-2=PID, 3=PIDJ). AttitudeINDI is always shadow-run, never selected by this switch.
+extern int     g_radio_switch_pos;   // raw controller-select switch position (0/1/2, low/mid/high) — RadioThread writes; ControlThread reads to drive FlightStateMachine::set_active_controller()
+extern int     g_active_controller;  // FlightStateMachine's resolved active controller-list index (0=PID default) — ControlThread publishes after update(), for $TEL/logging
 
 extern mutex_t imu_mtx;
-extern IMURaw  g_imu[3];     // [0]=ICM-20948 primary, [1]=ext, [2]=ICM-20602
+extern IMURaw  g_imu[3];     // [0]=primary, [1]=ext, [2]=backup — chip set is board-conditional (ICM-45686 x3 on Drone1/CubeOrangePlus, ICM-20948 x2 + ICM-20602 on Drone2/CubeBlueH7; see src/coms/SPI.hpp)
 
 extern mutex_t   can_imu_mtx;
 extern CANIMURaw g_can_imu;
@@ -97,12 +98,11 @@ extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
  * All rates live in main.cpp.  Change them there to retune loop timing.    */
 
 struct LogRates {
-    sysinterval_t period;  // 50 Hz → TIME_MS2I(20)
+    sysinterval_t period;  // derived from the drone's DroneConfig::logging.log_rate_hz (default 50 Hz) — see main.cpp
 };
 
 struct ThreadRates {
     sysinterval_t spi;      // SPIThread
-    sysinterval_t est;      // StateEstThread
     sysinterval_t i2c;      // I2CThread
     sysinterval_t control;  // ControlThread
     sysinterval_t radio;    // RadioThread

@@ -3,11 +3,12 @@
 #include <cmath>
 #include <algorithm>
 
-AltControl::AltControl()
+AltControl::AltControl(const AltControlGains &g)
     // TODO: retune now that this loop commands throttle directly instead of
     // an intermediate accel target — gains below are a conservative starting
     // point, not a validated tune.
-    : _climb_rate_pid(0.15f, 0.05f, 0.0f, 0.3f, /*filt_target_hz=*/0.0f, /*filt_error_hz=*/5.0f, /*filt_d_hz=*/20.0f)
+    : _climb_rate_pid(g.climb_rate.kp, g.climb_rate.ki, g.climb_rate.kd, g.climb_rate.imax,
+                       g.climb_rate.filt_target_hz, g.climb_rate.filt_error_hz, g.climb_rate.filt_d_hz)
 {}
 
 float AltControl::compute_throttle(float roll, float pitch, float thr_in) const

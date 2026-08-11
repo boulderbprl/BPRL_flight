@@ -1,7 +1,7 @@
 /*
  * threads.cpp — BPRL thread function definitions.
  *
- * All eight flight-controller threads live here.  Each thread receives its
+ * All seven flight-controller threads live here.  Each thread receives its
  * update period through the arg pointer (a const sysinterval_t *), set in
  * the rate sequencer block in main.cpp.
  *
@@ -14,6 +14,9 @@
 #include "src/coms/SPI.hpp"
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
+#if defined(BPRL_BOARD_ORQA)
+#include "src/coms/Baro/DPS310.hpp"
+#endif
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
 #include "src/coms/Radio.hpp"
@@ -28,6 +31,7 @@
 #include "src/coms/MAVLink.hpp"
 #include "src/math/math.hpp"
 #include "src/diagnostics/ThreadTiming.hpp"
+#include "configs/DroneConfig.hpp"
 #include "chprintf.h"
 #include "memstreams.h"
 #include "ff.h"
@@ -43,12 +47,14 @@ float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaterni
 float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
-float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
 float   g_jerk_diag[4]       = {};   // [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
+float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 bool    g_use_jerk           = false; // attitude controller switch from radio (false=PID, true=PIDJ; positions 1-2=PID, 3=PIDJ). AttitudeINDI is always shadow-run, never selected by this switch.
+int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
+int     g_active_controller  = 0;    // FlightStateMachine's resolved active controller-list index (0=PID default)
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -90,18 +96,20 @@ int32_t g_motor_test_cmd[4] = {};
 static MUTEX_DECL(s_usb_write_mtx);
 
 /* ── Controller instances (ControlThread only) ───────────────────────────── */
-static FlightStateMachine flight_sm;
-static MotorMixer         mixer;
+static FlightStateMachine flight_sm(kDroneConfig);
+static MotorMixer         mixer(kDroneConfig.mixer);
 
-/* ── State estimator (StateEstThread only) ───────────────────────────────── */
+/* ── State estimator (ControlThread only) ────────────────────────────────── */
 static StateManager state_mgr;
 
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-static THD_WORKING_AREA(waStateEst, 6144);  // enlarged for StateManager method frames
 static THD_WORKING_AREA(waI2C,      1024);
-static THD_WORKING_AREA(waControl,  2048);
+static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
+                                              // (former waStateEst was 6144) plus three shadow attitude controllers
+                                              // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
+                                              // off — a boot-time reset loop (~32s IWDG period) pointed at overflow here
 static THD_WORKING_AREA(waRadio,    1024);
 static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
@@ -115,11 +123,11 @@ static THD_WORKING_AREA(waDebug,    2048);
 static uint8_t __attribute__((section(".nocache"))) s_usb_dl_buf[2048];
 
 #ifdef BPRL_DEBUG
-/* CAN INS message rate counters — incremented by StateEstThread, read by DebugThread */
+/* CAN INS message rate counters — incremented by ControlThread, read by DebugThread */
 static volatile uint32_t s_can_quat_cnt = 0;
 static volatile uint32_t s_can_rate_cnt = 0;
 
-/* Per-lane EKF state (radians) — written by StateEstThread under state_mtx,
+/* Per-lane EKF state (radians) — written by ControlThread under state_mtx,
  * read by DebugThread under the same mutex to emit $EKFL. */
 static float s_lane_roll[3] = {};
 static float s_lane_pitch[3] = {};
@@ -164,8 +172,8 @@ static THD_FUNCTION(SPIThread, arg)
         // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
         // sign or axis mapping will be wrong on this board's lanes — verify
         // on the bench before flight (e.g. tilt nose-down, confirm pitch
-        // angle sign in $TEL/$IMU telemetry; see tools/bprl.py) and replace
-        // this block with the correct ROTATION_* mapping once known.
+        // angle sign in $TEL/$IMU telemetry; see tools/telemetry.py) and
+        // replace this block with the correct ROTATION_* mapping once known.
         if (imu1.read(a, g)) {
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
@@ -191,6 +199,38 @@ static THD_FUNCTION(SPIThread, arg)
                 g_imu[2].gyro[k]  = g[k] - g_cal.gyro_bias[2][k];
             }
             g_imu[2].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+#elif defined(BPRL_BOARD_ORQA)
+        // Only two physical IMUs on this board — g_imu[2] is never written
+        // and stays valid=false; StateManager already treats an invalid
+        // lane as absent. Rotations are transcribed from ArduPilot's
+        // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
+        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and are
+        // bench-confirmed as of 2026-08-10 (tilt nose-down, correct pitch
+        // sign in $TEL/$IMU telemetry) — not yet flight-tested.
+        if (imu1.read(a, g)) {
+            // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
+            const float ra[3] = { -a[1], -a[0], -a[2] };
+            const float rg[3] = { -g[1], -g[0], -g[2] };
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
+            }
+            g_imu[0].valid = true;
+            chMtxUnlock(&imu_mtx);
+        }
+        if (imu2.read(a, g)) {
+            // ROTATION_PITCH_180 → NED z-down: [-x, y, -z]
+            const float ra[3] = { -a[0], a[1], -a[2] };
+            const float rg[3] = { -g[0], g[1], -g[2] };
+            chMtxLock(&imu_mtx);
+            for (int k = 0; k < 3; k++) {
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
+            }
+            g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
 #else
@@ -233,16 +273,22 @@ static THD_FUNCTION(SPIThread, arg)
         }
 #endif
 
-        float baro_p, baro_t, baro_alt;
-        if (baro1.read(baro_p, baro_t, baro_alt)) {
-            chMtxLock(&baro_mtx);
-            g_baro.pressure_pa   = baro_p;
-            g_baro.temperature_c = baro_t;
-            g_baro.alt_m         = baro_alt;
-            g_baro.has_new       = true;
-            g_baro.valid         = true;
-            chMtxUnlock(&baro_mtx);
+#if !defined(BPRL_BOARD_ORQA)
+        // BPRL_BOARD_ORQA's DPS310 is I2C, not SPI — polled from I2CThread
+        // instead (see src/coms/Baro/DPS310.hpp), so there is no baro1 here.
+        if (kDroneConfig.sensors.has_baro) {
+            float baro_p, baro_t, baro_alt;
+            if (baro1.read(baro_p, baro_t, baro_alt)) {
+                chMtxLock(&baro_mtx);
+                g_baro.pressure_pa   = baro_p;
+                g_baro.temperature_c = baro_t;
+                g_baro.alt_m         = baro_alt;
+                g_baro.has_new       = true;
+                g_baro.valid         = true;
+                chMtxUnlock(&baro_mtx);
+            }
         }
+#endif
 
         TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -281,13 +327,21 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 500 Hz  NORMALPRIO+20
+ * I2CThread — 200 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
 {
     chRegSetThreadName("i2c");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
+
+#if defined(BPRL_BOARD_ORQA)
+    // Blocking reset + coefficient read (~40 ms) — done here, once, before
+    // the polling loop starts, mirroring how SPIThread calls spi_drv_init()
+    // itself rather than main() (see src/coms/SPI.hpp).
+    dps310_init();
+#endif
+
     const int tid = TIMING_REGISTER("i2c", period);
 
     systime_t next = chVTGetSystemTime();
@@ -301,12 +355,21 @@ static THD_FUNCTION(I2CThread, arg)
 
 
 /* ══════════════════════════════════════════════════════════════════════════
- * StateEstThread — 625 Hz  NORMALPRIO+25
- * Runs the 3-lane EKF, fuses g_imu[] and g_can_imu, writes g_state[].
+ * ControlThread — 400 Hz  NORMALPRIO+22
+ * Full 3-lane EKF (predict + covariance + fusion, no decimation) followed by
+ * FlightStateMachine → MotorMixer → motor output, all in one tick.
+ *
+ * Formerly split across StateEstThread (625 Hz) + ControlThread (400 Hz),
+ * two independent free-running timers with no integer-ratio relationship
+ * (625:400 reduces to 25:16) — a structural source of jitter feeding the
+ * control loop (see code_rework.md Section 1.3/2). Merged so the estimator
+ * output the mixer consumes is always this exact tick's fresh value, never a
+ * value handed across a cross-thread boundary.
  * ══════════════════════════════════════════════════════════════════════════ */
-static THD_FUNCTION(StateEstThread, arg)
+
+static THD_FUNCTION(ControlThread, arg)
 {
-    chRegSetThreadName("est");
+    chRegSetThreadName("ctrl");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
     const float dt_nominal = static_cast<float>(period)
                            / static_cast<float>(CH_CFG_ST_FREQUENCY);
@@ -315,14 +378,20 @@ static THD_FUNCTION(StateEstThread, arg)
 
     // Ticks since last IMX5 quaternion — clears valid after CAN_TIMEOUT_TICKS.
     uint32_t can_stale_ticks = 0;
-    static constexpr uint32_t CAN_TIMEOUT_TICKS = 625;  // 1 s at 625 Hz
+    static constexpr uint32_t CAN_TIMEOUT_TICKS = 400;  // 1 s at 400 Hz
 
-    const int tid = TIMING_REGISTER("est", period);
+    const int tid = TIMING_REGISTER("ctrl", period);
 
     systime_t next = chVTGetSystemTime();
     uint32_t last_tick_us = TIME_I2US(chVTGetSystemTimeX());
     while (true) {
         TIMING_TICK_BEGIN(tid);
+
+        /* ── State estimation: runs every tick, unconditionally (even during
+         * a motor-test bypass below) so g_state/g_euler telemetry keeps
+         * updating on the bench exactly as it did when this was a separate
+         * free-running thread. ──────────────────────────────────────────── */
+
         // Measured elapsed time since the previous tick, not a fixed nominal
         // dt — keeps EKF integration correct under scheduler jitter (same
         // approach PID::update() already uses). Clamped to +/-2x nominal so
@@ -369,52 +438,60 @@ static THD_FUNCTION(StateEstThread, arg)
         g_baro.has_new = false;
         chMtxUnlock(&baro_mtx);
 
-        uint32_t rpm_snap[4];
+        // RPM telemetry — read once here (was previously duplicated: computed
+        // in ControlThread, published to g_rpm_gated, then re-read by
+        // StateEstThread next tick). Used directly below by both the EKF's
+        // vibration-notch tracker and the INDI unmixer; still published to
+        // g_rpm_gated under esc_mtx for DebugThread/LogThread readers.
+        //
+        // sm_telem[]/rpm_lane[] are physical DShot lane order (each gate
+        // tracks its own hardware channel); rpm[] below is remapped to
+        // logical [FR,RL,FL,RR] via motor_map — Unmixer's geometry, $TEL,
+        // and the SD log all assume that logical order, matching
+        // MotorMixer's output convention (see MotorMixerConfig).
+        ESCTelemetry sm_telem[4];
+        dshot_get_telemetry(sm_telem);
+        uint32_t rpm_lane[4];
+        for (int lane = 0; lane < 4; lane++) {
+            const uint32_t raw = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
+            rpm_lane[lane] = rpm_gate(s_rpm_gate[lane], raw);
+        }
+        uint32_t rpm[4];
+        for (int i = 0; i < 4; i++) rpm[i] = rpm_lane[kDroneConfig.mixer.motor_map[i]];
         chMtxLock(&esc_mtx);
-        memcpy(rpm_snap, g_rpm_gated, sizeof(rpm_snap));
+        memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
         chMtxUnlock(&esc_mtx);
 
         // Run all EKF lanes and derive outputs.
-        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm_snap, now_us);
+        state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
 #endif
 
-        chMtxLock(&state_mtx);
-        state_mgr.get_state(g_state);          // copies full 19-element state
-        g_euler[0] = state_mgr.roll();         // Euler angles derived from quaternion
-        g_euler[1] = state_mgr.pitch();
-        g_euler[2] = state_mgr.yaw();
+        // Fresh state, read straight into locals — no mutex needed here.
+        // This is the former estimator→control cross-thread handoff; now
+        // producer and consumer are the same tick of the same thread.
+        float ctrl_full[StateIdx::N];
+        float euler[3];
+        state_mgr.get_state(ctrl_full);   // copies full 19-element state
+        euler[0] = state_mgr.roll();      // Euler angles derived from quaternion
+        euler[1] = state_mgr.pitch();
+        euler[2] = state_mgr.yaw();
 #ifdef BPRL_DEBUG
+        // Per-lane snapshot for $EKFL — computed here (cheap accessors into
+        // state_mgr, this thread's own data), published into the s_lane_*
+        // globals under state_mtx at each publish site below since
+        // DebugThread reads them under that same lock.
+        float dbg_lane_roll[3], dbg_lane_pitch[3], dbg_lane_yaw[3];
+        float dbg_lane_p[3],    dbg_lane_q[3],     dbg_lane_r[3];
         for (int li = 0; li < StateManager::NUM_LANES; ++li) {
-            state_mgr.get_lane_euler(li, s_lane_roll[li], s_lane_pitch[li], s_lane_yaw[li]);
-            state_mgr.get_lane_pqr  (li, s_lane_p[li],   s_lane_q[li],     s_lane_r[li]);
+            state_mgr.get_lane_euler(li, dbg_lane_roll[li], dbg_lane_pitch[li], dbg_lane_yaw[li]);
+            state_mgr.get_lane_pqr  (li, dbg_lane_p[li],    dbg_lane_q[li],     dbg_lane_r[li]);
         }
-        s_primary_lane = state_mgr.primary_lane();
+        const int dbg_primary_lane = state_mgr.primary_lane();
 #endif
-        chMtxUnlock(&state_mtx);
 
-        TIMING_TICK_END(tid);
-        next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
-    }
-}
-
-
-/* ══════════════════════════════════════════════════════════════════════════
- * ControlThread — 400 Hz  NORMALPRIO+22
- * Cascade PID → MotorMixer → motor output.
- * ══════════════════════════════════════════════════════════════════════════ */
-
-static THD_FUNCTION(ControlThread, arg)
-{
-    chRegSetThreadName("ctrl");
-    const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
-    const int tid = TIMING_REGISTER("ctrl", period);
-
-    systime_t next = chVTGetSystemTime();
-    while (true) {
-        TIMING_TICK_BEGIN(tid);
         /* ── Motor test bypass: skip PID/mixer, drive ESCs directly ──────── */
         {
             bool    test_active;
@@ -427,7 +504,18 @@ static THD_FUNCTION(ControlThread, arg)
             if (test_active) {
                 motor_output_write(test_cmd);
                 chMtxLock(&state_mtx);
+                memcpy(g_state, ctrl_full, sizeof(g_state));
+                memcpy(g_euler, euler,     sizeof(g_euler));
                 memset(g_output, 0, sizeof(g_output));
+#ifdef BPRL_DEBUG
+                memcpy(s_lane_roll,  dbg_lane_roll,  sizeof(s_lane_roll));
+                memcpy(s_lane_pitch, dbg_lane_pitch, sizeof(s_lane_pitch));
+                memcpy(s_lane_yaw,   dbg_lane_yaw,   sizeof(s_lane_yaw));
+                memcpy(s_lane_p,     dbg_lane_p,     sizeof(s_lane_p));
+                memcpy(s_lane_q,     dbg_lane_q,     sizeof(s_lane_q));
+                memcpy(s_lane_r,     dbg_lane_r,     sizeof(s_lane_r));
+                s_primary_lane = dbg_primary_lane;
+#endif
                 chMtxUnlock(&state_mtx);
                 TIMING_TICK_END(tid);
                 next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
@@ -436,44 +524,22 @@ static THD_FUNCTION(ControlThread, arg)
         }
 
         /* ── Full cascade: EKF state → FlightStateMachine → mixer → DShot ─ */
-        float ctrl_full[StateIdx::N];
-        float euler[3];
         float input[InputIdx::N_INPUTS];
         bool  armed;
-        bool  use_jerk;
+        int   radio_switch_pos;
         chMtxLock(&state_mtx);
-        memcpy(ctrl_full, g_state,  sizeof(ctrl_full));
-        memcpy(euler,     g_euler,  sizeof(euler));
         memcpy(input,     g_input,  sizeof(input));
-        armed    = g_armed;
-        use_jerk = g_use_jerk;
+        armed            = g_armed;
+        radio_switch_pos = g_radio_switch_pos;
         chMtxUnlock(&state_mtx);
 
-        flight_sm.set_use_jerk(use_jerk);
-
-        ESCTelemetry sm_telem[4];
-        dshot_get_telemetry(sm_telem);
-        uint32_t rpm[4];
-        for (int i = 0; i < 4; i++) {
-            const uint32_t raw = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
-            rpm[i] = rpm_gate(s_rpm_gate[i], raw);
-        }
-        chMtxLock(&esc_mtx);
-        memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
-        chMtxUnlock(&esc_mtx);
-
-        // Strain-fit roll jerk estimate (AttitudePIDJerk shadow term, see JerkFit.hpp).
-        StrainRateRaw strain_snap;
-        chMtxLock(&strainRate_mtx);
-        strain_snap = g_strain_rate;
-        chMtxUnlock(&strainRate_mtx);
-        const float roll_jerk = estimate_jerk(strain_snap, ctrl_full[StateIdx::P]).roll_jerk;
+        flight_sm.set_active_controller(radio_switch_pos);
 
         float torque_cmds[3];
         float thrust;
         flight_sm.update(ctrl_full, euler, input, armed, rpm, roll_jerk, torque_cmds, thrust);
 
-        float indi_diag[8];
+        float indi_diag[10];
         flight_sm.get_indi_diag(indi_diag);
 
         float ctun_diag[12];
@@ -489,6 +555,8 @@ static THD_FUNCTION(ControlThread, arg)
         motor_output_write(motor_out);
 
         chMtxLock(&state_mtx);
+        memcpy(g_state, ctrl_full, sizeof(g_state));
+        memcpy(g_euler, euler,     sizeof(g_euler));
         g_ctrl[0] = torque_cmds[0];
         g_ctrl[1] = torque_cmds[1];
         g_ctrl[2] = torque_cmds[2];
@@ -497,7 +565,17 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
         memcpy(g_jerk_diag, jerk_diag, sizeof(g_jerk_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
-        g_flight_mode = (int)flight_sm.mode();
+        g_flight_mode       = (int)flight_sm.mode();
+        g_active_controller = flight_sm.active_index();
+#ifdef BPRL_DEBUG
+        memcpy(s_lane_roll,  dbg_lane_roll,  sizeof(s_lane_roll));
+        memcpy(s_lane_pitch, dbg_lane_pitch, sizeof(s_lane_pitch));
+        memcpy(s_lane_yaw,   dbg_lane_yaw,   sizeof(s_lane_yaw));
+        memcpy(s_lane_p,     dbg_lane_p,     sizeof(s_lane_p));
+        memcpy(s_lane_q,     dbg_lane_q,     sizeof(s_lane_q));
+        memcpy(s_lane_r,     dbg_lane_r,     sizeof(s_lane_r));
+        s_primary_lane = dbg_primary_lane;
+#endif
         chMtxUnlock(&state_mtx);
 
         TIMING_TICK_END(tid);
@@ -527,8 +605,8 @@ static THD_FUNCTION(RadioThread, arg)
         g_input[InputIdx::YAW_RATE]    = radio_yaw();
         g_input[InputIdx::FLIGHT_MODE] = radio_flight_mode();
         g_input[InputIdx::INDI_STK]    = radio_indi();
-        g_armed    = radio_armed();
-        g_use_jerk = radio_use_jerk();
+        g_armed           = radio_armed();
+        g_radio_switch_pos = radio_switch_position();
         chMtxUnlock(&state_mtx);
 
         TIMING_TICK_END(tid);
@@ -544,18 +622,10 @@ static THD_FUNCTION(HeartbeatThread, arg)
     (void)arg;
     chRegSetThreadName("heartbeat");
 
-    /* Simplified heartbeat: LED blink + DShot diagnostics over USB.
-     * IMU/EKF output removed since SPIThread and StateEstThread are not
-     * running in the motor-test configuration.
-     *
-     * Every 2 s:
-     *   $DSHOT,<ms>,tc=<tim1_dma_tc>/<tim4_dma_tc>,cc=<tim1_cc>/<tim4_cc>,
-     *           edges=<m0>/<m1>/<m2>/<m3>
-     *
-     * tc increasing → DShot DMA is firing → signal is being sent.
-     * edges > 0     → ESC is responding with GCR telemetry.
-     * tc = 0        → DShot is NOT running (check dshot_init failure).
-     */
+    /* LED-only heartbeat: 200 ms flash every 2 s, no USB output. DShot
+     * diagnostics are available on-demand instead, via the "DSHOT,diag" USB
+     * command (see usb_cmd_dispatch() below) rather than a periodic stream
+     * from this thread. */
     // NB: rates.heartbeat (passed as arg) is unused — this thread hardcodes
     // its own 200 ms tick below. Registered with that literal so the timing
     // report's period matches what actually runs, not the configured-but-
@@ -720,10 +790,14 @@ static void usb_cmd_dispatch(const char *line)
             return;
         }
         int32_t dv = pct * 10;  // 0–100% → 0–1000
+        // `motor` is logical [FR,RL,FL,RR] (matches tools/motor_test.py's
+        // MOTOR_LABELS) — translate to physical DShot lane via motor_map so
+        // "MT,0" always spins FR regardless of this airframe's ESC wiring.
+        const uint8_t lane = kDroneConfig.mixer.motor_map[motor];
         chMtxLock(&motor_test_mtx);
         g_motor_test_active = true;
         memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
-        g_motor_test_cmd[motor] = dv;
+        g_motor_test_cmd[lane] = dv;
         chMtxUnlock(&motor_test_mtx);
         chMtxLock(&s_usb_write_mtx);
         chprintf((BaseSequentialStream *)&SDU1, "MT,OK,%d,%d\r\n", motor, pct);
@@ -1018,7 +1092,7 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
  *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
- *        <use_jerk>             ← active attitude controller (0=PID, 1=PIDJ)
+ *        <active_controller>    ← resolved attitude-controller-list index (0=PID default, 1=INDI if enabled)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -1055,7 +1129,7 @@ static THD_FUNCTION(DebugThread, arg)
         int   primary_lane;
         bool  armed;
         int   flight_mode;
-        bool  use_jerk;
+        int   active_controller;
         chMtxLock(&state_mtx);
         roll     = g_euler[0];
         pitch    = g_euler[1];
@@ -1075,7 +1149,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         armed    = g_armed;
         flight_mode = g_flight_mode;
-        use_jerk = g_use_jerk;
+        active_controller = g_active_controller;
         for (int li = 0; li < 3; ++li) {
             lane_roll[li]  = s_lane_roll[li];
             lane_pitch[li] = s_lane_pitch[li];
@@ -1180,7 +1254,7 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode, (int)use_jerk);
+                flight_mode, active_controller);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1342,7 +1416,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[8], ctun_diag[12], jerk_diag[4];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1385,8 +1459,10 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(imu_snap_log, g_imu, sizeof(imu_snap_log));
         chMtxUnlock(&imu_mtx);
 
+        const LogEnableConfig &log_en = kDroneConfig.logging.enable;
+
         /* ── ATT — angular states ─────────────────────────────────────── */
-        {
+        if (log_en.att) {
             LogMsgATT msg = {};
             msg.time_us = t_us;
             msg.roll    = euler[0];
@@ -1402,7 +1478,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── LIN — linear states ──────────────────────────────────────── */
-        {
+        if (log_en.lin) {
             LogMsgLIN msg = {};
             msg.time_us = t_us;
             msg.x       = state[StateIdx::X];
@@ -1418,7 +1494,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── RCIN — RC stick inputs ───────────────────────────────────── */
-        {
+        if (log_en.rcin) {
             LogMsgRCIN msg = {};
             msg.time_us    = t_us;
             msg.roll_stk   = inp[InputIdx::ROLL_TGT];
@@ -1432,7 +1508,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── OUTP — controller outputs entering MotorMixer ───────────── */
-        {
+        if (log_en.outp) {
             LogMsgOUTP msg = {};
             msg.time_us  = t_us;
             msg.roll_tq  = ctrl[0];
@@ -1443,7 +1519,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── INDI — shadow INDI controller diagnostics (always logged) ── */
-        {
+        if (log_en.indi) {
             LogMsgINDI msg = {};
             msg.time_us     = t_us;
             msg.unmix_roll  = indi_diag[0];
@@ -1454,6 +1530,8 @@ static THD_FUNCTION(LogThread, arg)
             msg.cmd_pitch   = indi_diag[5];
             msg.accel_roll  = indi_diag[6];
             msg.accel_pitch = indi_diag[7];
+            msg.g1_roll     = indi_diag[8];
+            msg.g1_pitch    = indi_diag[9];
             logger.write(LOG_MSG_INDI, msg);
         }
 
@@ -1470,7 +1548,7 @@ static THD_FUNCTION(LogThread, arg)
 
 #if LOG_CTUN_ENABLED
         /* ── CTUN — TEMP pos-hold NE tuning diagnostics ───────────────── */
-        {
+        if (log_en.ctun) {
             LogMsgCTUN msg = {};
             msg.time_us   = t_us;
             msg.pos_n_tgt = ctun_diag[0];
@@ -1490,7 +1568,7 @@ static THD_FUNCTION(LogThread, arg)
 #endif
 
         /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
-        {
+        if (log_en.rpms) {
             LogMsgRPMS msg = {};
             msg.time_us = t_us;
             msg.rpm0 = (int32_t)rpm_log[0];
@@ -1501,7 +1579,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── STRN — strain rate sensor ────────────────────────────────── */
-        {
+        if (log_en.strn) {
             LogMsgSTRN msg = {};
             msg.time_us = t_us;
             msg.s0      = strain.val[0];
@@ -1528,7 +1606,9 @@ static THD_FUNCTION(LogThread, arg)
         /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */
         {
             static constexpr uint8_t ids[3] = { LOG_MSG_IMU1, LOG_MSG_IMU2, LOG_MSG_IMU3 };
+            const bool en[3] = { log_en.imu1, log_en.imu2, log_en.imu3 };
             for (uint8_t i = 0; i < 3; i++) {
+                if (!en[i]) continue;
                 LogMsgIMU msg = {};
                 msg.time_us = t_us;
                 msg.ax    = imu_snap_log[i].accel[0];
@@ -1543,7 +1623,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── BARO — barometric pressure/temperature/altitude ─────────── */
-        {
+        if (log_en.baro) {
             LogMsgBARO msg = {};
             msg.time_us     = t_us;
             msg.pressure_pa = baro_snap_log.pressure_pa;
@@ -1554,7 +1634,7 @@ static THD_FUNCTION(LogThread, arg)
         }
 
         /* ── MOCP — raw mocap position/velocity estimate, pre-EKF ─────── */
-        {
+        if (log_en.mocp) {
             LogMsgMOCP msg = {};
             msg.time_us = t_us;
             msg.x       = mocap_snap_log.x;
@@ -1588,9 +1668,8 @@ void threads_start(const ThreadRates &rates)
     // Priority ordering (highest first):
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
-    //   StateEstThread  +25  625 Hz EKF
-    //   ControlThread   +22  400 Hz PID/mixer/DShot
-    //   I2CThread       +20  500 Hz aux-sensor polling
+    //   ControlThread   +22  400 Hz EKF + PID/mixer/DShot
+    //   I2CThread       +20  200 Hz aux-sensor polling
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
     //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
@@ -1601,7 +1680,6 @@ void threads_start(const ThreadRates &rates)
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
     chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
-    chThdCreateStatic(waStateEst,  sizeof(waStateEst),  NORMALPRIO + 25, StateEstThread,  (void *)&rates.est);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);

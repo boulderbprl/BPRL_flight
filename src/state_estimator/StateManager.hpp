@@ -14,6 +14,32 @@
 #define STATEMGR_LP_PQRDOT_EXTRA_HZ 15.0f
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID
+// Window length (s) for the accel fed into EKF::update_gravity()'s
+// tilt/accel-bias fusion. Deliberately a windowed TIME AVERAGE — not an IIR
+// lowpass — matching ArduPilot's no-GPS attitude reference (AP_AHRS_DCM::
+// drift_correction / _ra_sum): accumulate accel*dt over this window, fuse
+// the window's mean once, then reset, instead of fusing every tick.
+//
+// This matters specifically for a symmetric push-then-pull transient (e.g.
+// sliding the vehicle forward then back on a bench): a true window average
+// of the raw signal lets the opposite-signed halves cancel toward zero net
+// specific force if both fall inside the window, whereas a recursive IIR
+// lowpass only smooths the transient's envelope — it does not cancel it,
+// so a 2nd-order Butterworth at a few Hz still passes most of a shove's
+// low-frequency energy straight through. A boxcar average is the correct
+// tool for rejecting exactly this class of disturbance.
+//
+// 0.2s exactly matches AP_AHRS_DCM::drift_correction()'s own no-GPS window
+// (`if (_ra_deltat < 0.2f) return;`, checked every AHRS loop so it fires
+// right at 0.2s, then _ra_sum/_ra_deltat reset) — confirmed by reading the
+// reset logic at the end of that function, not just the initial gate check.
+// With GPS, ArduPilot's window instead tracks the GPS fix rate (~0.1-0.2s
+// at 5-10Hz), so 0.2s is representative either way. Window length is a
+// smaller lever than it looks, though: DCM's real robustness against a
+// push/pull transient comes mostly from EKF::GRAV_MAX_CORR_RAD (mirroring
+// DCM's slow rate-limited _kp=0.2 correction) rather than from averaging
+// alone — see that constant's comment in EKF.hpp.
+#define STATEMGR_GRAVACC_AVG_S     0.2f
 // IMX5 angular rate blend weight: 0=pure onboard gyros, 1=pure IMX5
 #define STATEMGR_IMX5_RATE_WEIGHT  0.3f
 
@@ -30,7 +56,13 @@
 // STATEMGR_LP_PQ_HZ/STATEMGR_LP_R_HZ lowpass (matches ArduPilot's harmonic
 // notch: notch first, then LPF "to attenuate any notch induced noise").
 #define STATEMGR_NOTCH_BW_HZ          10.0f   // notch bandwidth (sets Q = center/bandwidth)
-#define STATEMGR_NOTCH_MAX_SLEW_FRAC   0.05f  // max fractional change in tracked center freq per update (matches ArduPilot's ±5%/update)
+// Max fractional change in tracked center freq per update() call. This is
+// per-*call*, not per-second, and update() now runs at 400 Hz (ControlThread)
+// instead of the former 625 Hz (StateEstThread) — rescaled by 625/400 so the
+// real-world slew rate (Hz/s) is unchanged: 0.05 * 625/400 = 0.078125.
+// (ArduPilot's own "±5%/update" figure is against its own update rate, not
+// directly comparable here.)
+#define STATEMGR_NOTCH_MAX_SLEW_FRAC   0.078125f
 
 // Lane-blend weight smoothing: the raw 1/(1e-4+innovation_norm) weight is
 // itself derived from a noisy instantaneous quantity, so low-pass it before
@@ -42,7 +74,7 @@
 /*
  * StateManager — multi-lane EKF orchestrator.
  *
- * Runs three EKF lanes (N=13 states each), one per onboard IMU. Each lane
+ * Runs three EKF lanes (N=16 states each), one per onboard IMU. Each lane
  * receives its own IMU's predict step; all lanes share the same IMX5
  * measurement updates.
  *
@@ -86,8 +118,48 @@ public:
     static constexpr int NUM_LANES = 3;
 
     // IMX5 / mocap / gravity measurement noise variances — tunable.
-    static constexpr float R_QUAT      = 1e-2f;   // IMX5 quaternion component variance
-    static constexpr float R_GRAVITY   = 0.5f;    // accel gravity-vector variance (m/s²)²
+    // IMX5 quaternion component variance — was 1e-2 (very tight/high-trust).
+    // Raised 5x to weaken CAN quaternion fusion strength, paired with the new
+    // QUAT_CHI2_GATE outlier gate added to EKF::update_quaternion() (that
+    // path previously had no chi-squared gate at all, unlike every other
+    // update_*() in EKF.cpp — a single corrupted CAN sample used to get
+    // fused with no outlier rejection).
+    static constexpr float R_QUAT      = 5e-2f;   // IMX5 quaternion component variance
+    // accel gravity-vector variance (m/s²)² while disarmed/unaided (e.g. on
+    // the bench) — was 0.5; doubled alongside the STATEMGR_GRAVACC_AVG_S
+    // windowed average above, closer to ArduPilot DCM's deliberately slow
+    // (AHRS_RP_P=0.2, rate-limited, not snap) tilt correction philosophy.
+    // Revisit if unaided-but-disarmed tilt/accel-bias convergence becomes
+    // noticeably sluggish on the bench log.
+    static constexpr float R_GRAVITY   = 1.0f;
+    // accel gravity-vector variance (m/s²)² while ARMED — unconditionally,
+    // regardless of mocap/CAN connection. 100x R_GRAVITY, so
+    // update_gravity()'s Kalman gain for tilt is pushed toward negligible
+    // whenever flying. This mirrors ArduPilot's EKF3, which has NO direct
+    // accel-as-gravity-vector fusion in ANY aiding mode:
+    //   - Unaided (verified by reading NavEKF3_core::SelectVelPosFusion()'s
+    //     PV_AidingMode==AID_NONE branch): fuses a synthetic "position hasn't
+    //     moved" pseudo-measurement, gated to the baro rate, with
+    //     EK3_NOAID_M_NSE defaulting to a 10 m (!) noise std — essentially
+    //     inert once actually flying. Attitude is carried almost entirely by
+    //     gyro integration plus the pre-arm gyro-bias calibration.
+    //   - Aided (GPS/optical-flow): tilt is corrected purely through
+    //     velocity/position fusion's cross-covariance leak into attitude —
+    //     still no direct gravity-vector measurement anywhere.
+    // Since neither EKF3 mode has an analog for update_gravity() at all, it
+    // stays weak across the board while armed; CAN's update_quaternion()
+    // (direct attitude fusion) and mocap's update_position()/update_ned_vel()
+    // (indirect, cross-covariance-mediated — see step 5 in StateManager.cpp,
+    // same mechanism as EKF3's aided case) are what carry aided-mode tilt
+    // correction instead, matching EKF3's real division of labor. This
+    // constant is the closest proportional analogy achievable within this
+    // EKF's existing gravity-vector-fusion structure (a genuine unit-for-unit
+    // match isn't possible — EKF3's synthetic measurement is position-space,
+    // this is direction-space) rather than literally gating update_gravity()
+    // off, so the existing chi-squared gate / rate-limit / windowing
+    // machinery still applies uniformly. See StateManager::update()'s
+    // `armed` parameter, used directly (unconditionally) in its step 1.5.
+    static constexpr float R_GRAVITY_FLIGHT_NOAID = 100.0f;
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
     static constexpr float R_MOCAP_VEL = 1e-4f;   // mocap NED velocity variance (m/s)²
     static constexpr float R_BARO_POS  = 0.5f;    // baro altitude variance (m²) — tune from bench log noise
@@ -96,7 +168,7 @@ public:
 
     void init();
 
-    // Call once per StateEstThread tick (625 Hz).
+    // Call once per ControlThread tick (400 Hz).
     // dt: loop period in seconds.
     // imu: snapshot of g_imu[3] (taken under imu_mtx before this call).
     // can_imu: snapshot of g_can_imu (taken under can_imu_mtx before this call).
@@ -107,9 +179,15 @@ public:
     // now_us: chVTGetSystemTimeX()-derived timestamp for this tick, used to age-gate
     // and forward-propagate the IMX5 CAN quaternion/rate measurements (see CANIMURaw's
     // *_timestamp_us fields) rather than fusing them as if they were current.
-    void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us);
+    // armed: g_armed snapshot. Selects R_GRAVITY vs R_GRAVITY_FLIGHT_NOAID for
+    // update_gravity() — unconditionally weakened whenever armed, regardless
+    // of mocap/CAN connection, since ArduPilot's EKF3 has no direct
+    // accel-as-gravity fusion in any aiding mode (see R_GRAVITY_FLIGHT_NOAID's
+    // comment). Disarmed is the bench case, where the stronger correction
+    // still applies.
+    void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us, bool armed);
 
-    // Full 19-element state output — maps 13-state EKF lanes onto StateIdx ordering
+    // Full 19-element state output — maps 16-state EKF lanes onto StateIdx ordering
     // and fills in the 6 derived quantities (uvw_dot, pqr_dot).
     void get_state(float out[StateIdx::N]) const;
 
@@ -118,7 +196,7 @@ public:
     float pitch()   const;
     float yaw()     const;
 
-    // Per-lane accessors — called by StateEstThread only (no mutex needed).
+    // Per-lane accessors — called by ControlThread only (no mutex needed).
     void get_lane_euler(int lane, float& roll, float& pitch, float& yaw) const;
     void get_lane_pqr  (int lane, float& p,    float& q,    float& r)    const;
     int  primary_lane  () const { return _primary; }
@@ -191,6 +269,16 @@ private:
 
     // Per-lane bias-corrected angular rates (updated each update() call)
     float _lane_p[NUM_LANES], _lane_q[NUM_LANES], _lane_r[NUM_LANES];
+
+    // Windowed accel accumulator feeding EKF::update_gravity() — see
+    // STATEMGR_GRAVACC_AVG_S above. _grav_accel_sum is Σ(accel*dt) per lane
+    // per axis since the last window boundary; _grav_accel_dt is that lane's
+    // own accumulated valid dt (tracked per-lane, not just once globally, so
+    // a lane that briefly drops out mid-window still gets a correct average
+    // over the time it actually had data, not a value diluted by zeros).
+    float _grav_accel_sum[NUM_LANES][3];
+    float _grav_accel_dt[NUM_LANES];
+    float _grav_window_dt;
 
     // Low-passed lane-blend weights (raw 1/innovation_norm smoothed at
     // STATEMGR_LP_BLENDW_HZ before renormalizing across lanes each tick)

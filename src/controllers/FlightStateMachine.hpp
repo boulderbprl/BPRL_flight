@@ -4,9 +4,12 @@
 #include "Attitude_PID.hpp"
 #include "Attitude_PID_Jerk.hpp"
 #include "Attitude_INDI.hpp"
+#include "Attitude_PID_PI.hpp"
+#include "AttitudeController.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
 #include "Unmixer.hpp"
+#include "configs/DroneConfig.hpp"
 
 enum class FlightMode  { STABILIZE, ALT_HOLD, POS_HOLD };
 enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
@@ -46,6 +49,13 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *   true  → AttitudePIDJerk (same cascade, roll axis gets a PI-on-jerk damping term)
  * AttitudeINDI is always shadow-only now — this switch never selects it;
  * it just keeps logging (LOG_MSG_INDI) for comparison.
+ * Every controller in the drone's config list runs every tick (shadow mode —
+ * see code_rework.md Section 3.4), so a controller not currently selected
+ * stays live and its output is always directly comparable to whichever one
+ * actually flew (see get_indi_diag() for INDI's shadow diagnostics
+ * specifically). Only the controller at _active_index drives out_cmds.
+ * PID is always list index 0 and is the default; a drone's config
+ * (DroneConfig::controllers) decides whether INDI is in the list at all.
  *
  * _use_jerk is set every tick by ControlThread from the radio's attitude-
  * controller switch (channel 7, see radio_use_jerk()) via set_use_jerk() —
@@ -56,12 +66,18 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * (Attitude_PID_Jerk.hpp) are first-cut small values, not yet characterised
  * against real jerk magnitude/authority — watch LOG_MSG_PIDJ vs OUTP closely
  * on early tests.
+ * _active_index is set every tick by ControlThread from the radio's
+ * controller-select switch (channel 7) via set_active_controller() — it is
+ * not a flight-mode-linked choice, so the pilot can flip attitude
+ * controllers in any of STABILIZE/ALT_HOLD/POS_HOLD without a mode change.
+ * Channel 7 is a 3-position switch; see set_active_controller()'s mapping
+ * from raw switch position to list index.
  *
  * Output (out_cmds[3], thrust_out) feeds the unchanged MotorMixer.
  */
 class FlightStateMachine {
 public:
-    FlightStateMachine();
+    explicit FlightStateMachine(const DroneConfig &cfg);
 
     // state_full[19]: full EKF state vector (StateIdx::*)
     // euler[3]:       [roll, pitch, yaw] rad
@@ -77,6 +93,45 @@ public:
                 float out_cmds[3], float &thrust_out);
 
     void set_use_jerk(bool use_jerk) { _use_jerk = use_jerk; }
+    // Maps the raw 3-position RC switch value (0/1/2, low/mid/high) to a
+    // controller-list index.
+    //   _num_controllers <= 2 (today's PID/PID+INDI drones): unchanged
+    //     legacy mapping — only the highest position ever selects something
+    //     other than PID (list index 0, the default); a drone whose config
+    //     doesn't enable a second controller has _num_controllers == 1, so
+    //     the highest position is a no-op and stays on PID.
+    //   _num_controllers == 3 (PID + INDI + PID+PI all enabled): the switch
+    //     has exactly as many positions as there are controllers, so each
+    //     position selects its same-numbered list index directly.
+    //
+    // PID (list index 0) is the only controller whose output isn't anchored
+    // to the real current_torque measurement (unlike INDI/PID+PI, which seed
+    // from it every tick — see Attitude_INDI.cpp), so its shadow-mode
+    // integrators can drift arbitrarily far from whatever's actually being
+    // commanded while another controller flies. Reset it on the edge into
+    // PID so it starts from a clean P-only response instead of handing the
+    // motors a stale, possibly wound-up integrator.
+    void set_active_controller(int radio_switch_pos)
+    {
+        const int prev_index = _active_index;
+
+        if (_num_controllers >= 3) {
+            _active_index = (radio_switch_pos < 0) ? 0
+                           : (radio_switch_pos >= _num_controllers) ? _num_controllers - 1
+                           : radio_switch_pos;
+        } else {
+            _active_index = (radio_switch_pos >= 2 && _num_controllers > 1) ? 1 : 0;
+        }
+
+        if (_active_index == 0 && prev_index != 0) {
+            _pid.reset_all();
+        }
+    }
+
+    // Resolved controller-list index actually driving out_cmds (may differ
+    // from the raw radio switch position if the drone's config doesn't
+    // enable a second controller) — for $TEL/logging.
+    int active_index() const { return _active_index; }
 
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
@@ -84,6 +139,10 @@ public:
     // diag[8]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch]
     // Always populated from AttitudeINDI (pure shadow — never selectable, see class comment).
     void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
+    // diag[10]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch]
+    // Always populated from AttitudeINDI, regardless of _active_index (shadow-mode logging).
+    // g1_hat_roll/pitch are the live NLMS-adapted effectiveness estimate (see AttitudeINDI::get_g1()).
+    void get_indi_diag(float diag[10]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
     // diag[4]: [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw]
     // Always populated from AttitudePIDJerk, regardless of _use_jerk — this is
@@ -104,20 +163,28 @@ private:
     void run_attitude(const float ctrl_state6[], const float euler[],
                       const float state_full[], const float input[],
                       const uint32_t rpm[], float roll_jerk, float out_cmds[3]);
+    void run_attitude(const float euler[], const float state_full[],
+                      const float input[], const uint32_t rpm[], float out_cmds[3]);
 
     void mode_stabilize(const float ctrl_state6[], const float euler[],
                         const float state_full[], const float input[],
                         const uint32_t rpm[], float roll_jerk,
+    void mode_stabilize(const float euler[], const float state_full[],
+                        const float input[], const uint32_t rpm[],
                         float out_cmds[3], float &thrust_out);
 
     void mode_alt_hold(const float ctrl_state6[], const float euler[],
                        const float state_full[], const float input[],
                        const uint32_t rpm[], float roll_jerk,
+    void mode_alt_hold(const float euler[], const float state_full[],
+                       const float input[], const uint32_t rpm[],
                        float out_cmds[3], float &thrust_out);
 
     void mode_pos_hold(const float ctrl_state6[], const float euler[],
                        const float state_full[], const float input[],
                        const uint32_t rpm[], float roll_jerk,
+    void mode_pos_hold(const float euler[], const float state_full[],
+                       const float input[], const uint32_t rpm[],
                        float out_cmds[3], float &thrust_out);
 
     // ── PosHold pilot-blend state ────────────────────────────────────────────
@@ -153,7 +220,7 @@ private:
     // climb-rate command centered on a hold-altitude deadband, so intent-to-fly
     // means crossing past that center.
     static constexpr float    TAKEOFF_THR_THRESHOLD_STABILIZE = 0.10f;
-    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD ////////////////////change back to 0.5 before re-enabling pso hold
+    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD — TEMP: change back to 0.5 before re-enabling closed-loop POS_HOLD (see CTUN_POSHOLD_SHADOW)
     static constexpr uint32_t TAKEOFF_DEBOUNCE_TICKS = 100;   // 0.25 s @ 400 Hz sustained push
     static constexpr float    LANDED_THR_THRESHOLD   = 0.15f; // commanded thrust considered "at rest"
     static constexpr float    LANDED_VEL_THRESHOLD   = 0.2f;  // m/s, vertical speed considered "at rest"
@@ -165,8 +232,8 @@ private:
     FlightMode  _mode     = FlightMode::STABILIZE;
     bool        _use_jerk = false;
 
-    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — see get_indi_diag()
-    float _indi_diag[8] = {};
+    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — see get_indi_diag()
+    float _indi_diag[10] = {};
 
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
@@ -180,4 +247,18 @@ private:
     AltControl      _alt;
     PosControl      _pos;
     Unmixer         _unmixer;
+    AttitudePID   _pid;      // always present, always list index 0 (the default)
+    AttitudeINDI  _indi;     // storage always exists (no heap allocation); only
+    AttitudePIDPI _pid_pi;   // reachable via _controllers[] if the drone's
+                             // config enables it (see constructor)
+    AltControl   _alt;
+    PosControl   _pos;
+    Unmixer      _unmixer;
+
+    // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────
+    static constexpr int MAX_ATTITUDE_CONTROLLERS = 3;  // PID + INDI + PID+PI today
+    AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
+    int _num_controllers;
+    int _active_index;   // generalizes the old _use_indi bool
+    int _indi_index;     // INDI's list index if cfg.controllers.indi_enabled, else -1 (see constructor)
 };

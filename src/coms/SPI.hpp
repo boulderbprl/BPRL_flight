@@ -1,7 +1,10 @@
 #pragma once
 #include "hal.h"
-#include "src/coms/Baro/MS5611.hpp"
 
+#if defined(BPRL_BOARD_ORQA)
+#include "src/coms/IMUs/ICM42688.hpp"
+#else
+#include "src/coms/Baro/MS5611.hpp"
 #if defined(BPRL_BOARD_CUBEBLUE)
 #include "src/coms/IMUs/ICM20948.hpp"
 #include "src/coms/IMUs/ICM20602.hpp"
@@ -9,11 +12,25 @@
 #include "src/coms/IMUs/ICM45686.hpp"
 #include "src/coms/IMUs/ICM42688.hpp"
 #endif
+#endif
 
 /*
- * SPI bus driver — FMUv5x on-board IMUs, chip set selected by BOARD at
- * build time (see Makefile: BOARD=CubeBlueH7 defines BPRL_BOARD_CUBEBLUE,
- * BOARD=CubeOrangePlus defines BPRL_BOARD_CUBEORANGEPLUS).
+ * SPI bus driver — on-board IMUs, chip set selected by DRONE at build time
+ * (see Makefile: DRONE=Drone2 selects CubeBlueH7 and defines
+ * BPRL_BOARD_CUBEBLUE, DRONE=Drone3 selects OrqaH7QuadCore and defines
+ * BPRL_BOARD_ORQA, DRONE=Drone1 selects CubeOrangePlus and defines
+ * BPRL_BOARD_CUBEORANGEPLUS — see configs/<DRONE>/config.mk).
+ *
+ * ── BPRL_BOARD_ORQA ──────────────────────────────────────────────────────
+ * Only two IMU slots (not three like the Cube boards) — g_imu[2] is simply
+ * never written and stays valid=false; StateManager already treats an
+ * invalid lane as absent (see state_estimator/StateManager.cpp). No SPI
+ * barometer — this board's DPS310 is I2C-only (src/coms/Baro/DPS310.hpp),
+ * polled from I2CThread instead of SPIThread, so there is no baro1 here.
+ * WHOAMI on both lanes and axis orientation are bench-confirmed as of
+ * 2026-08-10 — not yet flight-tested.
+ *   imu1  ICM-42688   SPI1   CS=PA4   (GYRO1_CS)
+ *   imu2  ICM-42688   SPI4   CS=PE11  (GYRO2_CS)
  *
  * ── BPRL_BOARD_CUBEORANGEPLUS (default) ─────────────────────────────────
  * This board's three IMU slots are all populated with ICM-45686 (confirmed —
@@ -49,15 +66,19 @@
  * spi_drv_init() must be called from inside SPIThread because
  * ICM/MS5611 init sequences use chThdSleepMilliseconds.
  */
-#if defined(BPRL_BOARD_CUBEBLUE)
+#if defined(BPRL_BOARD_ORQA)
+extern ICM42688 imu1;
+extern ICM42688 imu2;
+#elif defined(BPRL_BOARD_CUBEBLUE)
 extern ICM20948 imu1;
 extern ICM20948 imu2;
 extern ICM20602 imu3;
+extern MS5611   baro1;
 #else
 extern ICM45686 imu1;
 extern ICM45686 imu2;
 extern ICM45686 imu3;
-#endif
 extern MS5611   baro1;
+#endif
 
 void spi_drv_init(void);

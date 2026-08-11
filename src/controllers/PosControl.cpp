@@ -3,12 +3,17 @@
 #include "ch.h"
 #include <cmath>
 
-PosControl::PosControl()
-    : _pos_N(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
-    , _pos_E(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
-    , _pos_D(1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f, 20.0f)
-    , _vel_N(2.0f, 1.0f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f) // 20 Hz filter on error, 20 Hz filter on derivative
-    , _vel_E(2.0f, 1.0f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f)
+static PID make_pid(const PidGains &g)
+{
+    return PID(g.kp, g.ki, g.kd, g.imax, g.filt_target_hz, g.filt_error_hz, g.filt_d_hz);
+}
+
+PosControl::PosControl(const PosControlGains &g)
+    : _pos_N(make_pid(g.pos_N))
+    , _pos_E(make_pid(g.pos_E))
+    , _pos_D(make_pid(g.pos_D))
+    , _vel_N(make_pid(g.vel_N))
+    , _vel_E(make_pid(g.vel_E))
 {}
 
 void PosControl::NED_update(const float state[], const float pos_tgt[3],

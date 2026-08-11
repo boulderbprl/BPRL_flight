@@ -53,8 +53,9 @@ def build_telemetry_panel(s: TelState) -> Panel:
     arm_text = Text("● ARMED  ", style="bold red") if s.armed \
                else Text("● DISARMED", style="bold green")
     mode_tag = f"[bold cyan]{flight_mode_name(s.flight_mode)}[/bold cyan]"
-    ctrl_style = "bold magenta" if s.use_indi else "bold yellow"
-    ctrl_tag = f"[{ctrl_style}]{attitude_ctrl_name(s.use_indi)}[/{ctrl_style}]"
+    ctrl_styles = ["bold yellow", "bold magenta", "bold blue"]  # PID, INDI, PID+PI
+    ctrl_style = ctrl_styles[s.active_controller] if 0 <= s.active_controller < len(ctrl_styles) else "bold red"
+    ctrl_tag = f"[{ctrl_style}]{attitude_ctrl_name(s.active_controller)}[/{ctrl_style}]"
     t_sec = s.time_ms / 1000.0
 
     grid = Table.grid(padding=(0, 2))

@@ -46,38 +46,50 @@ bprl_can_register(0x10, my_callback, nullptr);
 
 ---
 
-## DShot — Bidirectional DShot 600 (`PWM.hpp/.cpp`)
+## DShot — Bidirectional DShot 600 (`DShot.hpp/.cpp`)
 
-Motor output is selected at compile time via `MOTOR_PROTOCOL` in `PWM.hpp`:
+Motor output protocol is selected at compile time via `MOTOR_PROTOCOL` in `PWM.hpp`:
 
 ```cpp
 #define MOTOR_PROTO_DSHOT  0   // bidirectional DShot 600 (default)
 #define MOTOR_PROTO_PWM    1   // standard servo PWM
 ```
 
-`motor_output_write(val[4])` accepts normalized commands: **0 = disarm**, **1–1000 = 0.1–100% throttle**.
+`PWM.hpp/.cpp` is a thin wrapper around this choice — `motor_output_write(val[4])` accepts normalized commands (**0 = disarm**, **1–1000 = 0.1–100% throttle**) and forwards to `dshot_write()`. All the actual timer/DMA/GCR-decode work lives in `DShot.hpp/.cpp`, which has two board-specific implementations behind `#if defined(BPRL_BOARD_ORQA)` sharing common DShot600 bit-timing/GCR-decode/frame-construction code:
 
-### Motor pin mapping
+### Cube boards (default — `BPRL_BOARD_CUBEBLUE` / `BPRL_BOARD_CUBEORANGEPLUS`)
 
-| Motor | Position | Pin | Timer / Channel |
+TIM1 carries 3 motors sharing one timer via ArduPilot's CC2 cross-capture trick (only TIM1 has a usable 3-channel-BIDIR configuration on this MCU); TIM4 carries the 4th motor alone, no sharing needed.
+
+| Motor (logical) | Pin | Timer / Channel |
+|---|---|---|
+| 0 | PE11 | TIM1 CH2 |
+| 1 | PE9  | TIM1 CH1 |
+| 2 | PD13 | TIM4 CH2 |
+| 3 | PE13 | TIM1 CH3 |
+
+- **TX** (burst DMA, 400 Hz): TIM1 via `TIM1_UP→DMAR`, DCR burst of 4 CCRs (DBL=3, FIFO+INCR4) covers CH1/CH2/CH3 simultaneously (CH4 column always 0, never CC4E-enabled — pure padding to reach a DMA-supported burst size). TIM4 via `TIM4_UP→DMAR`, DBL=0 (single CCR, CH2 only).
+- **RX — GCR telemetry:** TIM1's dedicated IC stream rotates across CH1/CH2/CH3 (~133 Hz each motor, via the CC2 cross-capture trick — CC2S selects TI2 direct for motor 0 or TI1 cross for motor 1, so only 2 distinct DMAMUX capture IDs cover 3 motors). TIM4 captures every frame (400 Hz, no rotation needed for a single motor).
+
+### Drone3 / Orqa QuadCore H7 (`BPRL_BOARD_ORQA`)
+
+This board's main "ESC" JST-GH connector (pads MOT1-4, where a standard 4-in-1 ESC plugs in) is wired to only **two** timers via their CH1/CH2 pair — TIM4 (MOT1/MOT2) and TIM2 (MOT3/MOT4) — not the four separate timers ArduPilot's `hwdef.dat` flags `BIDIR` (those are one channel per timer across FOUR timers, spanning both the ESC connector and a separate secondary connector — the wrong physical pads for a standard 4-in-1 ESC on the main connector).
+
+| Motor (logical) | Pin | Timer / Channel | MOT pad |
 |---|---|---|---|
-| 0 | FR | PE11 | TIM1 CH2 |
-| 1 | RL | PE9  | TIM1 CH1 |
-| 2 | FL | PD13 | TIM4 CH2 |
-| 3 | RR | PE13 | TIM1 CH3 |
+| 0 | PD12 | TIM4 CH1 | MOT1 |
+| 1 | PD13 | TIM4 CH2 | MOT2 |
+| 2 | PA1  | TIM2 CH2 | MOT3 |
+| 3 | PA0  | TIM2 CH1 | MOT4 |
 
-### TX (burst DMA, 400 Hz)
+- **TX** (burst DMA, 400 Hz): one DMAR burst-of-4 stream per timer — same DBL=3/FIFO+INCR4 mechanism as the Cube boards' TIM1 above, just with CH1/CH2 as the 2 real motors and CH3/CH4 as dummy zero padding (two independent DMA streams both listening on the same `TIMx_UP` request line was tried first and doesn't work — DMAMUX delivers each hardware request to only one subscribed stream at a time, round-robin, not a broadcast, so each stream saw only every-other update event and the ESC never received a complete frame).
+- **RX — GCR telemetry:** each timer's two motors take turns — one dedicated IC stream per timer, alternating slot 0 (CH1)/slot 1 (CH2) every DShot cycle. No cross-capture trick needed (unlike the Cube boards' TIM1) since both channels here have their own direct DMAMUX capture request IDs.
 
-- TIM1: burst DMA via `TIM1_UP→DMAR`, DCR burst of 4 CCRs covers CH1/CH2/CH3 simultaneously
-- TIM4: burst DMA via `TIM4_UP→DMAR`, DBL=0 (single CCR, CH2 only)
+Both boards' `dshot_write(throttle[4])` takes throttle values in **physical DShot lane order** — the mixer/telemetry/test-command layers translate to/from *logical* `[FR,RL,FL,RR]` order via `MotorMixerConfig::motor_map` before/after calling into this driver; see the root README's [MotorMixer](../../README.md#motormixer) section.
+
+### Common bit timing / GCR decode
+
 - Bit period: 1.67 µs (DShot 600); each bit is encoded as a high pulse of 625 ns (0) or 1250 ns (1)
-
-### RX — GCR telemetry (bidirectional)
-
-Each ESC returns an eRPM frame on the same wire after the TX burst ends:
-
-- TIM1: input-capture DMA rotates across CH1/CH2/CH3 at ~133 Hz each motor
-- TIM4: input-capture DMA captures TIM4/CH2 every frame (400 Hz)
 - GCR decode: 21-bit transition-marking → 4×5-bit symbols → 16-bit frame → eRPM = 60,000,000 / period_µs
 
 ### DShot value mapping
@@ -92,32 +104,34 @@ Each ESC returns an eRPM frame on the same wire after the TX burst ends:
 
 ## SPI (`SPI.hpp/.cpp`)
 
-Two SPI buses drive the three on-board IMUs plus the barometer. **The IMU chip set is board-conditional** — `BOARD=orange`/`BOARD=blue` select `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` in the Makefile, and `SPI.hpp`/`SPI.cpp` `#if` on that to pick both the driver classes and the CS pins/SPI mode:
+Two SPI buses drive the on-board IMUs plus (on the Cube boards) the barometer. **The IMU chip set — and on Drone3, the IMU count and whether there's an SPI barometer at all — is board-conditional** — `DRONE=Drone1`/`DRONE=Drone2`/`DRONE=Drone3` select `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE`/`-DBPRL_BOARD_ORQA` via `configs/<Drone>/config.mk`, and `SPI.hpp`/`SPI.cpp` `#if` on that to pick both the driver classes and the CS pins/SPI mode:
 
-| Bus | Peripheral | CS pin | `BOARD=orange` device | `BOARD=blue` device | Role |
-|---|---|---|---|---|---|
-| SPI1 | SPID1 | PG1 (orange) / PC2 (blue) | ICM-45686 | ICM-20948 | Primary IMU (`imu1`) |
-| SPI4 | SPID4 | PC15 (orange) / PE4 (blue) | ICM-45686 | ICM-20948 | External IMU (`imu2`) |
-| SPI4 | SPID4 | PC13 | ICM-45686 | ICM-20602 | Backup IMU (`imu3`) |
-| SPI1 | SPID1 | PD7 | MS5611 | MS5611 (same pin both boards) | Barometer (`baro1`) |
+| Bus | Peripheral | CS pin | `DRONE=Drone1` device | `DRONE=Drone2` device | `DRONE=Drone3` device | Role |
+|---|---|---|---|---|---|---|
+| SPI1 | SPID1 | PG1 (Drone1) / PC2 (Drone2) / PA4 (Drone3) | ICM-45686 | ICM-20948 | ICM-42688 | Primary IMU (`imu1`) |
+| SPI4 | SPID4 | PC15 (Drone1) / PE4 (Drone2) / PE11 (Drone3) | ICM-45686 | ICM-20948 | ICM-42688 | External IMU (`imu2`) |
+| SPI4 | SPID4 | PC13 | ICM-45686 | ICM-20602 | *(not present)* | Backup IMU (`imu3`) |
+| SPI1 | SPID1 | PD7 | MS5611 | MS5611 (same pin on the Cube boards) | *(no SPI baro — see I2C below)* | Barometer (`baro1`) |
 
-**`BOARD=orange` (default):** all three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — confirmed all three slots on this board are physically populated with ICM-45686 (each passes its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 — the separate `ICM42688.hpp/.cpp` class exists in the tree to support that variant, not instantiated on this board.
+**`DRONE=Drone1` (CubeOrangePlus, default):** all three IMU instances are driven by the **same** `ICM45686` class (`src/coms/IMUs/ICM45686.hpp/.cpp`) — confirmed all three slots on this board are physically populated with ICM-45686 (each passes its WHOAMI check on init). Other CubeOrangePlus hardware revisions instead populate the SPI4 slots (`imu2`/`imu3`) with ICM-42688 — the separate `ICM42688.hpp/.cpp` class exists in the tree to support that variant, not instantiated on this board.
 
-**`BOARD=blue`:** `imu1`/`imu2` use `ICM20948.hpp/.cpp`, `imu3` uses `ICM20602.hpp/.cpp` — both classic MPU-9250-family parts with a register-based DLPF instead of the 45686/42688's analog AAF stage, no FIFO/oversampling, and SPI **MODE3** (CPOL=1, CPHA=1) rather than MODE0 (confirmed against ArduPilot's `hwdef.dat` for this chip pairing on Cube-family hardware). CS pins here (PC2/PE4/PC13) come from `boards/CubeBlueH7/board.h`'s documented pin map, not yet WHOAMI-confirmed against physical hardware the way the `BOARD=orange` mapping was — a wrong pairing fails safe (each chip has a distinct WHOAMI, so a mismatch just leaves that `g_imu[i].valid` false). The per-IMU axis-rotation math in `SPIThread` (`src/threads.cpp`) is an explicitly-flagged unverified placeholder for this board — see the root README's [ICM-20948 / ICM-20602](../../README.md#8-imu-drivers) section before flying on it.
+**`DRONE=Drone2` (CubeBlueH7):** `imu1`/`imu2` use `ICM20948.hpp/.cpp`, `imu3` uses `ICM20602.hpp/.cpp` — both classic MPU-9250-family parts with a register-based DLPF instead of the 45686/42688's analog AAF stage, no FIFO/oversampling, and SPI **MODE3** (CPOL=1, CPHA=1) rather than MODE0 (confirmed against ArduPilot's `hwdef.dat` for this chip pairing on Cube-family hardware). CS pins here (PC2/PE4/PC13) come from `boards/CubeBlueH7/board.h`'s documented pin map, not yet WHOAMI-confirmed against physical hardware the way the `DRONE=Drone1` mapping was — a wrong pairing fails safe (each chip has a distinct WHOAMI, so a mismatch just leaves that `g_imu[i].valid` false). The per-IMU axis-rotation math in `SPIThread` (`src/threads.cpp`) is an explicitly-flagged unverified placeholder for this board — see the root README's [ICM-20948 / ICM-20602](../../README.md#8-imu-drivers) section before flying on it.
+
+**`DRONE=Drone3` (Orqa QuadCore H7):** only **two** on-board IMUs, both `ICM42688.hpp/.cpp` (`imu1`/`imu2`) — `g_imu[2]` is never written and stays `valid=false` (`StateManager` already treats an invalid lane as absent). No SPI barometer on this board at all — its DPS310 is I2C-only, polled from `I2CThread` instead (see the I2C section below). See the root README's [ICM-42688](../../README.md#8-imu-drivers) section for axis-rotation details.
 
 `spi_drv_init()` must run inside `SPIThread` (power-on/reset sequences use `chThdSleepMilliseconds`). `imu2`/`imu3` share SPI4, and `imu1`/`baro1` share SPI1, each with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
 
-SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider, both boards). On `BOARD=orange` the ICM-45686 runs at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). `BOARD=blue`'s ICM-20948/20602 have no equivalent FIFO-averaging step — one sample per `SPIThread` tick. It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
+SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider, across the Cube boards). On `DRONE=Drone1` the ICM-45686 runs at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). `DRONE=Drone2`'s ICM-20948/20602 have no equivalent FIFO-averaging step — one sample per `SPIThread` tick. It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
 
 ---
 
 ## I2C — I2C2 (`I2C.hpp/.cpp`)
 
-**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 500 Hz via `i2c_poll_all()`.
+**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 200 Hz via `i2c_poll_all()`.
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`). No magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see the SPI section above.
+Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`). No magnetometer is present. On the Cube boards the barometer (MS5611) is on SPI, not I2C — see the SPI section above. On `DRONE=Drone3` (Orqa QuadCore H7) it's the opposite: the DPS310 barometer (`src/coms/Baro/DPS310.hpp/.cpp`, I2C2 address 0x77) is this board's only barometer, registered via `bprl_i2c_register()` the same way the strain-rate sensor is and polled by `I2CThread` at the same 200 Hz — see the root README's [DPS310 Barometer](../../README.md#8-imu-drivers) section.
 
 ### Adding a device
 
@@ -131,6 +145,7 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
 `radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). `radio_armed()` reads a dedicated arm-switch channel: `PARSER.channel(4) > 992u` (channel 5, threshold at center) — this used to be a stub returning `false` unconditionally, it is now a real implementation. `radio_use_jerk()` is `radio_indi() > 0.33f` — a thresholded bool built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection. Despite the name, `radio_indi()` no longer selects `AttitudeINDI` (pure shadow now) — it selects `AttitudePIDJerk` vs `AttitudePID`.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`); channel indices come from `DroneConfig::rc_map` (see `configs/DroneConfig.hpp`) rather than being hardcoded. `radio_armed()` reads the dedicated arm-switch channel (threshold at center). `radio_switch_position()` buckets `radio_indi()` into 0/1/2 (low/mid/high) — a thresholded int built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection; `FlightStateMachine::set_active_controller()` maps that to a controller-list index.
 
 Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
 

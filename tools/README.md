@@ -199,12 +199,12 @@ python3 tools/logs.py log-status
 |---|---|
 | `<stem>_att.csv` | TimeUS, Roll/Pitch/Yaw (rad), P/Q/R (rad/s), Pdot/Qdot/Rdot (rad/s²) |
 | `<stem>_lin.csv` | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
-| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw switch value, >0.33=INDI), Armed |
+| `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see BPRL_flight's `src/controllers/README.md`), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
-| `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel) |
+| `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
 
 All 11 message types log at the fixed 50 Hz `LogThread` period — there's no per-record rate field.
@@ -217,15 +217,15 @@ The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilo
 
 > Requires `-DBPRL_TIMING` firmware build. Testing/bench only — disable for flight builds (adds per-tick timestamp reads on every instrumented thread).
 
-Per-thread execution-time and CPU-utilization instrumentation, added to check whether the ChibiOS thread set (SPI, CAN, I2C, StateEst, Control, Radio, Heartbeat, MAVLink, Debug, Log, USBCmd) is actually schedulable at its configured rates and priorities, rather than assuming it. See `src/diagnostics/ThreadTiming.hpp` for the implementation and `threads_start()` in `src/threads.cpp` for the current priority ordering.
+Per-thread execution-time and CPU-utilization instrumentation, added to check whether the ChibiOS thread set (SPI, CAN, I2C, Control, Radio, Heartbeat, MAVLink, Debug, Log, USBCmd) is actually schedulable at its configured rates and priorities, rather than assuming it. `Control` now includes what used to be a separate `StateEst` thread's EKF work — the two were merged into one 400 Hz thread (see the root README's [Thread priority table](../README.md#thread-priority-table)). See `src/diagnostics/ThreadTiming.hpp` for the implementation and `threads_start()` in `src/threads.cpp` for the current priority ordering.
 
 Build and flash:
 
 ```bash
-make BOARD=orange UDEFS_EXTRA=-DBPRL_TIMING
-make flash BOARD=orange
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_TIMING
+make flash DRONE=Drone1
 # combine with debug telemetry if needed:
-make BOARD=blue UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
+make DRONE=Drone2 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
 ```
 
 There's no dedicated `tools/*.py` wrapper yet — query the two commands directly over the USB serial port, e.g. with pyserial's bundled terminal:
@@ -248,7 +248,9 @@ time.sleep(0.3)
 print(ser.read(4096).decode(errors="replace"))
 ```
 
-Sample output — one `$THD` line per registered thread, plus a `$CPU` totals line. This is a real capture (625 Hz EKF, 1.6 kHz IMU oversampling ODR, 400 Hz control, armed/loaded):
+Sample output — one `$THD` line per registered thread, plus a `$CPU` totals line.
+
+> **Stale — needs a fresh capture.** The sample below predates the `StateEst`+`Control` thread merge — it still shows them as two separate lines (`est` at 625 Hz, `ctrl` at 400 Hz). On the current architecture there is no `est` line at all; `ctrl`'s `exec_avg_us`/`exec_max_us` now include the full EKF work that used to be `est`'s, all inside `ctrl`'s 2500 µs (400 Hz) period. Re-run `TIM,status` against real hardware for a capture that reflects the merged thread before trusting these figures.
 
 ```
 $THD,can,period_us=event,exec_avg_us=1,exec_max_us=100,n=39120
@@ -275,18 +277,18 @@ Reading it:
 | `$CPU,util_pct` | Sum of `util_pct` over every rate-tracked thread — the Liu & Layland `Σ(C_i/T_i)` figure. Above ~70% is a soft warning for a task set this size; approaching 100% or `misses>0` anywhere means it's not schedulable as configured. |
 | `$CPU,util_pct_hrt` | Same sum, but skipping threads registered with `TIMING_REGISTER_SOFT` (currently just `log`) — a truer figure for hard-deadline schedulability when the task set also has a soft-deadline, I/O-bound thread whose worst-case latency isn't CPU-bound (see the root README's [Timing and Utilization](../README.md#timing-and-utilization)). In the capture above, `util_pct` is 86.2% but `util_pct_hrt` is 64.3% — `log`'s SD-card-write tail alone accounts for the rest. |
 
-Run it under realistic load (armed, radio connected, CAN/mocap link up) — idle-bench numbers will understate `est`/`ctrl`/`spi` load significantly.
+Run it under realistic load (armed, radio connected, CAN/mocap link up) — idle-bench numbers will understate `ctrl`/`spi` load significantly.
 
 ---
 
 ## flash_upload.py
 
-Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using the ChibiOS bootloader protocol over USB.
+Uploads a compiled `.bin` firmware image over USB using the ChibiOS bootloader protocol. Boards that don't ship with an ArduPilot-compatible bootloader (e.g. a factory-fresh Orqa QuadCore H7) need a one-time DFU bootstrap first — see the root README's [Upload](../README.md#upload) section.
 
 ```bash
 # Recommended: use Makefile targets
-make flash BOARD=blue
-make flash BOARD=orange PORT=/dev/ttyACM0
+make flash DRONE=Drone2
+make flash DRONE=Drone1 PORT=/dev/ttyACM0
 
 # Or directly
 python3 tools/flash_upload.py build/BPRL.bin
@@ -300,11 +302,11 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 ## Quick reference
 
 ```bash
-# Flash (default board: BOARD=orange)
-make flash BOARD=orange
+# Flash (default drone: DRONE=Drone1)
+make flash DRONE=Drone1
 
 # Debug build + flash
-make BOARD=orange UDEFS_EXTRA=-DBPRL_DEBUG && make flash BOARD=orange
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG && make flash DRONE=Drone1
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
@@ -324,6 +326,6 @@ python3 tools/can_tools.py can-scan --duration 2
 python3 tools/calibrate.py calibrate
 
 # Timing/schedulability build + query (see Timing section above)
-make BOARD=blue UDEFS_EXTRA=-DBPRL_TIMING && make flash BOARD=blue
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING && make flash DRONE=Drone2
 python3 -m serial.tools.miniterm /dev/ttyACM0 115200   # then type: TIM,status
 ```

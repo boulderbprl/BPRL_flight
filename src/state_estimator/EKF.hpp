@@ -35,7 +35,7 @@ public:
     // imu_index: which g_imu[i] slot this lane reads from (0–2).
     void init(int imu_index);
 
-    // Prediction step — call at 625 Hz (StateEstThread rate).
+    // Prediction step — call at 400 Hz (ControlThread rate).
     // accel: body-frame specific force (m/s²), gyro: body-frame rates (rad/s).
     void predict(float dt, const float accel[3], const float gyro[3]);
 
@@ -85,19 +85,39 @@ private:
     static constexpr float P0_BIAS_A = 0.01f;   // accel bias (m/s²)² — tighter init after cal
     static constexpr float P0_BIAS_G = 1e-4f;   // gyro bias (rad/s)²  — ~0.01 rad/s 1σ init
 
-    // Process noise (Q) per EKF step at 625 Hz
-    static constexpr float Q_POS    = 1e-4f;   // position random walk
-    static constexpr float Q_VEL    = 1e-3f;   // body velocity random walk
-    static constexpr float Q_QUAT   = 1e-5f;   // quaternion random walk
+    // Process noise (Q) per EKF step at 400 Hz (ControlThread rate — the
+    // merged loop that now runs predict()/update_*() every tick; formerly
+    // 625 Hz under the separate StateEstThread). These are fixed *per-step*
+    // injections, not a continuous-time density (EKF::predict() applies
+    // Q_* directly to _Q[i][i], with no dt scaling) — rescaled by
+    // dt_new/dt_old = 625/400 = 1.5625 from their original 625 Hz values so
+    // the fewer, larger steps at 400 Hz inject the same noise power per
+    // second as before.
+    static constexpr float Q_POS    = 1.5625e-4f;   // position random walk
+    static constexpr float Q_VEL    = 1.5625e-3f;   // body velocity random walk
+    static constexpr float Q_QUAT   = 1.5625e-5f;   // quaternion random walk
     // Bias Q matched to ArduPilot EKF3 GBIAS_P_NSE=1e-3 formula:
     //   dAngBiasVar = sq(sq(dt) * 1e-3) / dt² → ~4e-12 (rad/s)²/step at 625 Hz.
-    // We use 1e-9 (250× more permissive) because we have a direct gravity measurement
-    // rather than ArduPilot's indirect zero-velocity approach; slightly more latitude
-    // lets the filter track temperature-driven drift across the flight envelope.
-    static constexpr float Q_BIAS_G = 1e-9f;   // gyro bias random walk (rad/s)²/step
+    // We use 1.5625e-9 (still ~250x more permissive than that figure, after
+    // the 625->400 Hz rescale above) because we have a direct gravity
+    // measurement rather than ArduPilot's indirect zero-velocity approach;
+    // slightly more latitude lets the filter track temperature-driven drift
+    // across the flight envelope.
+    static constexpr float Q_BIAS_G = 1.5625e-9f;   // gyro bias random walk (rad/s)²/step
     // Accel bias: ArduPilot ABIAS_P_NSE=2e-2 → sq(sq(dt)*2e-2)/dt² ≈ 6e-10 at 625 Hz.
-    // We use 1e-7 — still conservative, accel bias drifts faster than gyro bias.
-    static constexpr float Q_BIAS_A = 1e-7f;   // accel bias random walk (m/s²)²/step
+    // We use 1.5625e-7 — still conservative, accel bias drifts faster than gyro bias.
+    static constexpr float Q_BIAS_A = 1.5625e-7f;   // accel bias random walk (m/s²)²/step
+
+    // ── CAN/IMX5 quaternion measurement update parameters ──────────────────
+    // Chi-squared innovation gate — same pattern/gate value as
+    // GRAV_CHI2_GATE/MOCAP_CHI2_GATE/BARO_CHI2_GATE. H is diagonal (row i
+    // observes iQ0+i directly), so S_ii is just that state's P diagonal + R,
+    // same simplification as update_position()'s gate. Added so a single
+    // corrupted/glitched CAN sample (bit flip that passes CRC, a momentary
+    // IMX5-internal fault) can't get fused into attitude unconditionally —
+    // every other update_*() in this file already rejects outliers this way;
+    // update_quaternion() previously did not.
+    static constexpr float QUAT_CHI2_GATE = 5.0f;
 
     // ── Gravity-vector measurement update parameters ───────────────────────
     // Hard reject: skip update if |a| > this multiple of g (clearly bad sample)
@@ -114,11 +134,35 @@ private:
     // Mirrors ArduPilot's sq(gpsNEVelVarAccScale * accNavMag) additive term.
     static constexpr float GRAV_R_VIBE    = 0.25f;  // dimensionless scale
 
-    // Vibration filter: α for vibe_rms² IIR filter — τ ≈ 0.1 s at 625 Hz
-    // (update_gravity() runs once per StateEstThread tick with no dt parameter,
-    // so this is a fixed-rate IIR alpha, not a lowpass_alpha(fc,dt) one — keep
-    // it in sync with StateEstThread's rate in main.cpp if that ever changes.)
-    static constexpr float GRAV_VIBE_ALPHA = 0.016f;
+    // Vibration filter: α for vibe_rms² IIR filter, smoothing vibe_filt
+    // *across* update_gravity() calls. update_gravity() is no longer called
+    // every ControlThread tick — StateManager now windows/averages the accel
+    // over STATEMGR_GRAVACC_AVG_S (0.2 s — matches ArduPilot DCM's no-GPS
+    // window, see that constant in StateManager.hpp) before each call, so
+    // this alpha's implicit calling period is ~0.2 s, not 1/400 s. τ ≈ 2 s
+    // (~10 windows) at that period: alpha = dt/tau = 0.2/2.0 = 0.1. This is
+    // a fixed-period IIR alpha, not a lowpass_alpha(fc,dt) one — keep it in
+    // sync with STATEMGR_GRAVACC_AVG_S if that ever changes.
+    static constexpr float GRAV_VIBE_ALPHA = 0.1f;
+
+    // Max quaternion rotation angle (rad) update_gravity() is allowed to
+    // apply per call, mirroring ArduPilot DCM's rate-limited correction
+    // (_omega_P = error * AHRS_RP_P, default AHRS_RP_P=0.2 rad/s, integrated
+    // over dt — a bounded creep, never a snap, regardless of how large the
+    // accel error was). The windowing above (STATEMGR_GRAVACC_AVG_S) rejects
+    // symmetric push/pull transients by cancellation, but a large *asymmetric*
+    // or sustained disturbance can still survive the window average and reach
+    // this update — this caps how much attitude authority even a fully-passed
+    // correction gets in one call: 0.2 rad/s * 0.2 s window ≈ 0.04 rad
+    // (~2.3°). Applied by clamping the post-Kalman-update quaternion back
+    // toward its pre-update value via nlerp if the implied rotation exceeds
+    // this (see update_gravity()) — a deliberate approximation: the
+    // covariance P is already updated assuming the full correction, so
+    // clamping only the mean afterward makes P slightly overconfident
+    // relative to the mean. Same category of pragmatic simplification as the
+    // existing chi-squared hard-reject gate; revisit if this proves
+    // insufficient rather than chasing exact consistency.
+    static constexpr float GRAV_MAX_CORR_RAD = 0.04f;
 
     // ── Mocap position/velocity measurement update parameters ─────────────
     // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is

@@ -215,10 +215,28 @@ void EKF::update_quaternion(const Quat& q_meas_in, float R_var)
         q_meas.z - q_pred.z
     };
 
-    // Update innovation norm (exponential smoothing, τ ≈ 10 updates)
+    // Update innovation norm (exponential smoothing, τ ≈ 10 updates).
+    // Computed unconditionally, even on samples the gate below rejects —
+    // a lane that's diverging enough to fail the gate should still score
+    // worse in StateManager::_select_primary()'s lane-health comparison,
+    // not have its disagreement hidden by skipping the update.
     float imag = innov[0]*innov[0] + innov[1]*innov[1]
                + innov[2]*innov[2] + innov[3]*innov[3];
     _innov_norm = INNOV_SMOOTH * _innov_norm + (1.0f - INNOV_SMOOTH) * imag;
+
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // See QUAT_CHI2_GATE's comment. H is diagonal (row i observes iQ0+i
+    // directly), so S_ii is just that state's P diagonal + R_var.
+    {
+        float innov_sq_sum = 0.0f;
+        float S_sum        = 0.0f;
+        for (int i = 0; i < 4; ++i) {
+            S_sum        += _P[iQ0+i][iQ0+i] + R_var;
+            innov_sq_sum += innov[i] * innov[i];
+        }
+        const float gate_sq = QUAT_CHI2_GATE * QUAT_CHI2_GATE;
+        if (S_sum < 1e-10f || innov_sq_sum > S_sum * gate_sq) return;
+    }
 
     _update(4, H, R_diag, innov);
     _normalize_quat();
@@ -234,7 +252,7 @@ void EKF::update_gravity(const float accel[3], float R_var)
 
     // ── Vibration filter: IIR estimate of (|a|-g)² ────────────────────────
     // Mirrors ArduPilot's velDotNEDfilt = velDotNED*α + filt*(1-α).
-    // Time constant τ ≈ 1/GRAV_VIBE_ALPHA steps ≈ 62.5 updates = 0.1 s at 625 Hz.
+    // Time constant τ ≈ 1/GRAV_VIBE_ALPHA steps ≈ 40 updates = 0.1 s at 400 Hz.
     float dev = norm - GRAVITY;
     _vibe_filt = GRAV_VIBE_ALPHA * (dev * dev) + (1.0f - GRAV_VIBE_ALPHA) * _vibe_filt;
 
@@ -244,63 +262,84 @@ void EKF::update_gravity(const float accel[3], float R_var)
     // but is NOT blocked outright — only the chi-sq gate can fully reject it.
     float R_eff = R_var + GRAV_R_VIBE * _vibe_filt;
 
-    // ── Build H and innovations ────────────────────────────────────────────
+    // ── Direction-only tilt update ──────────────────────────────────────────
+    // Mirrors ArduPilot DCM's drift_correction(): normalize the measured
+    // specific-force vector to unit length before comparing it to the
+    // (already-unit-length, by construction) predicted "down" direction, so
+    // any deviation of |accel| from g — sensor scale error, or genuinely
+    // just noise in the window average — contributes nothing to the tilt
+    // correction. Bias is still subtracted from the measurement first (a
+    // biased sensor's *direction* reading is still wrong), but this update's
+    // Jacobian has no bias columns: the tilt correction depends only on
+    // quaternion, never touches ba_x/ba_y/ba_z. NOTE: normalizing does NOT
+    // by itself reject a genuine horizontal linear-acceleration disturbance
+    // (e.g. sliding the vehicle on a bench) — that changes the *direction*
+    // of specific force for real, which any gravity-vector tilt reference
+    // (ArduPilot's included) will partially misread as tilt. That class of
+    // error is instead handled by STATEMGR_GRAVACC_AVG_S (window-cancels
+    // symmetric push/pull transients) and GRAV_MAX_CORR_RAD below (bounds
+    // how much of it can land in one call) — see their comments.
+    const float accel_corr[3] = {
+        accel[0] - _x[iBax],
+        accel[1] - _x[iBay],
+        accel[2] - _x[iBaz]
+    };
+    const float accel_corr_norm = sqrtf(accel_corr[0]*accel_corr[0]
+                                       + accel_corr[1]*accel_corr[1]
+                                       + accel_corr[2]*accel_corr[2]);
+    if (accel_corr_norm < 0.1f) return;  // guard divide-by-zero (hard gate above should prevent this)
+    const float inv_an = 1.0f / accel_corr_norm;
+    const float accel_dir[3] = {
+        accel_corr[0] * inv_an, accel_corr[1] * inv_an, accel_corr[2] * inv_an
+    };
+
     float R_rot[3][3];
     quat_to_rot_body2ned(_get_quat(), R_rot);
-    // NED z-down: predicted sensor reading is -g_body (sensor reads -g at hover)
-    const float g_pred[3] = { -R_rot[2][0]*GRAVITY, -R_rot[2][1]*GRAVITY, -R_rot[2][2]*GRAVITY };
+    // NED z-down: predicted sensor reading direction is -g_body/|g_body|,
+    // and R_rot's rows are already unit vectors, so no division needed.
+    const float g_dir_pred[3] = { -R_rot[2][0], -R_rot[2][1], -R_rot[2][2] };
 
-    const float innov[3] = {
-        accel[0] - g_pred[0] - _x[iBax],
-        accel[1] - g_pred[1] - _x[iBay],
-        accel[2] - g_pred[2] - _x[iBaz]
+    const float innov_dir[3] = {
+        accel_dir[0] - g_dir_pred[0],
+        accel_dir[1] - g_dir_pred[1],
+        accel_dir[2] - g_dir_pred[2]
     };
 
     float H[3][N] = {};
-    const float g  = GRAVITY;
     const float qw = _x[iQ0], qx = _x[iQ1], qy = _x[iQ2], qz = _x[iQ3];
 
-    // ∂(-g_body)/∂q = -∂g_body/∂q  (3×4 block, negated for z-down)
-    H[0][iQ0] =  2*qy*g;  H[0][iQ1] = -2*qz*g;  H[0][iQ2] =  2*qw*g;  H[0][iQ3] = -2*qx*g;
-    H[1][iQ0] = -2*qx*g;  H[1][iQ1] = -2*qw*g;  H[1][iQ2] = -2*qz*g;  H[1][iQ3] = -2*qy*g;
-    H[2][iQ0] =  0.0f;    H[2][iQ1] =  4*qx*g;  H[2][iQ2] =  4*qy*g;  H[2][iQ3] =  0.0f;
+    // ∂(-g_body/g)/∂q — same partials as before, minus the *g factor now
+    // that the predicted vector is unit-length rather than magnitude-g.
+    H[0][iQ0] =  2*qy;  H[0][iQ1] = -2*qz;  H[0][iQ2] =  2*qw;  H[0][iQ3] = -2*qx;
+    H[1][iQ0] = -2*qx;  H[1][iQ1] = -2*qw;  H[1][iQ2] = -2*qz;  H[1][iQ3] = -2*qy;
+    H[2][iQ0] =  0.0f;  H[2][iQ1] =  4*qx;  H[2][iQ2] =  4*qy;  H[2][iQ3] =  0.0f;
 
-    // ∂/∂accel_bias — Z only.
-    // Z is unambiguous: body-frame gravity Z-component is -g at any known
-    // attitude regardless of horizontal motion, so a Z residual is always bias.
-    // X/Y residuals are NOT unambiguous — a single specific-force sample can't
-    // distinguish "sensor is biased" from "vehicle is genuinely accelerating
-    // horizontally," so feeding them into iBax/iBay here caused real
-    // translational accel (e.g. a hand push) to get absorbed into the bias
-    // state and lag behind real motion, corrupting u/v on direction reversals.
-    // X/Y bias is instead only resolvable via mocap velocity fusion's
-    // cross-covariance with iU/iV, which correctly separates bias from motion.
-    H[2][iBaz] = 1.0f;
+    // R for this dimensionless (unit-vector) innovation space. R_eff below is
+    // in (m/s²)²; first-order, d(v/|v|) ≈ dv/|v| when |v| ≈ GRAVITY, so an
+    // equivalent unit-vector-space variance is R_eff/GRAVITY².
+    const float R_dir = R_eff / (GRAVITY * GRAVITY);
 
     // ── Chi-squared innovation gate ────────────────────────────────────────
     // Mirrors ArduPilot's velTestRatio pattern:
     //   test_ratio = sum(innov²) / (sum(S_ii) * gate²)  < 1.0
-    // S_ii = H[row] * P * H[row]^T + R_eff  (diagonal of innovation covariance).
-    // H is sparse (nonzeros at {iQ0..iQ3, iBax+row}) so only 5×5 inner products
-    // are needed per row — O(75) ops total, negligible cost.
+    // S_ii = H[row] * P * H[row]^T + R_dir. H is sparse (nonzeros only at
+    // {iQ0..iQ3} now — no bias columns) so only 4×4 inner products are
+    // needed per row.
     {
         float innov_sq_sum = 0.0f;
         float S_sum        = 0.0f;
-        const int nz_q[4]  = { iQ0, iQ1, iQ2, iQ3 };
+        const int nz[4] = { iQ0, iQ1, iQ2, iQ3 };
 
         for (int row = 0; row < 3; ++row) {
-            int nz[5];
-            nz[0]=iQ0; nz[1]=iQ1; nz[2]=iQ2; nz[3]=iQ3; nz[4]=iBax+row;
-
-            float S_ii = R_eff;
-            for (int a = 0; a < 5; ++a) {
+            float S_ii = R_dir;
+            for (int a = 0; a < 4; ++a) {
                 float ph = 0.0f;
-                for (int b = 0; b < 5; ++b)
+                for (int b = 0; b < 4; ++b)
                     ph += _P[nz[a]][nz[b]] * H[row][nz[b]];
                 S_ii += H[row][nz[a]] * ph;
             }
 
-            innov_sq_sum += innov[row] * innov[row];
+            innov_sq_sum += innov_dir[row] * innov_dir[row];
             S_sum        += S_ii;
         }
 
@@ -309,9 +348,72 @@ void EKF::update_gravity(const float accel[3], float R_var)
         if (S_sum < 1e-10f || innov_sq_sum > S_sum * gate_sq) return;
     }
 
-    const float R_diag[3] = { R_eff, R_eff, R_eff };
-    _update(3, H, R_diag, innov);
+    // ── Rate-limit the resulting attitude correction ──────────────────────
+    // Mirrors ArduPilot DCM's rate-limited _kp correction (see
+    // GRAV_MAX_CORR_RAD comment in EKF.hpp) rather than letting a single
+    // accepted-but-large window average snap the quaternion in one shot.
+    const Quat q_before = _get_quat();
+
+    const float R_diag[3] = { R_dir, R_dir, R_dir };
+    _update(3, H, R_diag, innov_dir);
     _normalize_quat();
+
+    Quat q_after = _get_quat();
+    float dot = q_before.w*q_after.w + q_before.x*q_after.x
+              + q_before.y*q_after.y + q_before.z*q_after.z;
+    if (dot < 0.0f) {
+        // Antipodal fix — stay on the shorter rotation path.
+        q_after.w = -q_after.w; q_after.x = -q_after.x;
+        q_after.y = -q_after.y; q_after.z = -q_after.z;
+        dot = -dot;
+    }
+    dot = constrain_float(dot, -1.0f, 1.0f);
+    const float angle = 2.0f * acosf(dot);
+
+    if (angle > GRAV_MAX_CORR_RAD) {
+        // nlerp back toward q_before so the applied rotation is capped at
+        // GRAV_MAX_CORR_RAD. A true slerp would be exact; nlerp is a fine
+        // approximation at these small angles (a few degrees at most) and
+        // avoids extra trig on a per-window (not per-tick) call anyway.
+        const float t = GRAV_MAX_CORR_RAD / angle;
+        Quat q_clamped = {
+            q_before.w*(1.0f-t) + q_after.w*t,
+            q_before.x*(1.0f-t) + q_after.x*t,
+            q_before.y*(1.0f-t) + q_after.y*t,
+            q_before.z*(1.0f-t) + q_after.z*t
+        };
+        q_clamped = quat_norm(q_clamped);
+        _x[iQ0] = q_clamped.w;
+        _x[iQ1] = q_clamped.x;
+        _x[iQ2] = q_clamped.y;
+        _x[iQ3] = q_clamped.z;
+    }
+
+    // ── Separate scalar Z accel-bias trim ──────────────────────────────────
+    // Split out from the tilt update above (which is now direction-only and
+    // has no bias columns) so bias estimation and attitude correction can't
+    // cross-contaminate each other. Z is still the only axis used for bias:
+    // body-frame gravity Z-component is -g at any known attitude regardless
+    // of horizontal motion, so a Z residual (after re-deriving the predicted
+    // attitude post-tilt-update/clamp above) is attributable to bias, not
+    // tilt — see the original rationale this preserves. H has no quaternion
+    // columns, so this update cannot itself perturb attitude.
+    {
+        float R_rot2[3][3];
+        quat_to_rot_body2ned(_get_quat(), R_rot2);
+        const float g_pred_z = -R_rot2[2][2] * GRAVITY;
+        const float innov_z  = accel[2] - g_pred_z - _x[iBaz];
+
+        const float S = _P[iBaz][iBaz] + R_eff;
+        const float gate_sq = GRAV_CHI2_GATE * GRAV_CHI2_GATE;
+        if (!(S < 1e-10f || innov_z * innov_z > S * gate_sq)) {
+            float H2[1][N] = {};
+            H2[0][iBaz] = 1.0f;
+            const float R_diag_z[1]    = { R_eff };
+            const float innov_z_arr[1] = { innov_z };
+            _update(1, H2, R_diag_z, innov_z_arr);
+        }
+    }
 }
 
 void EKF::update_position(const float xyz[3], float R_var)
@@ -351,8 +453,9 @@ void EKF::update_altitude(float alt_up_m, float R_var)
     // ── NED sign convention ────────────────────────────────────────────────
     // EKF iZ is NED (down-positive). Barometric height above the boot-time
     // reference is up-positive (see MS5611::init warm-up capture). Explicit
-    // flip here, matching update_gravity's explicit NED sign handling
-    // (EKF.cpp:84) rather than pushing the sign convention onto callers.
+    // flip here, matching update_gravity()'s own explicit NED sign handling
+    // (its g_pred[] negation above) rather than pushing the sign convention
+    // onto callers.
     const float z_meas = -alt_up_m;
     const float innov   = z_meas - _x[iZ];
 

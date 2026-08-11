@@ -10,7 +10,7 @@
  * Adding devices:
  *   1. Write a poll function: void my_poll(void *ctx)
  *   2. In main(): bprl_i2c_register(MY_ADDR, my_poll, nullptr);
- *   I2CThread calls i2c_poll_all() at 500 Hz.
+ *   I2CThread calls i2c_poll_all() at 200 Hz.
  *
  * I2C2 on PB10 (SCL) / PB11 (SDA), AF4, 400 kHz.
  */

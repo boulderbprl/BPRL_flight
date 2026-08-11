@@ -3,7 +3,15 @@
 #include <cstdint>
 
 /*
- * CRSF (Crossfire / ELRS) RC input parser — USART2 (TELEM1 port), PD6 RX / PD5 TX, AF7
+ * CRSF (Crossfire / ELRS) RC input parser.
+ * Cube boards: USART2 (TELEM1 port), PD6 RX / PD5 TX, AF7, full-duplex.
+ * BPRL_BOARD_ORQA: USART6, PC6 TX6 / PC7 RX6, AF7, full-duplex (see
+ * boards/OrqaH7QuadCore/board.h) — not this board's hwdef-default RC pad
+ * (that's half-duplex USART3/T3, default protocol GHST); moved to TX6/RX6
+ * for simpler two-wire wiring and to leave USART3 free for MAVLink
+ * (src/coms/MAVLink.cpp is unconditionally SD3 on every board). Note the
+ * receiver must actually be set to CRSF output — this parser doesn't speak
+ * GHST, which is a different framing despite similar wiring.
  *
  * Frame: variable length ≤ 64 bytes
  *   [sync=0xC8][len][type][payload...][CRC8]
@@ -18,7 +26,7 @@
 class CrsfParser {
 public:
     void     init();
-    void     update();                  // drain SD3, run state machine; call at ~100 Hz
+    void     update();                  // drain the RC UART (SD2 Cube boards / SD6 BPRL_BOARD_ORQA), run state machine; call at ~100 Hz
     uint16_t channel(uint8_t n) const; // raw 11-bit value for channel n (0–15)
     bool     data_valid() const { return _valid; }
 

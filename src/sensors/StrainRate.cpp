@@ -60,6 +60,23 @@ static void strain_rate_i2c_poll(void *ctx)
     uint16_t rpm_avg16 = (rpm_avg > 0xFFFFU) ? 0xFFFFU : (uint16_t)rpm_avg;
     uint8_t  txbuf[2] = { (uint8_t)(rpm_avg16 & 0xFFU), (uint8_t)(rpm_avg16 >> 8) };
 
+    // The strain-gauge board is often absent (e.g. bench testing without
+    // the arms wired up). Without backoff, an absent sensor times out on
+    // every single 200 Hz tick — i2cMasterReceiveTimeout()'s 1.5 ms ceiling
+    // alone eats ~30% of I2CThread's 5 ms period, every tick, forever. Back
+    // off to ~1 Hz retries after a few consecutive failures so an absent
+    // sensor costs next to nothing, while still noticing if it's plugged in
+    // later.
+    static constexpr uint32_t FAIL_STREAK_BEFORE_BACKOFF = 3;
+    static constexpr uint32_t BACKOFF_TICKS = 200;  // ~1 s at 200 Hz
+    static uint32_t s_fail_streak = 0;
+    static uint32_t s_skip_ticks  = 0;
+
+    if (s_skip_ticks > 0) {
+        s_skip_ticks--;
+        return;
+    }
+
     i2cAcquireBus(&I2CD2);
     msg_t status = i2cMasterTransmitTimeout(&I2CD2, 0x11, txbuf, sizeof(txbuf),
                                              s_i2c_rx, sizeof(s_i2c_rx), TIME_US2I(1500));
@@ -69,8 +86,13 @@ static void strain_rate_i2c_poll(void *ctx)
         // MSG_RESET means the driver hit an error and is now I2C_LOCKED.
         // Without resetting here it stays locked forever (MSG_TIMEOUT never fires).
         if (status == MSG_TIMEOUT || status == MSG_RESET) i2c_drv_reset();
+
+        if (s_fail_streak < FAIL_STREAK_BEFORE_BACKOFF) s_fail_streak++;
+        if (s_fail_streak >= FAIL_STREAK_BEFORE_BACKOFF) s_skip_ticks = BACKOFF_TICKS - 1;
         return;
     }
+
+    s_fail_streak = 0;
 
     chMtxLock(&strainRate_mtx);
     g_strain_rate.val[0] = (int16_t)((uint16_t)s_i2c_rx[0] | ((uint16_t)s_i2c_rx[1] << 8));
