@@ -10,32 +10,30 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _mode(FlightMode::STABILIZE)
     , _pid(cfg.pid)
     , _indi(cfg.indi)
-    , _pid_pi(cfg.pid_pi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
     , _unmixer(cfg.unmixer)
     , _num_controllers(0)
     , _active_index(0)
     , _indi_index(-1)
+    , _jerk_index(-1)
 {
     _controllers[_num_controllers++] = &_pid;   // always present, always index 0
     if (cfg.controllers.indi_enabled) {
         _indi_index = _num_controllers;
         _controllers[_num_controllers++] = &_indi;
     }
-    if (cfg.controllers.pid_pi_enabled) {
-        _controllers[_num_controllers++] = &_pid_pi;
+    if (cfg.controllers.jerk_enabled) {
+        _jerk_index = _num_controllers;
+        _controllers[_num_controllers++] = &_pid_jerk;
     }
 }
-    , _use_jerk(false)
-{}
 
 void FlightStateMachine::reset_all()
 {
     _pid.reset_all();
     _pid_jerk.reset_all();
     _indi.reset_all();
-    _pid_pi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
     _ph_N = PHAxisMode::PILOT;
@@ -58,10 +56,6 @@ void FlightStateMachine::run_attitude(const float euler[],
     // Every controller in this drone's config list runs (shadow mode) so a
     // controller not currently selected stays live and comparable in the
     // logs regardless of which one actually flies.
-    // All controllers always run every tick so their internal state (filters,
-    // integrators) stays live and their output is comparable in the logs
-    // regardless of which one actually flies. INDI is pure shadow (never
-    // selectable); PID and PIDJ are the two the switch chooses between.
     float current_torque[2];
     _unmixer.compute(rpm, current_torque);
 
@@ -75,6 +69,13 @@ void FlightStateMachine::run_attitude(const float euler[],
         _indi.set_indi_active(_active_index == _indi_index);
     }
 
+    // roll_jerk isn't part of the shared AttitudeController::update()
+    // signature (see class comment) — hand it to AttitudePIDJerk directly
+    // before the generic dispatch below, same pattern as set_indi_active().
+    if (_jerk_index >= 0) {
+        _pid_jerk.set_roll_jerk(roll_jerk);
+    }
+
     float cmds[MAX_ATTITUDE_CONTROLLERS][3];
     for (int i = 0; i < _num_controllers; ++i) {
         _controllers[i]->update(euler, state_full, input, current_torque, _unmixer, cmds[i]);
@@ -82,7 +83,7 @@ void FlightStateMachine::run_attitude(const float euler[],
 
     // _indi_index is INDI's list index when the drone's config enables it
     // (see constructor), -1 otherwise — no longer assumable as "1" now that
-    // list index 1 may instead be PID+PI on a drone with INDI disabled.
+    // list index 1 may instead be Jerk on a drone with INDI disabled.
     if (_indi_index >= 0) {
         float delta_torque[2], accel_cmd[2], g1[2];
         _indi.get_diag(delta_torque, accel_cmd);
@@ -100,25 +101,17 @@ void FlightStateMachine::run_attitude(const float euler[],
     } else {
         memset(_indi_diag, 0, sizeof(_indi_diag));
     }
-    float jerk_cmds[3];
-    float roll_rate_tgt;
-    _pid_jerk.update(ctrl_state6, input, roll_jerk, jerk_cmds, roll_rate_tgt);
-    _jerk_diag[0] = roll_jerk;
-    _jerk_diag[1] = jerk_cmds[0];
-    _jerk_diag[2] = roll_rate_tgt;
-    _jerk_diag[3] = jerk_cmds[2];
 
-    _indi_diag[0] = current_torque[0];
-    _indi_diag[1] = current_torque[1];
-    _indi_diag[2] = delta_torque[0];
-    _indi_diag[3] = delta_torque[1];
-    _indi_diag[4] = indi_cmds[0];
-    _indi_diag[5] = indi_cmds[1];
-    _indi_diag[6] = accel_cmd[0];
-    _indi_diag[7] = accel_cmd[1];
+    if (_jerk_index >= 0) {
+        _jerk_diag[0] = roll_jerk;
+        _jerk_diag[1] = cmds[_jerk_index][0];
+        _jerk_diag[2] = _pid_jerk.roll_rate_tgt();
+        _jerk_diag[3] = cmds[_jerk_index][2];
+    } else {
+        memset(_jerk_diag, 0, sizeof(_jerk_diag));
+    }
 
     const float *active = cmds[_active_index];
-    const float *active = _use_jerk ? jerk_cmds : pid_cmds;
     out_cmds[0] = active[0];
     out_cmds[1] = active[1];
     out_cmds[2] = active[2];
@@ -129,11 +122,11 @@ void FlightStateMachine::run_attitude(const float euler[],
 void FlightStateMachine::mode_stabilize(const float euler[],
                                         const float state_full[],
                                         const float input[],
-                                        const uint32_t rpm[], float roll_jerk,
+                                        const uint32_t rpm[],
+                                        float roll_jerk,
                                         float out_cmds[3], float &thrust_out)
 {
-    run_attitude(euler, state_full, input, rpm, out_cmds);
-    run_attitude(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds);
+    run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
     thrust_out = _alt.compute_throttle(euler[0], euler[1], input[InputIdx::THRUST]);
 }
 
@@ -142,11 +135,11 @@ void FlightStateMachine::mode_stabilize(const float euler[],
 void FlightStateMachine::mode_alt_hold(const float euler[],
                                        const float state_full[],
                                        const float input[],
-                                       const uint32_t rpm[], float roll_jerk,
+                                       const uint32_t rpm[],
+                                       float roll_jerk,
                                        float out_cmds[3], float &thrust_out)
 {
-    run_attitude(euler, state_full, input, rpm, out_cmds);
-    run_attitude(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds);
+    run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
 
     const float vD     = state_full[StateIdx::W];
     thrust_out = _alt.alt_hold_from_stick(input[InputIdx::THRUST], vD);
@@ -160,7 +153,8 @@ void FlightStateMachine::mode_alt_hold(const float euler[],
 void FlightStateMachine::mode_pos_hold(const float euler[],
                                        const float state_full[],
                                        const float input[],
-                                       const uint32_t rpm[], float roll_jerk,
+                                       const uint32_t rpm[],
+                                       float roll_jerk,
                                        float out_cmds[3], float &thrust_out)
 {
     // ── Body→NED velocity rotation ───────────────────────────────────────────
@@ -333,8 +327,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
         // TEMP (CTUN tuning): fly hands-off STABILIZE — direct stick to
         // attitude and throttle — while the pos-hold cascade above runs
         // shadow-only. See CTUN_POSHOLD_SHADOW.
-        run_attitude(euler, state_full, input, rpm, out_cmds);
-        run_attitude(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds);
+        run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
         thrust_out = _alt.compute_throttle(euler[0], euler[1], input[InputIdx::THRUST]);
         return;
     }
@@ -344,8 +337,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     memcpy(pos_input, input, sizeof(pos_input));
     pos_input[InputIdx::ROLL_TGT]  = att_cmds[0];
     pos_input[InputIdx::PITCH_TGT] = att_cmds[1];
-    run_attitude(euler, state_full, pos_input, rpm, out_cmds);
-    run_attitude(ctrl_state6, euler, state_full, pos_input, rpm, roll_jerk, out_cmds);
+    run_attitude(euler, state_full, pos_input, rpm, roll_jerk, out_cmds);
 
     // ── Altitude: inner loop only (climb rate from NED_update D) ──────────────
     thrust_out = _alt.alt_hold_from_rate(vel_tgt[2], vD);
@@ -415,16 +407,13 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
     // ── Dispatch ─────────────────────────────────────────────────────────────
     switch (_mode) {
         case FlightMode::STABILIZE:
-            mode_stabilize(euler, state_full, input, rpm, out_cmds, thrust_out);
-            mode_stabilize(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
+            mode_stabilize(euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
             break;
         case FlightMode::ALT_HOLD:
-            mode_alt_hold(euler, state_full, input, rpm, out_cmds, thrust_out);
-            mode_alt_hold(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
+            mode_alt_hold(euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
             break;
         case FlightMode::POS_HOLD:
-            mode_pos_hold(euler, state_full, input, rpm, out_cmds, thrust_out);
-            mode_pos_hold(ctrl_state6, euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
+            mode_pos_hold(euler, state_full, input, rpm, roll_jerk, out_cmds, thrust_out);
             break;
     }
 

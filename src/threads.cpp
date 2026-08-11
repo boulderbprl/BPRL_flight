@@ -52,7 +52,6 @@ float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, de
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
-bool    g_use_jerk           = false; // attitude controller switch from radio (false=PID, true=PIDJ; positions 1-2=PID, 3=PIDJ). AttitudeINDI is always shadow-run, never selected by this switch.
 int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
 int     g_active_controller  = 0;    // FlightStateMachine's resolved active controller-list index (0=PID default)
 
@@ -64,6 +63,7 @@ CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0
 
 MUTEX_DECL(strainRate_mtx);
 StrainRateRaw g_strain_rate = {};
+float         g_strain_bias[4] = {};  // per-channel zero-offset, live-calibrated by ControlThread — see JerkFit.hpp
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
@@ -534,6 +534,66 @@ static THD_FUNCTION(ControlThread, arg)
         chMtxUnlock(&state_mtx);
 
         flight_sm.set_active_controller(radio_switch_pos);
+
+        // Strain-fit roll jerk estimate (AttitudePIDJerk shadow term, see JerkFit.hpp).
+        StrainRateRaw strain_snap;
+        float         strain_bias_snap[4];
+        chMtxLock(&strainRate_mtx);
+        strain_snap = g_strain_rate;
+        memcpy(strain_bias_snap, g_strain_bias, sizeof(strain_bias_snap));
+        chMtxUnlock(&strainRate_mtx);
+
+        // ── Per-channel strain bias calibration (channel-6 momentary switch) ──
+        // Holding the switch averages each raw strain channel; releasing (or
+        // hitting the 5 s cap while still held) commits the running average as
+        // the new g_strain_bias, replacing whatever was there. Session-only —
+        // resets to {0,0,0,0} on every boot, never written to flash. Honored
+        // regardless of arm state, so don't trigger it mid-flight: the strain
+        // inputs feeding AttitudePIDJerk's shadow estimate will drift for
+        // however long the switch is held.
+        {
+            static bool     s_cal_active    = false;  // true from press until release
+            static bool     s_cal_committed = false;  // true once this press has already written g_strain_bias
+            static uint32_t s_cal_ticks     = 0;
+            static double   s_cal_sum[4]    = {};
+            static constexpr uint32_t CAL_MAX_TICKS = 2000;  // 5 s @ 400 Hz
+
+            const bool sw = radio_strain_cal();
+
+            if (sw && !s_cal_active) {
+                // Rising edge: start a new press.
+                s_cal_active    = true;
+                s_cal_committed = false;
+                s_cal_ticks     = 0;
+                memset(s_cal_sum, 0, sizeof(s_cal_sum));
+            }
+
+            if (s_cal_active && sw && !s_cal_committed && s_cal_ticks < CAL_MAX_TICKS) {
+                for (int i = 0; i < 4; i++) s_cal_sum[i] += strain_snap.val[i];
+                s_cal_ticks++;
+            }
+
+            // Commit exactly once per press: either on release (a shorter
+            // average) or on hitting the cap while still held. Whichever
+            // happens first — hitting the cap while still held then just
+            // waits (latched) for release before it can be triggered again.
+            const bool should_commit = s_cal_active && !s_cal_committed
+                                     && (!sw || s_cal_ticks >= CAL_MAX_TICKS)
+                                     && s_cal_ticks > 0;
+            if (should_commit) {
+                for (int i = 0; i < 4; i++) {
+                    strain_bias_snap[i] = (float)(s_cal_sum[i] / (double)s_cal_ticks);
+                }
+                chMtxLock(&strainRate_mtx);
+                memcpy(g_strain_bias, strain_bias_snap, sizeof(g_strain_bias));
+                chMtxUnlock(&strainRate_mtx);
+                s_cal_committed = true;
+            }
+
+            if (!sw) s_cal_active = false;  // released → re-arm for the next press
+        }
+
+        const float roll_jerk = estimate_jerk(strain_snap, strain_bias_snap, ctrl_full[StateIdx::P]).roll_jerk;
 
         float torque_cmds[3];
         float thrust;
@@ -1416,7 +1476,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], jerk_diag[4];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1431,8 +1491,10 @@ static THD_FUNCTION(LogThread, arg)
 
         /* ── Strain rate snapshot ─────────────────────────────────────── */
         StrainRateRaw strain = {};
+        float         strain_bias[4];
         chMtxLock(&strainRate_mtx);
         strain = g_strain_rate;
+        memcpy(strain_bias, g_strain_bias, sizeof(strain_bias));
         chMtxUnlock(&strainRate_mtx);
 
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
@@ -1593,7 +1655,7 @@ static THD_FUNCTION(LogThread, arg)
         /* ── JKFT — jerk fitting ───────────────────────────────────────── */
         // Josh added this, it's probably dogshit, sorry in advance
         {
-            const JerkEstimate jerk = estimate_jerk(strain, state[StateIdx::P]);
+            const JerkEstimate jerk = estimate_jerk(strain, strain_bias, state[StateIdx::P]);
 
             LogMsgJKFT msg = {};
             msg.time_us = t_us;

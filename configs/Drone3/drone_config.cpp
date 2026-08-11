@@ -23,8 +23,8 @@
  *     LINE_MOTOR0..3: PD12/PD13/PA1/PA0 on the main ESC connector) — see the
  *     .mixer comment further down for the lane→corner mapping found on the
  *     bench. Re-derive motor_map if the ESC wiring changes.
- *   - .controllers below deliberately disables both INDI and PID+PI (plain
- *     PID only), unlike Drone1's INDI-enabled default — conservative
+ *   - .controllers below deliberately disables both INDI and Jerk (plain
+ *     PID only), unlike Drone1's INDI+Jerk-enabled default — conservative
  *     starting point pending flight testing on this airframe.
  *
  * Field order below matches each struct's declaration order in
@@ -62,7 +62,7 @@ const DroneConfig kDroneConfig = {
     },
 
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
-    // Unused while .controllers.pid_pi_enabled=false below; copied from Drone1 only to keep the struct valid.
+    // Unused — AttitudePIDPI is no longer wired into FlightStateMachine's controller list (see ControllersConfig::jerk_enabled); copied from Drone1 only to keep the struct valid.
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
@@ -89,8 +89,8 @@ const DroneConfig kDroneConfig = {
         { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
 
-    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
-    { 0, 3, 1, 2, 4, 6, 7 },
+    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch }
+    { 0, 3, 1, 2, 4, 6, 7, 5 },
 
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     // Factor arrays are the standard [FR, RL, FL, RR] logical order — motor_map
@@ -123,7 +123,7 @@ const DroneConfig kDroneConfig = {
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU, no mocap link.
     { true, false, false },
 
-    // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
+    // .controllers — ControllersConfig { indi_enabled, jerk_enabled }
     // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
     { false, false },
 

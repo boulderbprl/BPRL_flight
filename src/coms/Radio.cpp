@@ -23,6 +23,8 @@
  *   indi_switch = 7  Attitude-controller-select switch (3-position) → [-1, 1];
  *                    only the 3rd (highest) position selects the non-default
  *                    controller — see FlightStateMachine::set_active_controller()
+ *   strain_cal_switch = 5  Momentary strain-bias-cal switch → >992 = held;
+ *                    see JerkFit.hpp / ControlThread's strain calibration block
  *
  * Both SBUS and CRSF use the same 11-bit value range: 172–1811, centre 992.
  */
@@ -39,6 +41,7 @@ float radio_yaw()         { return norm_axis(PARSER.channel(kDroneConfig.rc_map.
 bool  radio_armed()       { return PARSER.channel(kDroneConfig.rc_map.arm) > 992u; }
 float radio_flight_mode() { return norm_axis(PARSER.channel(kDroneConfig.rc_map.flight_mode)); }
 float radio_indi()        { return norm_axis(PARSER.channel(kDroneConfig.rc_map.indi_switch)); }
+bool  radio_strain_cal()  { return PARSER.channel(kDroneConfig.rc_map.strain_cal_switch) > 992u; }
 
 int radio_switch_position()
 {

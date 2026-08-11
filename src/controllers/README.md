@@ -34,7 +34,7 @@ FlightStateMachine  (400 Hz)
        list index 0 (default) → AttitudePID::update()               ◄────┘
        next, if indi_enabled → AttitudeINDI::update()
                     └─ Unmixer::compute() (RPM → torque N·m)
-       next, if pid_pi_enabled → AttitudePIDPI::update()
+       next, if jerk_enabled → AttitudePIDJerk::update() (roll_jerk fed via set_roll_jerk())
      │
      ▼
 MotorMixer  [roll_tq, pitch_tq, yaw_tq, thrust] → motor commands [0..1000]
@@ -79,13 +79,13 @@ Mode changes reset all controllers.
 
 The attitude controller is independent of the flight mode and is selected by `set_active_controller(int radio_switch_pos)` at runtime. `FlightStateMachine` holds a config-driven list of controllers (see `configs/DroneConfig.hpp`'s `ControllersConfig`) behind the common `AttitudeController` interface — every controller in the list runs every tick (shadow mode); only the one at the resolved list index drives the output:
 
-List indices are assigned in fixed order — PID always 0; INDI, if enabled, always takes the next index; PID+PI, if enabled, always comes last (so PID+PI is index 1, not 2, on a drone that enables it without INDI):
+List indices are assigned in fixed order — PID always 0; INDI, if enabled, always takes the next index; Jerk, if enabled, always comes last (so Jerk is index 1, not 2, on a drone that enables it without INDI):
 
 | List index | Controller |
 |---|---|
 | 0 (always present, default) | `AttitudePID` — cascade P + PID |
 | next, if `ControllersConfig::indi_enabled` | `AttitudeINDI` — incremental NDI roll/pitch, PID yaw |
-| next, if `ControllersConfig::pid_pi_enabled` | `AttitudePIDPI` — outer P + rate-PID ("SLC") + inner PI on measured angular acceleration for roll/pitch, PID yaw |
+| next, if `ControllersConfig::jerk_enabled` | `AttitudePIDJerk` — cascade P + PID, roll axis replaced by a jerk-tracking term against the strain-fit roll-jerk estimate (`roll_jerk`, fed in each tick via `set_roll_jerk()` — see `src/sensors/JerkFit.hpp`) |
 
 With all three controllers present, the 3-position switch maps one-to-one to list index. With only two present it keeps the legacy mapping (low/mid → index 0, high → index 1) — see `FlightStateMachine::set_active_controller()`.
 
@@ -167,7 +167,7 @@ data showed doublet excitation visible at 50 Hz resolution but not at 400 Hz):
 
 This whole block runs every tick `AttitudeINDI::update()` is called — i.e. every tick INDI is in the drone's controller list, whether or not it's the *active* controller (shadow mode, like every other controller in `FlightStateMachine`'s list) — but only the `tau_f` filter update happens every tick; the decimated regressor/step above only fires once every `NLMS_DECIMATION` ticks.
 
-`mu` is mode-dependent: `nlms_mu_pid` (aggressive) while INDI is running in shadow behind PID/PID+PI, `nlms_mu_indi` (slow/trickle) once INDI is actually driving the mixer — set via `set_indi_active(bool)`, called once per tick by `FlightStateMachine::run_attitude()`. `G1_hat` persists across arm/disarm cycles within a boot (only the filter/differencing memory resets in `reset_all()`) — the learned estimate is never thrown away just because the vehicle disarmed.
+`mu` is mode-dependent: `nlms_mu_pid` (aggressive) while INDI is running in shadow behind PID/Jerk, `nlms_mu_indi` (slow/trickle) once INDI is actually driving the mixer — set via `set_indi_active(bool)`, called once per tick by `FlightStateMachine::run_attitude()`. `G1_hat` persists across arm/disarm cycles within a boot (only the filter/differencing memory resets in `reset_all()`) — the learned estimate is never thrown away just because the vehicle disarmed.
 
 `kappa` (`indi_output_gain_roll/pitch`) is a separate, static, per-axis output-authority gain, decoupled from `G1_hat` so tuning control authority never silently retunes the physical-effectiveness estimate (or vice versa). `kappa = 1.0` reproduces the pre-adaptation behavior exactly.
 
@@ -194,7 +194,7 @@ The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rat
 |---|---|
 | `g1_seed_roll` / `g1_seed_pitch` | Offline-identified `G1_hat` seed (N·m·s²/rad) — also the NLMS drift-clamp reference; airframe-specific, re-derive per drone |
 | `indi_output_gain_roll/pitch` (kappa) | Static output-authority gain, decoupled from `G1_hat`. `1.0` reproduces pre-adaptation behavior |
-| `nlms_mu_pid` | Adaptation rate while INDI is in shadow (PID/PID+PI active) — needs bench/flight tuning |
+| `nlms_mu_pid` | Adaptation rate while INDI is in shadow (PID/Jerk active) — needs bench/flight tuning |
 | `nlms_mu_indi` | Adaptation rate while INDI is active (slow/trickle) — needs bench/flight tuning |
 | `yaw_gain` | Scales the yaw rate target before the rate PID — **not** the same field as `AttitudePidGains::yaw_stick_gain`; two distinct fields in two distinct gain structs, easy to conflate, and not necessarily the same value per drone |
 
@@ -220,7 +220,7 @@ Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's outp
 
 ### Gains
 
-Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`). The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination** — `ControllersConfig::pid_pi_enabled` defaults to `false` until it has.
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`) — still spelled out in every drone's config for reference even though the field is unused. The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination**, and `AttitudePIDPI` is no longer wired into `FlightStateMachine`'s controller list — `ControllersConfig`'s third slot (`jerk_enabled`) now selects `AttitudePIDJerk` instead (see above). The class/gains stay in the repo for possible future reuse.
 
 | Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|

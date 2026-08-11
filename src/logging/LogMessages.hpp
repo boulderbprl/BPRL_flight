@@ -42,7 +42,7 @@ constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
-constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics (always logged; flies when the channel-7 switch selects it — see Attitude_PID_Jerk.hpp)
+constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics (always logged, pure shadow — never selectable, see Attitude_PID_Jerk.hpp)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 

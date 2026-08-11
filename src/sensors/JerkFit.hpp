@@ -14,33 +14,43 @@
  */
 struct JerkEstimate {
     float z_jerk;     // m/s^3   vertical jerk estimate
-    float roll_jerk;  // rad/s^3 roll jerk estimate ("Pdd"), bias-corrected (see ROLL_JERK_BIAS)
+    float roll_jerk;  // rad/s^3 roll jerk estimate ("Pdd")
 };
 
-// JKFT_MATRIX has no intercept term, so its raw output isn't mean-zero.
-// Measured steady-state mean of raw Pdd; subtracted below so roll_jerk is
-// zero-centred for the AttitudePIDJerk damping term. Re-measure and update
-// if the strain sensors are recalibrated or the fit is re-derived.
-constexpr float ROLL_JERK_BIAS = 37.3646f; // rad/s^3
-
-inline JerkEstimate estimate_jerk(const StrainRateRaw &strain, float p)
+// JKFT_MATRIX has no intercept term, so its raw output isn't mean-zero unless
+// each strain channel is itself zero-mean first. strain_bias[4] is that
+// per-channel zero-offset — live-calibrated on the bench via the channel-6
+// momentary switch (see ControlThread's strain calibration block in
+// threads.cpp and radio_strain_cal()), not a fixed measured constant: it
+// resets to {0,0,0,0} every boot and is only ever as good as the most recent
+// calibration this session. Pass {0,0,0,0} (uncalibrated) to get the raw,
+// unbiased-only-by-luck fit.
+inline JerkEstimate estimate_jerk(const StrainRateRaw &strain, const float strain_bias[4], float p)
 {
+    // constexpr float JKFT_MATRIX[5][2] = {
+    //     {  -0.0613f,   -0.0578f}, // s0
+    //     {   0.0842f,    0.0401f}, // s1
+    //     {  -0.0122f,    0.0789f}, // s2
+    //     {   0.0253f,   -0.0575f}, // s3
+    //     {  -0.4319f,  -33.6420f}, // p
+    // };
     constexpr float JKFT_MATRIX[5][2] = {
-        {  -0.0613f,   -0.0578f}, // s0
-        {   0.0842f,    0.0401f}, // s1
-        {  -0.0122f,    0.0789f}, // s2
-        {   0.0253f,   -0.0575f}, // s3
-        {  -0.4319f,  -33.6420f}, // p
+        {  -0.017783f,   -0.23087f}, // s0
+        {   0.026056f,    0.21854f}, // s1
+        {  -0.013622f,    0.057366f}, // s2
+        {   0.022922f,   -0.0023487f}, // s3
+        {  -0.70644f ,  -70.504f}, // p
     };
 
-    const float inputs[5] = { (float)strain.val[0], (float)strain.val[1],
-                               (float)strain.val[2], (float)strain.val[3], p };
+    const float inputs[5] = { (float)strain.val[0] - strain_bias[0],
+                               (float)strain.val[1] - strain_bias[1],
+                               (float)strain.val[2] - strain_bias[2],
+                               (float)strain.val[3] - strain_bias[3], p };
 
     JerkEstimate out{};
     for (uint8_t i = 0; i < 5; i++) {
         out.z_jerk    += inputs[i] * JKFT_MATRIX[i][0];
         out.roll_jerk += inputs[i] * JKFT_MATRIX[i][1];
     }
-    out.roll_jerk -= ROLL_JERK_BIAS;
     return out;
 }

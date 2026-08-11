@@ -69,8 +69,8 @@ const DroneConfig kDroneConfig = {
         { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
    
-    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
-    { 0, 1, 2, 3, 4, 6, 7 },
+    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch }
+    { 0, 1, 2, 3, 4, 6, 7, 5 },
    
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     {
@@ -93,9 +93,9 @@ const DroneConfig kDroneConfig = {
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
     { true, true, true },
     
-    // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
-    // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, PID+PI last if enabled 
-    { true, false },
+    // .controllers — ControllersConfig { indi_enabled, jerk_enabled }
+    // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, Jerk last if enabled
+    { false, true },
    
     // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
     {

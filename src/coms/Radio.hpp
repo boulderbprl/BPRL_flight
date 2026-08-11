@@ -34,3 +34,4 @@ float radio_flight_mode(void);  /* flight mode sw [-1, 1] from RcChannelMap::fli
 bool  radio_armed(void);
 float radio_indi(void);         /* raw controller-select switch position [-1, 1], RcChannelMap::indi_switch (3-pos) */
 int   radio_switch_position(void);  /* radio_indi() bucketed to 0/1/2 (low/mid/high) — see FlightStateMachine::set_active_controller() */
+bool  radio_strain_cal(void);   /* momentary strain-bias-cal switch, RcChannelMap::strain_cal_switch — see JerkFit.hpp */

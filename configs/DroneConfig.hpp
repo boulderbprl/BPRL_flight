@@ -73,7 +73,7 @@ struct PosControlGains {
 // RC channel index assignment (src/coms/Radio.cpp). Both SBUS and CRSF use
 // the same 11-bit channel numbering, so one map covers either protocol.
 struct RcChannelMap {
-    uint8_t thr, roll, pitch, yaw, arm, flight_mode, indi_switch;
+    uint8_t thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch;
 };
 
 // Motor mixing geometry (src/controllers/MotorMixer.hpp). Factor arrays are
@@ -126,7 +126,7 @@ struct SensorsConfig {
 // always-present default (PID, always list index 0).
 struct ControllersConfig {
     bool indi_enabled;
-    bool pid_pi_enabled;
+    bool jerk_enabled;  // AttitudePIDJerk (roll PI-on-jerk term) — see Attitude_PID_Jerk.hpp
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates

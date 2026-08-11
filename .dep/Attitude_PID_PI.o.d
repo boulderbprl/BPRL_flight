@@ -1,5 +1,5 @@
-build/obj/Attitude_PID_Jerk.o: src/controllers/Attitude_PID_Jerk.cpp \
- src/controllers/Attitude_PID_Jerk.hpp src/controllers/PID.hpp \
+build/obj/Attitude_PID_PI.o: src/controllers/Attitude_PID_PI.cpp \
+ src/controllers/Attitude_PID_PI.hpp src/controllers/PID.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/os_defines.h \
@@ -11,8 +11,8 @@ build/obj/Attitude_PID_Jerk.o: src/controllers/Attitude_PID_Jerk.cpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_newlib_version.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h \
- src/controllers/AttitudeController.hpp src/FlightState.hpp \
- src/math/math.hpp \
+ src/controllers/AttitudeController.hpp configs/DroneConfig.hpp \
+ src/FlightState.hpp src/math/math.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h \
@@ -37,7 +37,7 @@ build/obj/Attitude_PID_Jerk.o: src/controllers/Attitude_PID_Jerk.cpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/stdlib.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/machine/stdlib.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/alloca.h
-src/controllers/Attitude_PID_Jerk.hpp:
+src/controllers/Attitude_PID_PI.hpp:
 src/controllers/PID.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstdint:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/arm-none-eabi/thumb/v7e-m+dp/hard/bits/c++config.h:
@@ -51,6 +51,7 @@ src/controllers/PID.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h:
 src/controllers/AttitudeController.hpp:
+configs/DroneConfig.hpp:
 src/FlightState.hpp:
 src/math/math.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring:
