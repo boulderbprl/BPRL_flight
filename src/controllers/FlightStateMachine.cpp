@@ -59,9 +59,10 @@ void FlightStateMachine::run_attitude(const float euler[],
 
     // Tell the live NLMS estimator whether INDI is the controller actually
     // driving out_cmds this tick, so it can select its mode-dependent
-    // adaptation rate mu (spec section 5.2). The estimator itself still runs
-    // every tick below regardless of this flag (continuous shadow
-    // estimation, spec section 7).
+    // adaptation rate mu. The estimator itself still runs every tick below
+    // regardless of this flag (continuous shadow estimation) — see
+    // Attitude_INDI's Live G(x) adaptation write-up in
+    // src/controllers/README.md.
     if (_indi_index >= 0) {
         _indi.set_indi_active(_active_index == _indi_index);
     }

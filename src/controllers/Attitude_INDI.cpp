@@ -48,9 +48,9 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     _accel_cmd[1] = accel_cmd_pitch;
 
     // ── INDI step: incremental torque from acceleration error ──────────────
-    // Uses G1_hat from the *previous* tick's NLMS update (spec section 7 —
-    // no separate initialization pass; the live estimate is handed straight
-    // to the control law). G1_hat is refreshed for next tick further below.
+    // Uses G1_hat from the *previous* tick's NLMS update — no separate
+    // initialization pass; the live estimate is handed straight to the
+    // control law. G1_hat is refreshed for next tick further below.
     const float p_dot_meas = state_full[StateIdx::P_DOT];
     const float q_dot_meas = state_full[StateIdx::Q_DOT];
 
@@ -71,7 +71,7 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     // _nlms_update_axis still get fed every tick; only the NLMS regressor
     // Delta and step itself are formed once every NLMS_DECIMATION ticks —
     // see the comment on NLMS_DECIMATION in Attitude_INDI.hpp and
-    // indi_adaptive_G_controller_spec.md section 5.
+    // src/controllers/README.md's AttitudeINDI "Live G(x) adaptation" section.
     ++_nlms_tick_count;
     const bool do_nlms_step = (_nlms_tick_count >= NLMS_DECIMATION);
     if (do_nlms_step) {
@@ -130,7 +130,7 @@ void AttitudeINDI::reset_all()
 }
 
 // One NLMS update step for a single axis — see the class-level comment in
-// Attitude_INDI.hpp and indi_adaptive_G_controller_spec.md section 5.1.
+// Attitude_INDI.hpp and src/controllers/README.md's AttitudeINDI "Live G(x) adaptation" section.
 // do_step selects whether this call forms the decimated Delta_tau_f/
 // Delta_Omega_dot_f regressor and attempts a step (every NLMS_DECIMATION
 // ticks) or just advances the tau_f filter state (every other tick).
@@ -140,7 +140,7 @@ void AttitudeINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &g
 {
     // tau_f: current_torque through the same filter chain (type/order/
     // cutoff) StateManager applies to p_dot/q_dot — delay-matched regressor
-    // input (spec section 3.2), independent of current_torque's own use,
+    // input, independent of current_torque's own use,
     // unfiltered, as the increment-law baseline above. Runs every tick
     // regardless of do_step so it keeps its designed 400 Hz-sampled cutoff.
     const float stage2p = lowpass2p(tau_now, filt_state, STATEMGR_LP_PQRDOT_HZ, NLMS_DT_S);
@@ -156,7 +156,7 @@ void AttitudeINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &g
         const float delta_tau_f      = tau_f - prev_tau_f;
         const float delta_omegadot_f = omegadot_now - prev_omegadot_f;
 
-        // Excitation gating (spec section 5.3): near-hover/no-input periods
+        // Excitation gating: near-hover/no-input periods
         // produce an uninformative regression that mostly fits noise. Now
         // evaluated over the decimated NLMS_DECIMATION-tick window rather
         // than a single 2.5 ms tick.
@@ -165,7 +165,7 @@ void AttitudeINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &g
             const float e  = delta_omegadot_f - g1 * delta_tau_f;
             float step = mu * e * delta_tau_f / (delta_tau_f * delta_tau_f + NLMS_EPS);
 
-            // Safety clamps (spec section 5.4): bound the per-step change
+            // Safety clamps: bound the per-step change
             // and the total drift from the offline seed — a large jump
             // indicates a transient glitch that should saturate, not
             // propagate.

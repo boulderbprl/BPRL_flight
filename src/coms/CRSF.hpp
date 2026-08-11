@@ -26,7 +26,7 @@
 class CrsfParser {
 public:
     void     init();
-    void     update();                  // drain the RC UART (SD2 Cube boards / SD3 BPRL_BOARD_ORQA), run state machine; call at ~100 Hz
+    void     update();                  // drain the RC UART (SD2 Cube boards / SD6 BPRL_BOARD_ORQA), run state machine; call at ~100 Hz
     uint16_t channel(uint8_t n) const; // raw 11-bit value for channel n (0–15)
     bool     data_valid() const { return _valid; }
 

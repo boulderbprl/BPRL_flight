@@ -14,7 +14,8 @@ void MotorMixer::update(const float cmds[3], float thrust,
         return;
     }
 
-    // Motor order: FR, RL, FL, RR (matches out[] / hardware pinout).
+    // Motor order: FR, RL, FL, RR — logical, NOT physical lane order; see
+    // MotorMixer.hpp / MotorMixerConfig.motor_map, applied at the end below.
     const float *roll_factor  = _cfg.roll_factor;
     const float *pitch_factor = _cfg.pitch_factor;
     const float *yaw_factor   = _cfg.yaw_factor;
@@ -63,8 +64,9 @@ void MotorMixer::update(const float cmds[3], float thrust,
     }
     thr = clamp(thr, pwm_min - lo, pwm_max - hi);
 
+    // Logical [FR,RL,FL,RR] -> physical DShot lane, per motor_map.
     for (int i = 0; i < 4; i++)
-        out[i] = (int32_t)clamp(thr + cmd[i], pwm_min, pwm_max);
+        out[_cfg.motor_map[i]] = (int32_t)clamp(thr + cmd[i], pwm_min, pwm_max);
 }
 
 bool MotorMixer::should_disarm(const float state[]) const

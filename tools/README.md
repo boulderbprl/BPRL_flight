@@ -204,7 +204,7 @@ python3 tools/logs.py log-status
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
-| `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel) |
+| `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
 
 All 11 message types log at the fixed 50 Hz `LogThread` period — there's no per-record rate field.
@@ -283,7 +283,7 @@ Run it under realistic load (armed, radio connected, CAN/mocap link up) — idle
 
 ## flash_upload.py
 
-Uploads a compiled `.bin` firmware image to a CubeBlue H7 or CubeOrange+ using the ChibiOS bootloader protocol over USB.
+Uploads a compiled `.bin` firmware image over USB using the ChibiOS bootloader protocol. Boards that don't ship with an ArduPilot-compatible bootloader (e.g. a factory-fresh Orqa QuadCore H7) need a one-time DFU bootstrap first — see the root README's [Upload](../README.md#upload) section.
 
 ```bash
 # Recommended: use Makefile targets

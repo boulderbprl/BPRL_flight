@@ -22,8 +22,9 @@
  *
  * G1_hat (~1/Ixx, 1/Iyy) is a live NLMS estimate seeded from the offline-
  * identified config value and continuously adapted (see the NLMS block in
- * update() and indi_adaptive_G_controller_spec.md at the repo root). kappa
- * is a separate, static, per-axis output-authority gain — decoupled from the
+ * update() below, and src/controllers/README.md's AttitudeINDI "Live G(x)
+ * adaptation" section for the full write-up). kappa is a separate, static,
+ * per-axis output-authority gain — decoupled from the
  * physical-effectiveness estimate so tuning one never silently retunes the
  * other. update() is called every tick this controller is enabled in the
  * drone's config (per FlightStateMachine's shadow-mode dispatch), regardless
@@ -87,7 +88,7 @@ public:
 
     // Tells the live NLMS estimator whether INDI is the controller currently
     // driving out_cmds (vs. running in shadow behind PID/PID+PI), so it can
-    // pick the mode-dependent adaptation rate mu (spec section 5.2). Called
+    // pick the mode-dependent adaptation rate mu. Called
     // once per tick by FlightStateMachine::run_attitude(), independent of
     // the AttitudeController::update() interface (INDI-only, like get_diag()).
     void set_indi_active(bool active) { _indi_active = active; }
@@ -131,16 +132,16 @@ private:
 
     // tau_f: current_torque passed through the same filter chain (type/
     // order/cutoff) StateManager applies to p_dot/q_dot, so the NLMS
-    // regressor and Omega_dot_f are delay-matched (spec section 3.2). Reuses
+    // regressor and Omega_dot_f are delay-matched. Reuses
     // STATEMGR_LP_PQRDOT_HZ/_EXTRA_HZ from StateManager.hpp rather than
     // redefining them, so the two filters can't silently drift apart.
     Biquad2pState _tau_filt_state[2];   // [roll, pitch] 2nd-order stage
     float         _tau_extra_filt[2] = {};  // [roll, pitch] optional 1st-order stage memory
 
     // Previous-step filtered values, for the incremental NLMS regressor
-    // (Delta_tau_f, Delta_Omega_dot_f) — see spec section 5.1. Only refreshed
-    // every NLMS_DECIMATION ticks (see below), so this is a Delta across the
-    // decimated window, not a single 400 Hz tick.
+    // (Delta_tau_f, Delta_Omega_dot_f). Only refreshed every NLMS_DECIMATION
+    // ticks (see below), so this is a Delta across the decimated window, not
+    // a single 400 Hz tick.
     float _prev_tau_f[2]        = {};  // [roll, pitch]
     float _prev_omegadot_f[2]   = {};  // [roll, pitch]
     bool  _nlms_initialized     = false;  // false until the first post-reset decimated step seeds _prev_*
@@ -165,7 +166,7 @@ private:
     // tuning like the constants below.
     static constexpr int NLMS_DECIMATION = 8;
 
-    // NLMS safety margins (spec section 5.3/5.4) — adaptation-safety
+    // NLMS safety margins — adaptation-safety
     // constants, not physical per-drone identification data, so they start
     // as flight-tuning constants here rather than DroneConfig fields (same
     // convention as YAW_HOLD_MAX_RATE below); promote to DroneConfig later

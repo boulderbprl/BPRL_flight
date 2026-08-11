@@ -169,8 +169,8 @@ static THD_FUNCTION(SPIThread, arg)
         // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
         // sign or axis mapping will be wrong on this board's lanes — verify
         // on the bench before flight (e.g. tilt nose-down, confirm pitch
-        // angle sign in $TEL/$IMU telemetry; see tools/bprl.py) and replace
-        // this block with the correct ROTATION_* mapping once known.
+        // angle sign in $TEL/$IMU telemetry; see tools/telemetry.py) and
+        // replace this block with the correct ROTATION_* mapping once known.
         if (imu1.read(a, g)) {
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
@@ -203,10 +203,9 @@ static THD_FUNCTION(SPIThread, arg)
         // and stays valid=false; StateManager already treats an invalid
         // lane as absent. Rotations are transcribed from ArduPilot's
         // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
-        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180), NOT
-        // bench-verified against a physical unit — confirm on the bench
-        // (tilt nose-down, check pitch sign in $TEL/$IMU telemetry) before
-        // trusting attitude output.
+        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and are
+        // bench-confirmed as of 2026-08-10 (tilt nose-down, correct pitch
+        // sign in $TEL/$IMU telemetry) — not yet flight-tested.
         if (imu1.read(a, g)) {
             // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
             const float ra[3] = { -a[1], -a[0], -a[2] };
@@ -441,13 +440,21 @@ static THD_FUNCTION(ControlThread, arg)
         // StateEstThread next tick). Used directly below by both the EKF's
         // vibration-notch tracker and the INDI unmixer; still published to
         // g_rpm_gated under esc_mtx for DebugThread/LogThread readers.
+        //
+        // sm_telem[]/rpm_lane[] are physical DShot lane order (each gate
+        // tracks its own hardware channel); rpm[] below is remapped to
+        // logical [FR,RL,FL,RR] via motor_map — Unmixer's geometry, $TEL,
+        // and the SD log all assume that logical order, matching
+        // MotorMixer's output convention (see MotorMixerConfig).
         ESCTelemetry sm_telem[4];
         dshot_get_telemetry(sm_telem);
-        uint32_t rpm[4];
-        for (int i = 0; i < 4; i++) {
-            const uint32_t raw = sm_telem[i].valid ? sm_telem[i].erpm / 7U : 0U;
-            rpm[i] = rpm_gate(s_rpm_gate[i], raw);
+        uint32_t rpm_lane[4];
+        for (int lane = 0; lane < 4; lane++) {
+            const uint32_t raw = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
+            rpm_lane[lane] = rpm_gate(s_rpm_gate[lane], raw);
         }
+        uint32_t rpm[4];
+        for (int i = 0; i < 4; i++) rpm[i] = rpm_lane[kDroneConfig.mixer.motor_map[i]];
         chMtxLock(&esc_mtx);
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
         chMtxUnlock(&esc_mtx);
@@ -776,10 +783,14 @@ static void usb_cmd_dispatch(const char *line)
             return;
         }
         int32_t dv = pct * 10;  // 0–100% → 0–1000
+        // `motor` is logical [FR,RL,FL,RR] (matches tools/motor_test.py's
+        // MOTOR_LABELS) — translate to physical DShot lane via motor_map so
+        // "MT,0" always spins FR regardless of this airframe's ESC wiring.
+        const uint8_t lane = kDroneConfig.mixer.motor_map[motor];
         chMtxLock(&motor_test_mtx);
         g_motor_test_active = true;
         memset(g_motor_test_cmd, 0, sizeof(g_motor_test_cmd));
-        g_motor_test_cmd[motor] = dv;
+        g_motor_test_cmd[lane] = dv;
         chMtxUnlock(&motor_test_mtx);
         chMtxLock(&s_usb_write_mtx);
         chprintf((BaseSequentialStream *)&SDU1, "MT,OK,%d,%d\r\n", motor, pct);

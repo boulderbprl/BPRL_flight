@@ -41,9 +41,9 @@ struct AttitudeIndiGains {
     // behavior.
     float    indi_output_gain_roll;
     float    indi_output_gain_pitch;
-    // NLMS adaptation rate (mu), mode-dependent per spec section 5.2:
-    // aggressive while PID/PID+PI is the active controller (INDI in shadow,
-    // no closed-loop bias risk), slow/trickle while INDI itself is active.
+    // NLMS adaptation rate (mu), mode-dependent — aggressive while PID/PID+PI
+    // is the active controller (INDI in shadow, no closed-loop bias risk),
+    // slow/trickle while INDI itself is active.
     float    nlms_mu_pid;
     float    nlms_mu_indi;
     float    yaw_gain;         // was AttitudeINDI::YAW_GAIN
@@ -77,9 +77,27 @@ struct RcChannelMap {
 };
 
 // Motor mixing geometry (src/controllers/MotorMixer.hpp). Factor arrays are
-// indexed [FR, RL, FL, RR], matching out[]/hardware pinout.
+// indexed [FR, RL, FL, RR] — always that logical frame-position order,
+// regardless of which physical DShot lane/MOT pad each corner's ESC is
+// actually wired to.
+//
+// motor_map[4] is that logical->physical translation: motor_map[FR/RL/FL/RR]
+// = the physical output lane (0-3, i.e. DShot lane / MOT pad - 1) wired to
+// that corner. {0,1,2,3} (identity) means lane N drives corner N directly —
+// true when the ESC harness is wired FR->MOT1, RL->MOT2, FL->MOT3, RR->MOT4.
+// If your physical wiring spins different corners than that, don't permute
+// the factor arrays above (confusing to read/maintain, and every other
+// motor-indexed consumer — MT test command, $TEL/SD-log rpm — silently goes
+// out of sync with it) — set motor_map instead. It's applied at exactly two
+// canonical boundaries, both in src/threads.cpp/MotorMixer.cpp: once
+// forward (MotorMixer output, MT test command: logical -> physical lane)
+// and once in reverse (telemetry rpm right after dshot_get_telemetry():
+// physical lane -> logical), so every other consumer in the codebase
+// (Unmixer/INDI, EKF, logging, debug tools) only ever sees logical
+// FR/RL/FL/RR order and never needs to know the physical wiring.
 struct MotorMixerConfig {
     float   roll_factor[4], pitch_factor[4], yaw_factor[4];
+    uint8_t motor_map[4];   // [FR, RL, FL, RR] -> physical DShot lane (0-3)
     int32_t pwm_min, pwm_idle, pwm_max;
     float   att_scale, yaw_scale, max_angle_rad, yaw_headroom_min;
 };

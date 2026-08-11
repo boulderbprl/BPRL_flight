@@ -143,7 +143,9 @@ struct __attribute__((packed)) LogMsgINDI {
 // Always populated regardless of FlightStateMachine's active controller — this
 // is INDI running in shadow mode alongside whichever controller actually flies (OUTP).
 // g1_roll/g1_pitch track live-adaptive-G(x) NLMS convergence — compare against
-// the offline seed to validate the estimator (see indi_adaptive_G_controller_spec.md).
+// the offline seed (DroneConfig::AttitudeIndiGains::g1_seed_roll/pitch) to
+// validate the estimator; see AttitudeINDI's Live G(x) adaptation writeup in
+// src/controllers/README.md.
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;

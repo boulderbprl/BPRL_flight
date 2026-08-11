@@ -5,9 +5,9 @@
  * Pin assignments transcribed from ArduPilot's OrqaH7QuadCore hwdef.dat
  * (libraries/AP_HAL_ChibiOS/hwdef/OrqaH7QuadCore/hwdef.dat, upstream
  * ArduPilot/ardupilot master — not present in this repo's vendored
- * ardupilot/ clone, fetched from GitHub directly). NOT bench-verified
- * against a physical unit yet — confirm CS/WHOAMI pairing and motor
- * spin direction before flight.
+ * ardupilot/ clone, fetched from GitHub directly). IMU CS/WHOAMI pairing and
+ * axis orientation, and motor spin direction, are bench-confirmed as of
+ * 2026-08-10 — not yet flight-tested.
  *
  * Unlike the Cube boards (FMUv5x carrier), this board has no AUX 5V
  * peripheral rail / PWM_VOLT_SEL — motor/servo pads are driven directly.
@@ -72,15 +72,18 @@
 #define LINE_I2C2_SCL           PAL_LINE(GPIOB, 10U)
 #define LINE_I2C2_SDA           PAL_LINE(GPIOB, 11U)
 
-/* ── Motor outputs (BIDIR-capable DShot pins, one per timer) ─────────────────
- * hwdef exposes 8 motor pads across TIM4/TIM2/TIM5/TIM3; only the 4 marked
- * BIDIR in hwdef.dat are used (X-quad, 4 motors) — one channel per timer,
- * unlike the Cube boards' TIM1 (3 channels sharing one burst) + TIM4 (1
- * channel) split. See src/coms/DShot.cpp's BPRL_BOARD_ORQA branch. */
-#define LINE_MOTOR0              PAL_LINE(GPIOD, 12U)   /* TIM4_CH1 */
-#define LINE_MOTOR1              PAL_LINE(GPIOA, 1U)    /* TIM2_CH2 */
-#define LINE_MOTOR2              PAL_LINE(GPIOA, 2U)    /* TIM5_CH3 */
-#define LINE_MOTOR3              PAL_LINE(GPIOB, 1U)    /* TIM3_CH4 */
+/* ── Motor outputs — the board's main "ESC" JST-GH connector, pads MOT1-4 ────
+ * (OrqaH7QuadCoreTop.png pinout diagram / hwdef.dat PWM(1..4)). NOT the 4
+ * BIDIR-flagged pads in hwdef.dat (those are PWM1/3/5/7, spread across the
+ * ESC connector AND the separate MFC connector — wrong physical pads for a
+ * standard 4-in-1 ESC on the ESC connector). MOT1/MOT2 share TIM4 (CH1/CH2);
+ * MOT3/MOT4 share TIM2 (CH2/CH1). See src/coms/DShot.cpp's BPRL_BOARD_ORQA
+ * branch for how bidir telemetry is time-multiplexed across each timer's two
+ * channels. */
+#define LINE_MOTOR0              PAL_LINE(GPIOD, 12U)   /* TIM4_CH1 — MOT1 */
+#define LINE_MOTOR1              PAL_LINE(GPIOD, 13U)   /* TIM4_CH2 — MOT2 */
+#define LINE_MOTOR2              PAL_LINE(GPIOA, 1U)    /* TIM2_CH2 — MOT3 */
+#define LINE_MOTOR3              PAL_LINE(GPIOA, 0U)    /* TIM2_CH1 — MOT4 */
 
 /* ── RC input — CRSF, full-duplex on USART6 (TX6/RX6 pads) ──────────────────
  * Not the hwdef's stock RC pad (that's half-duplex USART3/T3, default

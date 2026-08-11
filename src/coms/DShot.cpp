@@ -7,8 +7,8 @@
 /*
  * DShot600 bidirectional.
  *
- * BPRL_BOARD_ORQA: 4 independent single-channel timers (TIM4/TIM2/TIM5/TIM3),
- * one motor per timer — see the BPRL_BOARD_ORQA branch below.
+ * BPRL_BOARD_ORQA: 2 motors per timer (TIM4 CH1/CH2, TIM2 CH1/CH2), burst-DMA
+ * TX + time-multiplexed IC per timer — see the BPRL_BOARD_ORQA branch below.
  * Cube boards (default): single-stream burst DMA TX + dedicated IC on TIM1
  * (3 motors sharing one timer via ArduPilot's CC2 cross-capture trick) +
  * TIM4 (1 motor) — see the #else branch below, unchanged from before this
@@ -122,215 +122,223 @@ enum class DshotPhase : uint8_t { IDLE, TX, IC };
 #if defined(BPRL_BOARD_ORQA)
 
 /*
- * BPRL_BOARD_ORQA motor layout — one BIDIR-capable channel per timer
+ * BPRL_BOARD_ORQA motor layout — the board's main "ESC" JST-GH connector
+ * (OrqaH7QuadCoreTop.png pinout diagram), pads MOT1-4, two motors per timer
  * (boards/OrqaH7QuadCore/board.h):
- *   Motor 0 (FR) → PD12 = TIM4_CH1
- *   Motor 1 (RL) → PA1  = TIM2_CH2
- *   Motor 2 (FL) → PA2  = TIM5_CH3
- *   Motor 3 (RR) → PB1  = TIM3_CH4
+ *   Motor 0 (FR) → PD12 = TIM4_CH1 — MOT1  ┐ share TIM4
+ *   Motor 1 (RL) → PD13 = TIM4_CH2 — MOT2  ┘
+ *   Motor 2 (FL) → PA1  = TIM2_CH2 — MOT3  ┐ share TIM2
+ *   Motor 3 (RR) → PA0  = TIM2_CH1 — MOT4  ┘
  *
- * Unlike the Cube boards' TIM1 (which shares one timer 3 ways via
- * ArduPilot's CC2 cross-capture trick because it only has one usable
- * 3-channel-BIDIR timer), each Orqa motor gets its own dedicated timer —
- * structurally simpler (no rotation/sharing), so each lane is just the
- * Cube boards' TIM4-lane mechanism (single-stream TX-then-IC on one DMA
- * stream, reused sequentially) replicated 4×, generalized over channel
- * number (1-4) via the small helper functions below instead of 4 copies of
- * near-identical register code — TIM_TypeDef's CCMR1/CCMR2/CCER/CCRx/DMAR/DCR
- * are the same struct layout regardless of which timer instance it is, so a
- * runtime TIM_TypeDef* is enough; only the channel-specific bit-field
- * offsets differ, and those are looked up by channel number (1-4) below.
+ * NOT the 4 pads ArduPilot's hwdef.dat flags BIDIR (those are PWM1/3/5/7 —
+ * one per timer across FOUR different timers, spread across both the ESC
+ * connector and the separate MFC connector). A standard 4-in-1 ESC's single
+ * cable plugs into MOT1-4 on the ESC connector only, which this board wires
+ * to just two timers (TIM4, TIM2) via their CH1/CH2 pair.
+ *
+ * TX (DShot command frames) uses one DMAR burst-of-4 stream per group,
+ * exactly like the Cube boards' TIM1 below (DBL=3, DBA=CCR1, FIFO
+ * MBURST/PBURST=INCR4) — CH1/CH2 carry the two real motors, CH3/CH4 are
+ * dummy zero columns (never CCxE-enabled, so they drive nothing). This is
+ * NOT two independent streams both listening to the same TIMx_UP request:
+ * that was tried and measured broken (see BPRL memory / git history on the
+ * CubeBlue bring-up) — DMAMUX delivers each hardware request to only one
+ * subscribed stream at a time (round-robin), not a broadcast, so two
+ * streams sharing one request line each only see every-other UEV and the
+ * ESC never receives a complete, correctly-timed frame.
+ *
+ * IC (bidir telemetry capture) can only usefully target one channel's CCRx
+ * at a time via DMAR, so each timer's two motors take turns: one dedicated
+ * IC stream per timer, alternating slot 0 (CH1) / slot 1 (CH2) each DShot
+ * cycle — the same rotation idea as the Cube boards' TIM1 3-motor rotation
+ * below, just 2-wide instead of 3-wide, and without needing that branch's
+ * CC1/CC2 cross-capture trick since both channels here have their own
+ * direct DMAMUX capture request IDs.
  *
  * DMAMUX1 request IDs and TIMx_IRQn numbers verified directly against
  * ChibiOS's stm32_dmamux.h / stm32h743xx.h — not transcribed from memory.
  */
 
+static constexpr uint32_t DMAMUX_TIM2_CH1 = 18U;
 static constexpr uint32_t DMAMUX_TIM2_CH2 = 19U;
 static constexpr uint32_t DMAMUX_TIM2_UP  = 22U;
-static constexpr uint32_t DMAMUX_TIM3_CH4 = 26U;
-static constexpr uint32_t DMAMUX_TIM3_UP  = 27U;
 static constexpr uint32_t DMAMUX_TIM4_CH1 = 29U;
+static constexpr uint32_t DMAMUX_TIM4_CH2 = 30U;
 static constexpr uint32_t DMAMUX_TIM4_UP  = 32U;
-static constexpr uint32_t DMAMUX_TIM5_CH3 = 57U;
-static constexpr uint32_t DMAMUX_TIM5_UP  = 59U;
 
 /* Timer DCR word offsets (DBA = byte_offset / 4). */
 static constexpr uint32_t DBA_CCR1 = 13U;  // 0x34/4
 static constexpr uint32_t DBA_CCR2 = 14U;  // 0x38/4
-static constexpr uint32_t DBA_CCR3 = 15U;  // 0x3C/4
-static constexpr uint32_t DBA_CCR4 = 16U;  // 0x40/4
-
-struct DshotLane {
-    TIM_TypeDef *tim;
-    uint8_t      ch;         // capture/compare channel, 1-4
-    uint32_t     dba;
-    uint32_t     dmamux_up;
-    uint32_t     dmamux_ch;
-    void       (*rcc_reset)(void);
-};
 
 static void reset_tim2(void) { rccResetTIM2(); }
-static void reset_tim3(void) { rccResetTIM3(); }
 static void reset_tim4(void) { rccResetTIM4(); }
-static void reset_tim5(void) { rccResetTIM5(); }
 
-// Array index == motor index == kDroneConfig.mixer motor_out[] index (FR/RL/FL/RR).
-static const DshotLane kLanes[4] = {
-    { TIM4, 1, DBA_CCR1, DMAMUX_TIM4_UP, DMAMUX_TIM4_CH1, reset_tim4 },  // M0 FR — PD12
-    { TIM2, 2, DBA_CCR2, DMAMUX_TIM2_UP, DMAMUX_TIM2_CH2, reset_tim2 },  // M1 RL — PA1
-    { TIM5, 3, DBA_CCR3, DMAMUX_TIM5_UP, DMAMUX_TIM5_CH3, reset_tim5 },  // M2 FL — PA2
-    { TIM3, 4, DBA_CCR4, DMAMUX_TIM3_UP, DMAMUX_TIM3_CH4, reset_tim3 },  // M3 RR — PB1
+struct DshotGroup {
+    TIM_TypeDef *tim;
+    void       (*rcc_reset)(void);
+    uint32_t     dmamux_up;
+    uint32_t     dmamux_ch[2];  // [0]=CH1's own capture request, [1]=CH2's
+    uint32_t     dba[2];        // [0]=DBA_CCR1, [1]=DBA_CCR2
+    uint8_t      lane[2];       // motor index driven by CH1, CH2
 };
 
-/* DMA TX buffers: pre-word + 16 data bits + 2 trailing zeros = 19 words,
- * one per lane. IC buffer: 22 words (21-bit GCR response + margin), one per
- * lane. Both .nocache — bypasses D-cache on STM32H743 (see Cube boards'
- * branch for the full rationale, identical here). */
-static uint32_t s_tx_buf[4][19] __attribute__((aligned(32), section(".nocache")));
-static uint32_t s_ic_buf[4][22] __attribute__((aligned(32), section(".nocache")));
+// lane == kDroneConfig.mixer motor_out[] index (FR/RL/FL/RR).
+static const DshotGroup kGroups[2] = {
+    { TIM4, reset_tim4, DMAMUX_TIM4_UP, { DMAMUX_TIM4_CH1, DMAMUX_TIM4_CH2 },
+      { DBA_CCR1, DBA_CCR2 }, { 0, 1 } },  // CH1=MOT1=FR, CH2=MOT2=RL
+    { TIM2, reset_tim2, DMAMUX_TIM2_UP, { DMAMUX_TIM2_CH1, DMAMUX_TIM2_CH2 },
+      { DBA_CCR1, DBA_CCR2 }, { 3, 2 } },  // CH1=MOT4=RR, CH2=MOT3=FL
+};
 
-static volatile DshotPhase       s_phase[4]         = {};
-static const stm32_dma_stream_t *s_dma[4]           = {};
-static volatile uint32_t         s_dma_tc_count[4]  = {};
-static volatile uint32_t         s_ic_done_count[4] = {};
+/* DMA TX buffer: one DMAR burst-of-4 stream per group — interleaved stride-4
+ * [CCR1(real), CCR2(real), CCR3(dummy=0), CCR4(dummy=0)] × 19 rows (pre-word
+ * + 16 data bits + 2 trailing zeros) = 76 words, matching the Cube boards'
+ * TIM1 buffer shape exactly. IC buffer: 22 words (21-bit GCR response +
+ * margin), one per group (reused for whichever channel is currently the
+ * telemetry slot). Both .nocache — bypasses D-cache on STM32H743 (see Cube
+ * boards' branch for the full rationale, identical here). */
+static uint32_t s_tx_buf[2][76] __attribute__((aligned(32), section(".nocache")));
+static uint32_t s_ic_buf[2][22] __attribute__((aligned(32), section(".nocache")));
 
-static void start_ic(int lane);
-static void finish_ic(int lane, uint8_t n_edges);
+static volatile DshotPhase       s_phase[2]          = {};
+static const stm32_dma_stream_t *s_dma_tx[2]         = {};  // [group]
+static const stm32_dma_stream_t *s_dma_ic[2]         = {};  // [group]
+static volatile uint32_t         s_dma_tc_count[2]   = {};
+static volatile uint32_t         s_ic_done_count[2]  = {};
+static uint8_t                   s_telem_slot[2]     = {};  // which channel (0=CH1/1=CH2) is captured next
 
-/* Configure the lane's channel for PWM output-compare mode (active-low
- * DShot TX), clearing whichever channel-specific bits apply. Only one
- * channel is ever active per timer on this board, so CCMR1/CCMR2/CCER are
- * simply reset to 0 first. */
-static void oc_setup(TIM_TypeDef *tim, uint8_t ch)
+static void start_ic(int g);
+static void finish_ic(int g, uint8_t n_edges);
+
+/* Configure both channels of a group's timer for PWM output-compare mode
+ * (active-low DShot TX) simultaneously — both MOT pads of a timer are
+ * always driven together, unlike the IC side which only ever owns one
+ * channel at a time. Always CH1+CH2 on this board (never CH3/CH4). */
+static void oc_setup_pair12(TIM_TypeDef *tim)
 {
-    tim->CCMR1 = 0U; tim->CCMR2 = 0U; tim->CCER = 0U;
-    switch (ch) {
-    case 1:
-        tim->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | STM32_TIM_CCMR1_OC1PE;
-        tim->CCR1  = 0U;
-        tim->CCER  = STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1E;
-        break;
-    case 2:
-        tim->CCMR1 = STM32_TIM_CCMR1_OC2M(6) | STM32_TIM_CCMR1_OC2PE;
-        tim->CCR2  = 0U;
-        tim->CCER  = STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E;
-        break;
-    case 3:
-        tim->CCMR2 = STM32_TIM_CCMR2_OC3M(6) | STM32_TIM_CCMR2_OC3PE;
-        tim->CCR3  = 0U;
-        tim->CCER  = STM32_TIM_CCER_CC3P | STM32_TIM_CCER_CC3E;
-        break;
-    default: // 4
-        tim->CCMR2 = STM32_TIM_CCMR2_OC4M(6) | STM32_TIM_CCMR2_OC4PE;
-        tim->CCR4  = 0U;
-        tim->CCER  = STM32_TIM_CCER_CC4P | STM32_TIM_CCER_CC4E;
-        break;
-    }
+    tim->CCMR1 = STM32_TIM_CCMR1_OC1M(6) | STM32_TIM_CCMR1_OC1PE
+               | STM32_TIM_CCMR1_OC2M(6) | STM32_TIM_CCMR1_OC2PE;
+    tim->CCMR2 = 0U;
+    tim->CCR1  = 0U;
+    tim->CCR2  = 0U;
+    tim->CCER  = STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1E
+               | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2E;
 }
 
-/* Configure the lane's channel for input-capture mode, direct (own pin),
- * both-edge, 4-sample filter — matches the Cube boards' IC config. */
+/* Configure a single channel (1 or 2) for input-capture mode, direct (own
+ * pin), both-edge, 4-sample filter — matches the Cube boards' IC config.
+ * Only ch 1/2 are ever used on this board (CH3/CH4 aren't wired to a MOT
+ * pad on either group's timer). */
 static void ic_setup(TIM_TypeDef *tim, uint8_t ch)
 {
     tim->CCMR1 = 0U; tim->CCMR2 = 0U; tim->CCER = 0U;
-    switch (ch) {
-    case 1:
+    if (ch == 1U) {
         tim->CCMR1 = STM32_TIM_CCMR1_CC1S(1) | STM32_TIM_CCMR1_IC1F(2);
         tim->CCER  = STM32_TIM_CCER_CC1E | STM32_TIM_CCER_CC1P | STM32_TIM_CCER_CC1NP;
-        break;
-    case 2:
+    } else { // 2
         tim->CCMR1 = STM32_TIM_CCMR1_CC2S(1) | STM32_TIM_CCMR1_IC2F(2);
         tim->CCER  = STM32_TIM_CCER_CC2E | STM32_TIM_CCER_CC2P | STM32_TIM_CCER_CC2NP;
-        break;
-    case 3:
-        tim->CCMR2 = STM32_TIM_CCMR2_CC3S(1) | STM32_TIM_CCMR2_IC3F(2);
-        tim->CCER  = STM32_TIM_CCER_CC3E | STM32_TIM_CCER_CC3P | STM32_TIM_CCER_CC3NP;
-        break;
-    default: // 4
-        tim->CCMR2 = STM32_TIM_CCMR2_CC4S(1) | STM32_TIM_CCMR2_IC4F(2);
-        tim->CCER  = STM32_TIM_CCER_CC4E | STM32_TIM_CCER_CC4P | STM32_TIM_CCER_CC4NP;
-        break;
     }
 }
 
 static uint32_t ccxde_bit(uint8_t ch)
 {
-    switch (ch) {
-    case 1:  return TIM_DIER_CC1DE;
-    case 2:  return TIM_DIER_CC2DE;
-    case 3:  return TIM_DIER_CC3DE;
-    default: return TIM_DIER_CC4DE;
-    }
+    return (ch == 1U) ? TIM_DIER_CC1DE : TIM_DIER_CC2DE;
 }
 
 /* Equivalent to ArduPilot bdshot_reset_pwm() = pwmStop()+pwmStart(), applied
- * to all 4 lanes. rccResetTIMx() performs a full APB peripheral reset (all
- * regs -> 0); CNT is staggered by a quarter period per lane so all 4 DMA
- * bursts don't land on the AHB matrix at the same instant (generalizes the
- * Cube boards' TIM1/TIM4 half-period stagger to 4 timers). */
+ * to both groups' timers. rccResetTIMx() performs a full APB peripheral
+ * reset (all regs -> 0); CNT is staggered by a half period per group so
+ * both timers' DMA bursts don't land on the AHB matrix at the same instant
+ * (same idea as the Cube boards' TIM1/TIM4 half-period stagger below). Both
+ * channels of a group's timer are configured together — MOT1/MOT2 (or
+ * MOT3/MOT4) are always driven simultaneously during TX. */
 static void reset_pwm_for_tx(void)
 {
-    for (int lane = 0; lane < 4; lane++) {
-        const DshotLane &L = kLanes[lane];
-        L.rcc_reset();
-        L.tim->PSC  = 0U;
-        L.tim->ARR  = DS_ARR;
-        L.tim->CR2  = 0U;
-        oc_setup(L.tim, L.ch);
-        L.tim->EGR  = TIM_EGR_UG;
-        L.tim->SR   = 0U;
-        L.tim->DIER = TIM_DIER_UDE;
-        L.tim->DCR  = (0U << TIM_DCR_DBL_Pos) | (L.dba << TIM_DCR_DBA_Pos);
-        L.tim->CNT  = static_cast<uint32_t>(lane) * (DS_ARR + 1U) / 4U;
-        L.tim->SR   = 0U;
-        L.tim->CR1  = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        G.rcc_reset();
+        G.tim->PSC  = 0U;
+        G.tim->ARR  = DS_ARR;
+        G.tim->CR2  = 0U;
+        oc_setup_pair12(G.tim);
+        G.tim->EGR  = TIM_EGR_UG;
+        G.tim->SR   = 0U;
+        G.tim->DIER = TIM_DIER_UDE;
+        /* Burst-of-4 starting at CCR1: CH1/CH2 real, CH3/CH4 dummy — see
+         * build_tx_buf. Re-pointed to a single register by start_ic() during
+         * the IC phase; restored here every dshot_write() cycle. */
+        G.tim->DCR  = (3U << TIM_DCR_DBL_Pos) | (DBA_CCR1 << TIM_DCR_DBA_Pos);
+        G.tim->CNT  = static_cast<uint32_t>(g) * (DS_ARR + 1U) / 2U;
+        G.tim->SR   = 0U;
+        G.tim->CR1  = TIM_CR1_ARPE | TIM_CR1_URS | TIM_CR1_CEN;
     }
 }
 
+/* Interleaved stride-4 layout per group: [CH1_bit, CH2_bit, 0, 0] × 19 rows
+ * (pre-word + 16 data bits + 2 trailing zeros), matching the Cube boards'
+ * TIM1 buffer shape — see that branch's build_tx_buf for the full rationale
+ * (OC-preload one-UEV delay absorbed by the pre-word row). */
 static void build_tx_buf(const uint16_t throttle[4])
 {
-    for (int lane = 0; lane < 4; lane++) {
-        const uint16_t frame = make_frame(throttle[lane]);
-        s_tx_buf[lane][0] = 0U;  // pre-word: absorbs OC-preload's one-UEV delay
-        for (int b = 15; b >= 0; b--)
-            s_tx_buf[lane][16 - b] = (frame & (1U << b)) ? DS_T1H : DS_T0H;
-        s_tx_buf[lane][17] = 0U;
-        s_tx_buf[lane][18] = 0U;
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        const uint16_t frame0 = make_frame(throttle[G.lane[0]]);
+        const uint16_t frame1 = make_frame(throttle[G.lane[1]]);
+
+        s_tx_buf[g][0] = 0U; s_tx_buf[g][1] = 0U;
+        s_tx_buf[g][2] = 0U; s_tx_buf[g][3] = 0U;
+
+        for (int b = 15; b >= 0; b--) {
+            const int row = (16 - b) * 4;
+            s_tx_buf[g][row + 0] = (frame0 & (1U << b)) ? DS_T1H : DS_T0H;
+            s_tx_buf[g][row + 1] = (frame1 & (1U << b)) ? DS_T1H : DS_T0H;
+            s_tx_buf[g][row + 2] = 0U;
+            s_tx_buf[g][row + 3] = 0U;
+        }
+        for (int i = 68; i < 76; i++) s_tx_buf[g][i] = 0U;
     }
 }
 
-/* Single DMA TC callback shared by all 4 lanes — dmaStreamAlloc's `param`
- * carries the lane index (0-3), avoiding 4 near-identical callback functions. */
-static void dshot_dma_tc(void *p, uint32_t flags)
+/* TX-complete callback for a group's single burst DMAR stream. */
+static void dshot_dma_tc_tx(void *p, uint32_t flags)
 {
     (void)flags;
-    const int lane = static_cast<int>(reinterpret_cast<intptr_t>(p));
-    const DshotLane &L = kLanes[lane];
+    const int g = static_cast<int>(reinterpret_cast<intptr_t>(p));
+    if (s_phase[g] != DshotPhase::TX) return;
 
-    if (s_phase[lane] == DshotPhase::TX) {
-        s_dma_tc_count[lane]++;
-        L.tim->CR1 &= ~TIM_CR1_CEN;
-        s_phase[lane] = DshotPhase::IC;
-        start_ic(lane);
-    } else if (s_phase[lane] == DshotPhase::IC) {
-        L.tim->DIER = 0U;
-        L.tim->CR1 &= ~TIM_CR1_CEN;
-        s_phase[lane] = DshotPhase::IDLE;
-        s_ic_done_count[lane]++;
-        finish_ic(lane, 22U);
-    }
+    s_dma_tc_count[g]++;
+    kGroups[g].tim->CR1 &= ~TIM_CR1_CEN;
+    s_phase[g] = DshotPhase::IC;
+    start_ic(g);
 }
 
-static void start_ic(int lane)
+/* IC-complete callback for a group's dedicated telemetry-capture stream. */
+static void dshot_dma_tc_ic(void *p, uint32_t flags)
 {
-    const DshotLane &L = kLanes[lane];
+    (void)flags;
+    const int g = static_cast<int>(reinterpret_cast<intptr_t>(p));
+    if (s_phase[g] != DshotPhase::IC) return;
 
-    dmaSetRequestSource(s_dma[lane], L.dmamux_ch);
-    dmaStreamSetPeripheral(s_dma[lane], &L.tim->DMAR);
-    dmaStreamSetMemory0(s_dma[lane], s_ic_buf[lane]);
-    dmaStreamSetTransactionSize(s_dma[lane], 22U);
-    s_dma[lane]->stream->FCR = 0U;   // direct mode
-    dmaStreamSetMode(s_dma[lane],
+    kGroups[g].tim->DIER = 0U;
+    kGroups[g].tim->CR1 &= ~TIM_CR1_CEN;
+    s_phase[g] = DshotPhase::IDLE;
+    s_ic_done_count[g]++;
+    finish_ic(g, 22U);
+}
+
+static void start_ic(int g)
+{
+    const DshotGroup &G = kGroups[g];
+    const uint8_t slot = s_telem_slot[g];   // 0=CH1, 1=CH2
+    const uint8_t ch   = static_cast<uint8_t>(slot + 1U);
+
+    dmaSetRequestSource(s_dma_ic[g], G.dmamux_ch[slot]);
+    dmaStreamSetPeripheral(s_dma_ic[g], &G.tim->DMAR);
+    dmaStreamSetMemory0(s_dma_ic[g], s_ic_buf[g]);
+    dmaStreamSetTransactionSize(s_dma_ic[g], 22U);
+    s_dma_ic[g]->stream->FCR = 0U;   // direct mode
+    dmaStreamSetMode(s_dma_ic[g],
           DMA_SxCR_MINC
         | (0x2U << DMA_SxCR_MSIZE_Pos)
         | (0x2U << DMA_SxCR_PSIZE_Pos)
@@ -338,52 +346,58 @@ static void start_ic(int lane)
         | (0x3U << DMA_SxCR_PL_Pos)
         | DMA_SxCR_TCIE);
 
-    /* DCR unchanged — DBA already points at this lane's own CCR (same
-     * register used for both TX and IC, unlike the Cube boards' TIM1 which
-     * remaps DCR per rotation slot). */
-    ic_setup(L.tim, L.ch);
-    L.tim->ARR  = 20000U;  // 100 µs hardware timeout
-    L.tim->CNT  = 0U;
-    L.tim->SR   = 0U;
-    L.tim->DIER = ccxde_bit(L.ch) | TIM_DIER_UIE;
+    /* Point DCR at this slot's own CCR — the TX streams never touch DMAR/DCR
+     * (they write their CCRx directly), so this is safe to change here. */
+    G.tim->DCR  = (0U << TIM_DCR_DBL_Pos) | (G.dba[slot] << TIM_DCR_DBA_Pos);
+    ic_setup(G.tim, ch);
+    G.tim->ARR  = 20000U;  // 100 µs hardware timeout
+    G.tim->CNT  = 0U;
+    G.tim->SR   = 0U;
+    G.tim->DIER = ccxde_bit(ch) | TIM_DIER_UIE;
 
-    dmaStreamEnable(s_dma[lane]);
+    dmaStreamEnable(s_dma_ic[g]);
     /* URS=1: only counter overflow (not software EGR=UG) sets UIF. */
-    L.tim->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
+    G.tim->CR1 = TIM_CR1_URS | TIM_CR1_CEN;
 }
 
-static void finish_ic(int lane, uint8_t n_edges)
+static void finish_ic(int g, uint8_t n_edges)
 {
+    const DshotGroup &G  = kGroups[g];
+    const uint8_t slot   = s_telem_slot[g];
+    const int     lane   = G.lane[slot];
+
     s_last_edge_cnt[lane] = n_edges;
     uint8_t keep = (n_edges < 5U) ? n_edges : 5U;
-    for (uint8_t k = 0; k < keep; k++) s_last_edges[lane][k] = s_ic_buf[lane][k];
+    for (uint8_t k = 0; k < keep; k++) s_last_edges[lane][k] = s_ic_buf[g][k];
 
     uint32_t erpm = 0U;
-    if (decode_gcr(s_ic_buf[lane], n_edges, &erpm)) {
+    if (decode_gcr(s_ic_buf[g], n_edges, &erpm)) {
         s_telem[lane].erpm  = erpm;
         s_telem[lane].valid = true;
     } else {
         s_telem[lane].valid = false;
     }
+
+    s_telem_slot[g] = slot ^ 1U;  // alternate CH1/CH2 each cycle
 }
 
-/* Shared UIE-timeout ISR body — 4 fixed-name vectors below each call this
- * with their own lane index (vector names are fixed by the CMSIS/ChibiOS
- * ISR table, so the dispatch itself can't be table-driven). */
-static void tim_timeout_isr(int lane)
+/* Shared UIE-timeout ISR body — the 2 fixed-name vectors below each call
+ * this with their own group index (vector names are fixed by the
+ * CMSIS/ChibiOS ISR table, so the dispatch itself can't be table-driven). */
+static void tim_timeout_isr(int g)
 {
-    const DshotLane &L = kLanes[lane];
-    uint32_t sr = L.tim->SR;
-    L.tim->SR = 0U;
+    const DshotGroup &G = kGroups[g];
+    uint32_t sr = G.tim->SR;
+    G.tim->SR = 0U;
 
-    if ((sr & TIM_SR_UIF) && (s_phase[lane] == DshotPhase::IC)) {
-        L.tim->DIER = 0U;
-        L.tim->CR1 &= ~TIM_CR1_CEN;
-        dmaStreamDisable(s_dma[lane]);
-        uint8_t captured = static_cast<uint8_t>(22U - dmaStreamGetTransactionSize(s_dma[lane]));
-        s_phase[lane] = DshotPhase::IDLE;
-        s_ic_done_count[lane]++;
-        finish_ic(lane, captured);
+    if ((sr & TIM_SR_UIF) && (s_phase[g] == DshotPhase::IC)) {
+        G.tim->DIER = 0U;
+        G.tim->CR1 &= ~TIM_CR1_CEN;
+        dmaStreamDisable(s_dma_ic[g]);
+        uint8_t captured = static_cast<uint8_t>(22U - dmaStreamGetTransactionSize(s_dma_ic[g]));
+        s_phase[g] = DshotPhase::IDLE;
+        s_ic_done_count[g]++;
+        finish_ic(g, captured);
     }
 }
 
@@ -401,73 +415,81 @@ OSAL_IRQ_HANDLER(STM32_TIM2_HANDLER)
     OSAL_IRQ_EPILOGUE();
 }
 
-OSAL_IRQ_HANDLER(STM32_TIM5_HANDLER)
-{
-    OSAL_IRQ_PROLOGUE();
-    tim_timeout_isr(2);
-    OSAL_IRQ_EPILOGUE();
-}
-
-OSAL_IRQ_HANDLER(STM32_TIM3_HANDLER)
-{
-    OSAL_IRQ_PROLOGUE();
-    tim_timeout_isr(3);
-    OSAL_IRQ_EPILOGUE();
-}
-
+/* One DMAR burst-of-4 stream per group — same mechanism as the Cube boards'
+ * TIM1 TX below (FIFO full-threshold + INCR4 burst so all 4 CCRx words
+ * drain atomically per single TIMx_UP request). CH3/CH4 columns are always
+ * zero and never CCxE-enabled, so they're inert padding to reach a burst
+ * size the DMA controller actually supports (INCR2 doesn't exist — see the
+ * branch comment above for why two separate streams don't work instead). */
 static void arm_tx_dma(void)
 {
-    for (int lane = 0; lane < 4; lane++) {
-        const DshotLane &L = kLanes[lane];
-        dmaSetRequestSource(s_dma[lane], L.dmamux_up);
-        dmaStreamSetPeripheral(s_dma[lane], &L.tim->DMAR);
-        dmaStreamSetMemory0(s_dma[lane], s_tx_buf[lane]);
-        dmaStreamSetTransactionSize(s_dma[lane], 19U);
-        s_dma[lane]->stream->FCR = 0U;
-        dmaStreamSetMode(s_dma[lane],
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        const stm32_dma_stream_t *dma = s_dma_tx[g];
+        dmaSetRequestSource(dma, G.dmamux_up);
+        dmaStreamSetPeripheral(dma, &G.tim->DMAR);
+        dmaStreamSetMemory0(dma, s_tx_buf[g]);
+        dmaStreamSetTransactionSize(dma, 76U);
+        dma->stream->FCR = DMA_SxFCR_DMDIS | DMA_SxFCR_FTH;
+        dmaStreamSetMode(dma,
               DMA_SxCR_MINC
             | (0x2U << DMA_SxCR_MSIZE_Pos)
             | (0x2U << DMA_SxCR_PSIZE_Pos)
             | (0x1U << DMA_SxCR_DIR_Pos)   // M->P
             | (0x3U << DMA_SxCR_PL_Pos)
-            | DMA_SxCR_TCIE);
-        dmaStreamEnable(s_dma[lane]);
-        s_phase[lane] = DshotPhase::TX;
+            | DMA_SxCR_TCIE
+            | DMA_SxCR_MBURST_0            // MBURST=INCR4
+            | DMA_SxCR_PBURST_0);          // PBURST=INCR4
+        dmaStreamEnable(dma);
+        s_phase[g] = DshotPhase::TX;
     }
+}
+
+static const stm32_dma_stream_t *alloc_or_halt(uint32_t priority, stm32_dmaisr_t func, void *param,
+                                                const char *msg)
+{
+    const stm32_dma_stream_t *dma = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY, priority, func, param);
+    osalDbgAssert(dma != nullptr, msg);
+    (void)msg;  // osalDbgAssert's reason string is unused when compiled without assertions
+    if (dma == nullptr) {
+        for (;;) {
+            for (int i = 0; i < 20; i++) {
+                palToggleLine(LINE_LED_ACTIVITY);
+                volatile uint32_t n = 2000000U; while (n--) {}
+            }
+            volatile uint32_t n = 16000000U; while (n--) {}
+        }
+    }
+    return dma;
 }
 
 void dshot_init(void)
 {
-    RCC->APB1LENR |= RCC_APB1LENR_TIM2EN | RCC_APB1LENR_TIM3EN
-                    | RCC_APB1LENR_TIM4EN | RCC_APB1LENR_TIM5EN;
+    RCC->APB1LENR |= RCC_APB1LENR_TIM2EN | RCC_APB1LENR_TIM4EN;
     RCC->AHB1ENR  |= RCC_AHB1ENR_DMA1EN | RCC_AHB1ENR_DMA2EN;
-    RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOAEN | RCC_AHB4ENR_GPIOBEN | RCC_AHB4ENR_GPIODEN;
+    RCC->AHB4ENR  |= RCC_AHB4ENR_GPIOAEN | RCC_AHB4ENR_GPIODEN;
 
     /* GPIO: AF mode once, never changed. Medium speed (not high/very-high) —
      * BiDir DShot requires this to avoid ringing on the IC->OC output
      * reconnect transition, matching ArduPilot bdshot (same requirement as
      * the Cube boards' branch, expressed here via palSetPadMode instead of
-     * raw register writes — equivalent effect, easier to verify per-pin). */
+     * raw register writes — equivalent effect, easier to verify per-pin).
+     * PD12/PD13 = TIM4_CH1/CH2 = MOT1/MOT2, AF2. PA0/PA1 = TIM2_CH1/CH2 =
+     * MOT4/MOT3, AF1. */
     palSetPadMode(GPIOD, 12U, PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOD, 13U, PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOA, 0U,  PAL_MODE_ALTERNATE(1) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
     palSetPadMode(GPIOA, 1U,  PAL_MODE_ALTERNATE(1) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
-    palSetPadMode(GPIOA, 2U,  PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
-    palSetPadMode(GPIOB, 1U,  PAL_MODE_ALTERNATE(2) | PAL_STM32_OSPEED_MID2 | PAL_STM32_PUPDR_PULLUP);
 
-    reset_pwm_for_tx();   // starts all 4 timers running in OC/TX mode
+    reset_pwm_for_tx();   // starts both timers running in OC/TX mode
 
-    for (int lane = 0; lane < 4; lane++) {
-        s_dma[lane] = dmaStreamAlloc(STM32_DMA_STREAM_ID_ANY, STM32_IRQ_TIM4_PRIORITY,
-                                      dshot_dma_tc, reinterpret_cast<void *>(static_cast<intptr_t>(lane)));
-        osalDbgAssert(s_dma[lane] != nullptr, "DMA alloc DShot lane");
-        if (s_dma[lane] == nullptr) {
-            for (;;) {
-                for (int i = 0; i < 20; i++) {
-                    palToggleLine(LINE_LED_ACTIVITY);
-                    volatile uint32_t n = 2000000U; while (n--) {}
-                }
-                volatile uint32_t n = 16000000U; while (n--) {}
-            }
-        }
+    for (int g = 0; g < 2; g++) {
+        s_dma_tx[g] = alloc_or_halt(STM32_IRQ_TIM4_PRIORITY, dshot_dma_tc_tx,
+                                     reinterpret_cast<void *>(static_cast<intptr_t>(g)),
+                                     "DMA alloc DShot TX");
+        s_dma_ic[g] = alloc_or_halt(STM32_IRQ_TIM4_PRIORITY, dshot_dma_tc_ic,
+                                     reinterpret_cast<void *>(static_cast<intptr_t>(g)),
+                                     "DMA alloc DShot IC");
     }
 
     /* Drive a continuous zero-throttle DShot stream from boot (s_tx_buf is
@@ -476,9 +498,7 @@ void dshot_init(void)
     arm_tx_dma();
 
     nvicEnableVector(TIM2_IRQn, STM32_IRQ_TIM2_PRIORITY);
-    nvicEnableVector(TIM3_IRQn, STM32_IRQ_TIM3_PRIORITY);
     nvicEnableVector(TIM4_IRQn, STM32_IRQ_TIM4_PRIORITY);
-    nvicEnableVector(TIM5_IRQn, STM32_IRQ_TIM5_PRIORITY);
 }
 
 void dshot_write(const uint16_t throttle[4])
@@ -486,14 +506,15 @@ void dshot_write(const uint16_t throttle[4])
     build_tx_buf(throttle);
 
     /* Abort any in-flight IC, full IC->OC reset (matches ArduPilot
-     * bdshot_reset_pwm), then re-arm TX on all 4 lanes. */
-    for (int lane = 0; lane < 4; lane++) {
-        const DshotLane &L = kLanes[lane];
-        L.tim->CR1 &= ~TIM_CR1_CEN;
-        L.tim->DIER = 0U;
-        L.tim->SR   = 0U;
-        dmaStreamDisable(s_dma[lane]);
-        s_phase[lane] = DshotPhase::IDLE;
+     * bdshot_reset_pwm), then re-arm TX on both groups. */
+    for (int g = 0; g < 2; g++) {
+        const DshotGroup &G = kGroups[g];
+        G.tim->CR1 &= ~TIM_CR1_CEN;
+        G.tim->DIER = 0U;
+        G.tim->SR   = 0U;
+        dmaStreamDisable(s_dma_tx[g]);
+        dmaStreamDisable(s_dma_ic[g]);
+        s_phase[g] = DshotPhase::IDLE;
     }
 
     reset_pwm_for_tx();
@@ -510,10 +531,9 @@ void dshot_get_telemetry(ESCTelemetry out[4])
 void dshot_get_diag(DShotDiag *out)
 {
     chSysLock();
-    // DShotDiag's dma_tc/cc_isr are sized [2], a Cube-boards-shaped (2
-    // physical DShot timers) diagnostic — this board has 4. Surfacing only
-    // lanes 0/1 here rather than widening the shared public struct for one
-    // board; lanes 2/3's per-timer counters aren't visible through this call.
+    // dma_tc/cc_isr are per-timer (TIM4=group0, TIM2=group1) — a natural
+    // fit for DShotDiag's [2]-sized fields now that this board also uses
+    // exactly 2 physical DShot timers, same as the Cube boards branch.
     out->dma_tc[0] = s_dma_tc_count[0];
     out->dma_tc[1] = s_dma_tc_count[1];
     out->cc_isr[0] = s_ic_done_count[0];

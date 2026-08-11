@@ -72,11 +72,12 @@ const DroneConfig kDroneConfig = {
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
     { 0, 1, 2, 3, 4, 6, 7 },
    
-    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
+    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     {
         { -1.0f, +1.0f, +1.0f, -1.0f },  // roll_factor  [FR, RL, FL, RR]
         { +1.0f, -1.0f, +1.0f, -1.0f },  // pitch_factor
         { +1.0f, +1.0f, -1.0f, -1.0f },  // yaw_factor
+        { 0, 1, 2, 3 },                  // motor_map — identity: ESC wired FR->MOT1..RR->MOT4
         50, 150, 900,                    // pwm_min, pwm_idle, pwm_max
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
@@ -96,9 +97,21 @@ const DroneConfig kDroneConfig = {
     // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, PID+PI last if enabled 
     { true, false },
    
-    // .logging — LoggingConfig { log_rate_hz, enable{att,lin,rcin,outp,rpms,strn,imu1,imu2,imu3,indi,baro,ctun,mocp} }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
     {
-        50.0f,
-        { true, true, true, true, true, true, true, true, true, true, true, true, true },
+        50.0f, // log_rate_hz
+        { true, // att
+          true, // lin
+          true, // rcin
+          true, // outp
+          true, // rpms
+          true, // strn
+          true, // imu1
+          true, // imu2
+          true, // imu3
+          true, // indi
+          true, // baro
+          true, // ctun
+          true }, // mocp
     },
 };

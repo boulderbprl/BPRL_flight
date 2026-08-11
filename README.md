@@ -1,14 +1,15 @@
 # BPRL_flight
 
-Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.cubepilot.org) CubeBlue H7 and CubeOrange+ autopilot hardware (STM32H753 / STM32H743 at 400 MHz). This project is loosely based on the open-source [Ardupilot](https://ardupilot.org/ardupilot/) project.
+Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.cubepilot.org) CubeBlue H7 and CubeOrange+ autopilot hardware, and the [Orqa](https://enterprise.orqafpv.com/) FC 3030 H7 QuadCore (STM32H753 / STM32H743 at 400 MHz). This project is loosely based on the open-source [Ardupilot](https://ardupilot.org/ardupilot/) project.
 
 ---
 
 ## TODO
 
 - Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
-- IMX5 yaw magnetometer / heading reference integration.
-- Gain tuning on H7 hardware.
+- Fix the position hold controller.
+- Add trajectory tracking to the position hold controller.
+- Add more commands over the MAVLink connection.
 
 
 ---
@@ -45,8 +46,11 @@ BPRL_flight/
 │   ├── Drone1/
 │   │   ├── config.mk          Sets BOARD_FULL=CubeOrangePlus, BOARD_UDEFS
 │   │   └── drone_config.cpp   Defines kDroneConfig: gains, RC map, motor geometry, sensors, logging
-│   └── Drone2/
-│       ├── config.mk          Sets BOARD_FULL=CubeBlueH7, BOARD_UDEFS
+│   ├── Drone2/
+│   │   ├── config.mk          Sets BOARD_FULL=CubeBlueH7, BOARD_UDEFS
+│   │   └── drone_config.cpp   Defines kDroneConfig
+│   └── Drone3/
+│       ├── config.mk          Sets BOARD_FULL=OrqaH7QuadCore, BOARD_UDEFS (-DBPRL_BOARD_ORQA)
 │       └── drone_config.cpp   Defines kDroneConfig
 │
 ├── src/
@@ -55,12 +59,13 @@ BPRL_flight/
 │   ├── threads.cpp           All thread function bodies + global state definitions
 │   │
 │   ├── coms/                 Peripheral drivers
-│   │   ├── SPI.hpp/.cpp      SPI bus init: 3× on-board IMU (chip set selected by the drone's board, see below) + MS5611 barometer
-│   │   ├── IMUs/             ICM45686.hpp/.cpp (Drone1/CubeOrangePlus: drives imu1/2/3), ICM42688.hpp/.cpp (supports a 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (Drone2/CubeBlueH7: drives imu1/2/3)
-│   │   ├── Baro/             MS5611.hpp/.cpp — barometer state-machine driver (SPI1, CS=PD7)
+│   │   ├── SPI.hpp/.cpp      SPI bus init: on-board IMUs (3× Cube boards, 2× Drone3/Orqa — chip set/count is board-conditional, see below) + MS5611 barometer (Cube boards only; Drone3's barometer is I2C, see Baro/DPS310 below)
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (Drone1/CubeOrangePlus: drives imu1/2/3), ICM42688.hpp/.cpp (Drone3/Orqa: drives imu1/2; also supports an alternate 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated there), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (Drone2/CubeBlueH7: drives imu1/2/3)
+│   │   ├── Baro/             MS5611.hpp/.cpp — SPI1 CS=PD7 state-machine driver (Cube boards). DPS310.hpp/.cpp — I2C2 addr 0x77, polled from I2CThread (Drone3/Orqa's only barometer — no SPI baro on that board)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
-│   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface only
-│   │   ├── PWM.hpp/.cpp      DShot600 / PWM motor output (MOTOR_PROTOCOL define)
+│   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface (Cube boards) or DPS310 barometer (Drone3/Orqa)
+│   │   ├── PWM.hpp/.cpp      Thin MOTOR_PROTOCOL-select wrapper (DShot vs. standard servo PWM) around motor_output_write() — the actual bidirectional-DShot timer/DMA driver is DShot.hpp/.cpp (see src/coms/README.md)
+│   │   ├── DShot.hpp/.cpp    Bidirectional DShot600 driver — Cube boards share TIM1 (3 motors, CC2 cross-capture rotation) + TIM4 (1 motor); Drone3/Orqa uses TIM4+TIM2, 2 motors time-multiplexed per timer (board has only 2 usable BIDIR timer pairs on its MOT1-4 ESC connector)
 │   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
 │   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
 │   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
@@ -88,7 +93,8 @@ BPRL_flight/
 │
 ├── boards/
 │   ├── CubeBlueH7/           STM32H753ZI board files (board.h, board.c, board.mk) — used by Drone2
-│   └── CubeOrangePlus/       STM32H743ZI board files — used by Drone1
+│   ├── CubeOrangePlus/       STM32H743ZI board files — used by Drone1
+│   └── OrqaH7QuadCore/       STM32H743xI board files — used by Drone3
 │
 ├── cfg/
 │   ├── chconf.h              ChibiOS kernel configuration
@@ -108,7 +114,7 @@ BPRL_flight/
 - `config.mk` — sets `BOARD_FULL`/`BOARD_UDEFS` (which flight-controller board this drone uses; same mechanism the old `BOARD=` selector used internally).
 - `drone_config.cpp` — defines `kDroneConfig` with every field spelled out (no defaults/override machinery — plain aggregate init, chosen because this toolchain builds with no explicit `-std=`, defaulting to `gnu++14`, where C++20 designated initializers aren't reliably available).
 
-`make DRONE=Drone1` (or `Drone2`) selects which drone's files get compiled in — see [Build and Upload](#6-build-and-upload) below. Shared application code (controllers, EKF, mixer, drivers) never changes between drones; only `configs/<Drone>/` does.
+`make DRONE=Drone1` (`Drone2`, `Drone3`) selects which drone's files get compiled in — see [Build and Upload](#6-build-and-upload) below. Shared application code (controllers, EKF, mixer, drivers) never changes between drones; only `configs/<Drone>/` and board-conditional `#if`s (gated on `BPRL_BOARD_CUBEORANGEPLUS`/`BPRL_BOARD_CUBEBLUE`/`BPRL_BOARD_ORQA`) do.
 
 ### Thread priority table
 
@@ -134,7 +140,7 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_state[19]` | `state_mtx` | Fused 19-element flight state |
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[6]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch, controller-select switch) |
-| `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in `motor_output_write()`) |
+| `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000, physical DShot lane order (0=disarm; protocol conversion in `motor_output_write()`) — `MotorMixer` computes these in logical [FR, RL, FL, RR] order and remaps to lane order via `MotorMixerConfig::motor_map` at the last step, see [MotorMixer](#motormixer) below |
 | `g_ctrl[4]` | `state_mtx` | Active controller's torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
@@ -239,6 +245,8 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor com
          /       \
     RL [1]       RR [3]
 ```
+
+All mixer math (the factor tables, the diagram above) is in this logical `[FR, RL, FL, RR]` order — it never varies by drone. What *does* vary per drone is which physical DShot output lane each logical corner is actually wired to, captured in one place: `MotorMixerConfig::motor_map[FR/RL/FL/RR]` → physical lane (0–3). `MotorMixer::update()` applies it once, at the very last step, converting its logical output to physical lane order for `out[]`. The same map is applied in reverse for RPM telemetry (physical lane → logical, right after `dshot_get_telemetry()` in `ControlThread`) and forward for the USB `MT,<motor>,<pct>` test command, so every other consumer in the codebase — Unmixer/INDI geometry, EKF, `$TEL`, SD logs, `tools/motor_test.py`/`tools/telemetry.py` — only ever deals in logical FR/RL/FL/RR order and never needs to know the physical wiring. Drone1/Drone2 use the identity map (`{0,1,2,3}` — ESC wired FR→lane0..RR→lane3 directly); Drone3 doesn't (see `configs/Drone3/drone_config.cpp`'s `.mixer` comment for the bench-derived mapping).
 
 ---
 
@@ -446,7 +454,7 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 | `RPMS` | 0x07 | TimeUS, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
 | `STRN` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
 | `IMU1`/`IMU2`/`IMU3` | 0x0B/0x0C/0x0D | TimeUS, AccX, AccY, AccZ (m/s²), GyrX, GyrY, GyrZ (rad/s), Valid — one series per on-board IMU |
-| `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel) |
+| `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel), G1R, G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`, roll/pitch) |
 | `BARO` | 0x0F | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
 
 TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant.
@@ -542,11 +550,13 @@ make
 
 # Explicitly select drone — DRONE picks configs/<Drone>/config.mk, which sets
 # the board this drone uses (BOARD_FULL/BOARD_UDEFS — boards/CubeBlueH7,
-# -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS)
-# and configs/<Drone>/drone_config.cpp, which supplies that drone's
-# DroneConfig (gains, RC map, motor geometry, sensors, logging).
+# -DBPRL_BOARD_CUBEBLUE / boards/CubeOrangePlus, -DBPRL_BOARD_CUBEORANGEPLUS /
+# boards/OrqaH7QuadCore, -DBPRL_BOARD_ORQA) and configs/<Drone>/drone_config.cpp,
+# which supplies that drone's DroneConfig (gains, RC map, motor geometry,
+# sensors, logging).
 make DRONE=Drone1    # CubeOrange+ (default)
 make DRONE=Drone2    # CubeBlue H7
+make DRONE=Drone3    # Orqa QuadCore H7
 
 # Enable debug USB streams ($TEL/$EKFL/$IMU at 10 Hz over USB CDC)
 make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
@@ -577,6 +587,8 @@ make flash-stlink DRONE=Drone2
 ```
 Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
+**Drone3 (Orqa QuadCore H7):** a factory-fresh board ships with no ArduPilot-compatible bootloader and must be bootstrapped once via true DFU before `make flash`/ST-Link uploads will work — see [`boards/OrqaH7QuadCore/orqa_quadcore_h7_ardupilot_setup.md`](boards/OrqaH7QuadCore/orqa_quadcore_h7_ardupilot_setup.md) for that one-time setup.
+
 ### Debug USB
 
 With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **USB CDC** port (`/dev/ttyACM0`):
@@ -597,31 +609,33 @@ All drivers live in `src/coms/`. See [`src/coms/README.md`](src/coms/README.md) 
 
 ### Channel summary
 
-IMU chip set and CS pins are board-conditional (`DRONE=Drone1`/CubeOrangePlus, the default, vs. `DRONE=Drone2`/CubeBlueH7) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `DRONE=Drone1` shown here:
+IMU chip set and CS pins are board-conditional (`DRONE=Drone1`/CubeOrangePlus, the default, vs. `DRONE=Drone2`/CubeBlueH7 vs. `DRONE=Drone3`/Orqa QuadCore H7) — see [IMU Drivers](#8-imu-drivers) below for the full breakdown. `DRONE=Drone1` shown here:
 
 | Channel | Driver | Device(s) | Status |
 |---|---|---|---|
 | SPI1 | `SPI.hpp/.cpp` | imu1 (ICM-45686, CS=PG1), baro1 (MS5611, CS=PD7) | Working |
 | SPI4 | `SPI.hpp/.cpp` | imu2 (ICM-45686, CS=PC15), imu3 (ICM-45686, CS=PC13) | Working — this board's SPI4 slots are ICM-45686; other CubeOrangePlus revisions populate ICM-42688 there instead (see IMU Drivers below) |
 | FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, default interface) | Working |
-| TIM1/TIM4 | `PWM.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
+| TIM1/TIM4 | `DShot.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
 | UART (TELEM1) | `Radio.hpp/.cpp` | CRSF receiver (default; SBUS also compiled, `RADIO_PROTOCOL` selects) | Working |
 | UART (TELEM2) | `MAVLink.hpp/.cpp` | MAVLink — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`) | Working |
 | I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (fallback interface only — CAN is default) | Working |
+
+`DRONE=Drone3` (Orqa QuadCore H7) differs in several channels — see [IMU Drivers](#8-imu-drivers) below and [`src/coms/README.md`](src/coms/README.md) for the full breakdown: only 2 on-board IMUs (SPI1 CS=PA4, SPI4 CS=PE11, both ICM-42688, no `imu3`); no SPI barometer (DPS310 on I2C2 instead, address 0x77, polled from `I2CThread` — see `Baro/DPS310.hpp`); DShot uses TIM4+TIM2 rather than TIM1+TIM4 (2 motors time-multiplexed per timer); RC input is USART6 (full-duplex, PC6/PC7) rather than TELEM1.
 
 ---
 
 ## 8. IMU Drivers
 
-The firmware reads three on-board IMUs plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set is board-conditional** — `DRONE=Drone1` (CubeOrangePlus, default) and `DRONE=Drone2` (CubeBlueH7) populate `imu1/2/3` with genuinely different parts, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE` (set by `configs/Drone1/config.mk`/`configs/Drone2/config.mk`, chosen via `DRONE=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
+The firmware reads two or three on-board IMUs (board-conditional) plus one external IMU/AHRS over CAN, plus a barometer. Index assignments are fixed, but **the chip set — and on Drone3, the IMU count and barometer bus — is board-conditional**, selected at build time via `-DBPRL_BOARD_CUBEORANGEPLUS`/`-DBPRL_BOARD_CUBEBLUE`/`-DBPRL_BOARD_ORQA` (set by `configs/<Drone>/config.mk`, chosen via `DRONE=`; see [`SPI.hpp`](src/coms/SPI.hpp) for the full `#if`):
 
-| Index | Variable | `DRONE=Drone1` sensor/bus | `DRONE=Drone2` sensor/bus | DOF |
-|---|---|---|---|---|
-| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | 6 (accel + gyro) |
-| 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | 6 (accel + gyro) |
-| 2 | `g_imu[2]` | ICM-45686, SPI4 CS=PC13 | ICM-20602, SPI4 CS=PC13 | 6 (accel + gyro) |
-| — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
-| — | `g_baro` | MS5611, SPI1 CS=PD7 | MS5611, SPI1 CS=PD7 (same pin both boards) | pressure + temperature |
+| Index | Variable | `DRONE=Drone1` sensor/bus | `DRONE=Drone2` sensor/bus | `DRONE=Drone3` sensor/bus | DOF |
+|---|---|---|---|---|---|
+| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | ICM-42688, SPI1 CS=PA4 | 6 (accel + gyro) |
+| 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | ICM-42688, SPI4 CS=PE11 | 6 (accel + gyro) |
+| 2 | `g_imu[2]` | ICM-45686, SPI4 CS=PC13 | ICM-20602, SPI4 CS=PC13 | *(not present — stays `valid=false`)* | 6 (accel + gyro) |
+| — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
+| — | `g_baro` | MS5611, SPI1 CS=PD7 | MS5611, SPI1 CS=PD7 (same pin as Drone1) | DPS310, I2C2 addr 0x77 (no SPI baro on this board) | pressure + temperature |
 
 ### ICM-45686 (`src/coms/IMUs/ICM45686.hpp/.cpp`) — `DRONE=Drone1`
 
@@ -643,7 +657,14 @@ Classic InvenSense MPU-9250-family parts — register-based digital low-pass fil
 - **SPI mode:** MODE3 (CPOL=1, CPHA=1) for both — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
 - **Axis rotation:** ⚠️ **unverified placeholder.** `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) currently passes each chip's native axes straight through with no rotation — the CubeOrangePlus rotation constants above were derived for that board's specific ICM-45686 mounting and do not apply to these different, differently-mounted chips. The real mounting orientation isn't derivable from source; **bench-verify before flight** (e.g. tilt nose-down, confirm pitch sign in `$TEL`/`$IMU` telemetry via `tools/telemetry.py`) and update the rotation math once known. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
 
-### MS5611 Barometer
+### ICM-42688 (`src/coms/IMUs/ICM42688.hpp/.cpp`) — `DRONE=Drone3`
+
+Same InvenSense v3 family as the ICM-45686 above (FIFO-based, analog anti-alias filter stage), but only **two** on-board IMUs on this board — `imu1` (SPI1, CS=PA4) and `imu2` (SPI4, CS=PE11); `g_imu[2]` is simply never written and stays `valid=false` (`StateManager` already treats an invalid lane as absent, so this needs no special-casing elsewhere).
+
+- **Axis rotation** (`SPIThread`'s `BPRL_BOARD_ORQA` branch, `src/threads.cpp`): transcribed from ArduPilot's `OrqaH7QuadCore` hwdef.dat (`IMU Invensensev3 SPI:imu1 ROTATION_ROLL_180_YAW_270` / `SPI:imu2 ROTATION_PITCH_180`) — imu1 `[-y, -x, -z]`, imu2 `[-x, y, -z]` to NED z-down.
+- This same `ICM42688.hpp/.cpp` driver class also exists to support an alternate CubeOrangePlus hardware revision (1×ICM-45686 + 2×ICM-42688) — not instantiated on the `DRONE=Drone1` board described above, only on Drone3.
+
+### MS5611 Barometer — `DRONE=Drone1`/`DRONE=Drone2`
 
 `src/coms/Baro/MS5611.hpp/.cpp`, SPI1, CS=PD7, shares the bus with imu1. Unlike the IMU FIFO reads, a full pressure+temperature sample needs multi-millisecond ADC conversions, so `read()` is a small state machine called once per SPIThread tick (1 kHz): reset → read 6 PROM calibration words → alternate D1 (pressure) / D2 (temperature) conversions, returning a compensated pair roughly every 6 ticks.
 
@@ -651,6 +672,10 @@ Classic InvenSense MPU-9250-family parts — register-based digital low-pass fil
 - Fused into the EKF via `EKF::update_altitude()` — a single-row, chi-squared-gated (`BARO_CHI2_GATE`) measurement of the Z position state. Existing pos↔vel and vel↔accel-bias cross-covariance in the process model (`_build_F()`) automatically propagates the correction into vertical velocity and accelerometer bias — the same mechanism ArduPilot's EKF3 uses for baro fusion.
 - **Suppressed whenever mocap is connected** (`StateManager::update()` gates on `!mocap.valid`) — mocap measures absolute position far more accurately, and the two aren't anchored to a common origin, so fusing both would fight rather than agree. See [Sensor loss behaviour](#sensor-loss-behaviour) above.
 - Logged as `BARO` (pressure, temperature, altitude, valid) — see [SD Card Logging](#5-sd-card-logging).
+
+### DPS310 Barometer — `DRONE=Drone3`
+
+`src/coms/Baro/DPS310.hpp/.cpp`, I2C2, address 0x77 — this board's only barometer (no SPI baro). Unlike MS5611's class-based, SPIThread-driven design, DPS310 follows the procedural I2C-poll pattern used elsewhere in `src/coms` (see `src/sensors/StrainRate.cpp`): `dps310_init()` registers a poll callback via `bprl_i2c_register()`, and the sensor runs in its own continuous background-measurement mode, so each poll from `I2CThread` (200 Hz) is a simple "is a fresh sample ready" check rather than a multi-step conversion state machine. Writes `g_baro`/`baro_mtx` directly — same downstream contract (EKF fusion, mocap-priority suppression, `BARO` log) as MS5611 above.
 
 ### Inertial Sense IMX5 (FDCAN1)
 

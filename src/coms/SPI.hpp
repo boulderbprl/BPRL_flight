@@ -27,8 +27,8 @@
  * invalid lane as absent (see state_estimator/StateManager.cpp). No SPI
  * barometer — this board's DPS310 is I2C-only (src/coms/Baro/DPS310.hpp),
  * polled from I2CThread instead of SPIThread, so there is no baro1 here.
- * NOT bench-verified against a physical unit — confirm WHOAMI on both
- * lanes before trusting attitude output.
+ * WHOAMI on both lanes and axis orientation are bench-confirmed as of
+ * 2026-08-10 — not yet flight-tested.
  *   imu1  ICM-42688   SPI1   CS=PA4   (GYRO1_CS)
  *   imu2  ICM-42688   SPI4   CS=PE11  (GYRO2_CS)
  *

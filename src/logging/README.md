@@ -13,10 +13,11 @@ Binary flight-data logger using FatFS over ChibiOS SDMMC1.
 | SDMMC1_CK | PC12 | AF12 |
 | SDMMC1_CMD | PD2 | AF12 |
 
-Card format: **FAT32**, any capacity.  The Cube microSD slot (same PCB on
-both `DRONE=Drone1`/CubeOrangePlus and `DRONE=Drone2`/CubeBlueH7) has no
-card-detect or write-protect signals wired to the MCU — presence is
-determined by whether `sdcConnect()` succeeds.
+Card format: **FAT32**, any capacity.  The microSD slot uses this same
+SDMMC1 pinout across the supported boards (`boards/OrqaH7QuadCore/board.h`,
+for example, documents it as identical to the Cube boards') and has no
+card-detect or write-protect signals wired to the MCU on any of them —
+presence is determined by whether `sdcConnect()` succeeds.
 
 ## Clock configuration
 
@@ -75,7 +76,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x07 | RPMS | time_us, rpm0–rpm3 |
 | 0x08 | STRN | time_us, s0–s3, valid |
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
-| 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch |
+| 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g1_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
 
 No message carries a rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.

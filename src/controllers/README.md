@@ -103,7 +103,7 @@ yaw_rate_tgt ──────────────────────�
 
 Each loop's target/error/derivative filtering matches ArduPilot's `AC_PID` structure (target LPF → error = filtered target − measurement → error LPF → derivative of filtered error → D LPF); the rate loops' target-filter (`FLTT`) and yaw's error-filter (`FLTE`) are set to match `AC_AttitudeControl_Multi`'s actual defaults — see the D-filter/T-filter/E-filter columns below. Integrators are anti-windup clamped to `imax` (see table).
 
-Gains now live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGains`, see `configs/DroneConfig.hpp`) rather than hardcoded in `Attitude_PID.cpp` — the table below is Drone1/Drone2's current (identical) values.
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGains`, see `configs/DroneConfig.hpp`) rather than hardcoded in `Attitude_PID.cpp` — the table below shows representative current values; check the relevant drone's `drone_config.cpp` for the authoritative numbers.
 
 ### Gains
 
@@ -118,7 +118,7 @@ Gains now live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGain
 
 T-filter/E-filter are the target/error low-pass stages ahead of the derivative (`PID`'s `filt_target_hz`/`filt_error_hz`); "off" means disabled (passthrough), matching ArduPilot's own default for that specific gain (e.g. roll/pitch rate `FLTE=0`, but all rate axes get `FLTT=20Hz`, and yaw alone gets `FLTE=2.5Hz`).
 
-`yaw_stick_gain = 3.0` (`AttitudePidGains::yaw_stick_gain`) scales the yaw rate target before the rate PID — not the same value as `AttitudeIndiGains::yaw_gain` (1.5); see the note in the AttitudeINDI section below.
+`AttitudePidGains::yaw_stick_gain` scales the yaw rate target before the rate PID — a distinct field from `AttitudeIndiGains::yaw_gain`, not necessarily the same value; see the note in the AttitudeINDI section below.
 
 ---
 
@@ -134,20 +134,50 @@ INDI uses the measured angular acceleration (`p_dot`, `q_dot` from `g_state[P_DO
 1. Outer P:   angle_error [rad]    → rate_tgt [rad/s]
 2. Inner PID: rate_error [rad/s]   → accel_cmd [rad/s²]
 3. INDI step:
-     delta_torque  = (accel_cmd − p_dot_measured) × INDI_GAIN     [N·m]
-     total_torque  = current_torque_Nm + delta_torque              [N·m]
+     delta_torque  = (accel_cmd − p_dot_measured) × kappa × G1_hat  [N·m]
+     total_torque  = current_torque_Nm + delta_torque               [N·m]
      out_cmds[0]   = clamp(total_torque / T_MAX_NM, −1, 1)
 ```
 
-`current_torque_Nm` is estimated from live DShot RPM telemetry by the **Unmixer**, which now has real bench-fit constants (see the Unmixer section below) — `current_torque` is no longer always zero.
+`current_torque_Nm` is estimated from live DShot RPM telemetry by the **Unmixer**, using per-drone bench-fit motor constants (see the Unmixer section below) — `current_torque` is no longer always zero on a drone with those constants characterized.
 
-`indi_gain_roll = 0.0035` / `indi_gain_pitch = 0.0045` N·m·s²/rad (`AttitudeIndiGains`, see `configs/DroneConfig.hpp`) — effective moment of inertia (Ixx, Iyy), one value per axis (not a single shared gain). Like the other controllers, these now live per-drone in `configs/<Drone>/drone_config.cpp` rather than hardcoded in `Attitude_INDI.cpp`.
+### Live G(x) adaptation — `G1_hat`
+
+`G1_hat` (~1/Ixx, 1/Iyy — the airframe-effectiveness term the old static `indi_gain_roll/pitch` used to be) is no longer a fixed constant. It's a live per-axis estimate, seeded from an offline-identified value and continuously refined online by a normalized-LMS (NLMS) adapter:
+
+```
+tau_f            = current_torque[axis] through the SAME filter chain
+                    (STATEMGR_LP_PQRDOT_HZ + optional extra 1st-order stage)
+                    StateManager applies to p_dot/q_dot — delay-matches the
+                    regressor to the measured acceleration it's compared against.
+                    Runs every 400 Hz tick, to hold its designed cutoff.
+
+every NLMS_DECIMATION ticks (8 = 20 ms, not every 2.5 ms tick — a per-tick
+delta of a ~20 Hz-filtered signal is dominated by filter ripple/noise; flight
+data showed doublet excitation visible at 50 Hz resolution but not at 400 Hz):
+    delta_tau_f      = tau_f[k] − tau_f[k-1]              # k = decimated step index
+    delta_omegadot_f = p_dot_measured[k] − p_dot_measured[k-1]
+
+    if |delta_tau_f| >= NLMS_EXCITATION_MIN_NM:      # else: freeze (uninformative regression)
+        e      = delta_omegadot_f − G1_hat × delta_tau_f
+        step   = mu × e × delta_tau_f / (delta_tau_f² + NLMS_EPS)
+        step   = clamp(step, ±NLMS_MAX_STEP_FRAC × |seed|)          # per-step limiter
+        G1_hat = clamp(G1_hat + step, seed ± NLMS_MAX_DRIFT_FRAC × |seed|)  # drift limiter
+```
+
+This whole block runs every tick `AttitudeINDI::update()` is called — i.e. every tick INDI is in the drone's controller list, whether or not it's the *active* controller (shadow mode, like every other controller in `FlightStateMachine`'s list) — but only the `tau_f` filter update happens every tick; the decimated regressor/step above only fires once every `NLMS_DECIMATION` ticks.
+
+`mu` is mode-dependent: `nlms_mu_pid` (aggressive) while INDI is running in shadow behind PID/PID+PI, `nlms_mu_indi` (slow/trickle) once INDI is actually driving the mixer — set via `set_indi_active(bool)`, called once per tick by `FlightStateMachine::run_attitude()`. `G1_hat` persists across arm/disarm cycles within a boot (only the filter/differencing memory resets in `reset_all()`) — the learned estimate is never thrown away just because the vehicle disarmed.
+
+`kappa` (`indi_output_gain_roll/pitch`) is a separate, static, per-axis output-authority gain, decoupled from `G1_hat` so tuning control authority never silently retunes the physical-effectiveness estimate (or vice versa). `kappa = 1.0` reproduces the pre-adaptation behavior exactly.
+
+`get_g1(float g1[2])` exposes the live `G1_hat` estimate for comparison against its seed — logged in the `INDI` message's `G1R`/`G1P` fields (`LogMsgINDI::g1_roll/g1_pitch`, `src/logging/LogMessages.hpp`), alongside `UnmixR`/`UnmixP` (`current_torque`, a different quantity — don't conflate the two).
 
 `accel_cmd` (the rate-PID's output, before the INDI increment) and `delta_torque` are no longer separate `update()` output parameters — that would break the common `AttitudeController` interface every controller in `FlightStateMachine`'s list now shares (see `src/controllers/AttitudeController.hpp`). `AttitudeINDI::update()` stores them internally instead; `get_diag(delta_torque[2], accel_cmd[2])` reads them back for the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
 
 ### Gains
 
-The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain and a much larger integrator clamp:
+The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain and a much larger integrator clamp. Representative current values (roll/pitch rate gains are typically shared across drones; yaw-rate and the NLMS seed/output values below are tuned per-airframe — check the relevant drone's `drone_config.cpp` for authoritative numbers):
 
 | Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|
@@ -155,10 +185,20 @@ The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rat
 | Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Roll rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
 | Pitch rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
-| Yaw rate | 0.065 | 0.02 | 0 | off | 30 Hz | 0.5 |
+| Yaw rate | 0.065–0.18 | 0.018–0.02 | 0 | off | 30 Hz | 0.5 |
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
-`yaw_gain = 1.5` (`AttitudeIndiGains::yaw_gain`) scales the yaw rate target before the rate PID — **not** the same value as `AttitudePidGains::yaw_stick_gain` (3.0); these are two distinct fields in two distinct gain structs, easy to conflate.
+`AttitudeIndiGains` fields beyond the PID loops (`configs/DroneConfig.hpp`, values per-drone in `configs/<Drone>/drone_config.cpp`):
+
+| Field | Meaning |
+|---|---|
+| `g1_seed_roll` / `g1_seed_pitch` | Offline-identified `G1_hat` seed (N·m·s²/rad) — also the NLMS drift-clamp reference; airframe-specific, re-derive per drone |
+| `indi_output_gain_roll/pitch` (kappa) | Static output-authority gain, decoupled from `G1_hat`. `1.0` reproduces pre-adaptation behavior |
+| `nlms_mu_pid` | Adaptation rate while INDI is in shadow (PID/PID+PI active) — needs bench/flight tuning |
+| `nlms_mu_indi` | Adaptation rate while INDI is active (slow/trickle) — needs bench/flight tuning |
+| `yaw_gain` | Scales the yaw rate target before the rate PID — **not** the same field as `AttitudePidGains::yaw_stick_gain`; two distinct fields in two distinct gain structs, easy to conflate, and not necessarily the same value per drone |
+
+`NLMS_EXCITATION_MIN_NM` (0.02 N·m), `NLMS_MAX_STEP_FRAC` (0.10), and `NLMS_MAX_DRIFT_FRAC` (0.50) are adaptation-safety constants (`Attitude_INDI.hpp`, `static constexpr`) rather than `DroneConfig` fields — flight-tuning constants, not per-drone identification data (same convention as `AttitudeINDI`'s `YAW_HOLD_MAX_RATE`). All three are flagged in-source as needing bench tuning.
 
 ---
 
@@ -180,7 +220,7 @@ Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's outp
 
 ### Gains
 
-Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`). The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination** — `ControllersConfig::pid_pi_enabled` defaults to `false` on both drones until it has.
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`). The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination** — `ControllersConfig::pid_pi_enabled` defaults to `false` until it has.
 
 | Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|
@@ -354,7 +394,7 @@ The bench fit also gives motor reaction (drag) torque as a function of thrust (`
 
 Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to four motor commands (0–1000) using an X-frame mixing matrix. Motor factor arrays, PWM min/idle/max, and the roll/pitch/yaw scale and disarm-angle constants come from `MotorMixerConfig` (`configs/DroneConfig.hpp`), passed to the constructor — no longer `static constexpr` class members, so per-drone geometry (different frame size, motor order, or PWM range) doesn't require touching this shared code.
 
-All motors output 0 when disarmed or when |roll| or |pitch| exceeds the config's `max_angle_rad` (~80° for both drones today).
+All motors output 0 when disarmed or when |roll| or |pitch| exceeds the config's `max_angle_rad` (~80° for the drones today).
 
 ```
     FL [2]       FR [0]
@@ -363,6 +403,8 @@ All motors output 0 when disarmed or when |roll| or |pitch| exceeds the config's
          /       \
     RL [1]       RR [3]
 ```
+
+All internal math is in this logical `[FR, RL, FL, RR]` order — `MotorMixerConfig::motor_map[FR/RL/FL/RR]` (per-drone physical DShot lane assignment) is applied once, at the very end of `update()`, converting to physical lane order for `out[]`. See the root README's [MotorMixer](../../README.md#motormixer) section for the full rationale and why per-drone wiring quirks belong in `motor_map`, not in the factor tables above.
 
 ---
 
@@ -394,7 +436,8 @@ The integrator is clamped to `±imax`.
 
 ---
 
-## TODOs
+## Notes
 
-- **Gain tuning** — all gains are untested on H7 hardware.
-- **Yaw hold** — POS_HOLD currently commands yaw *rate*, not yaw *angle*. An outer yaw loop requires a heading reference from the IMX5 or magnetometer.
+- **POS_HOLD yaw** — currently commands yaw *rate*, not yaw *angle*; an outer yaw-angle loop would need a heading reference from the IMX5 or a magnetometer. Tracked under "fix the position hold controller" in the root README's [TODO](../../README.md#todo) list.
+
+See the root README's [TODO](../../README.md#todo) list for planned feature work; this file documents the controllers as they exist today.

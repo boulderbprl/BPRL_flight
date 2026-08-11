@@ -3,21 +3,29 @@
 /*
  * Drone3 — Orqa QuadCore H7.
  *
- * New airframe/FC combination, not bench- or flight-tested. Gains and motor
- * geometry below are copied from Drone1 (configs/Drone1/drone_config.cpp) as
- * a syntactically-valid starting point ONLY — they were tuned for a
- * different, larger CAN-IMX5-equipped airframe and are almost certainly
- * wrong for whatever frame/motors/props this FC ends up on. In particular:
- *   - .unmixer motor_c0..c3 / max_thrust_n came from thrust-stand
- *     characterization of Drone1's specific motors — re-derive for this
- *     board's motors before trusting Unmixer's thrust/RPM estimates.
- *   - .mixer roll/pitch/yaw_factor assume motor_out[0..3] map physically to
- *     FR/RL/FL/RR. This board's four ESC pads are LINE_MOTOR0..3
- *     (boards/OrqaH7QuadCore/board.h: PD12/PA1/PA2/PB1) — wire ESCs to match
- *     that FR/RL/FL/RR order, or edit the factor tables to match your wiring.
+ * New airframe/FC combination. IMU alignment, motor pinout/order, and motor
+ * spin direction are bench-confirmed as of 2026-08-10 (see the .mixer
+ * comment further down); gains below have been roughly bench-tuned as a
+ * starting point but are not flight-refined, and this airframe has not yet
+ * been flight-tested. Gains and motor geometry originated as a copy from
+ * Drone1/Drone2 (configs/Drone1|Drone2/drone_config.cpp — mixed sources:
+ * .pid/.pid_pi/.alt/.pos/.controllers match Drone1, .indi matches Drone2;
+ * check individual gain blocks below before assuming a specific source),
+ * tuned for different, larger CAN-IMX5-equipped airframes — treat as a
+ * rough starting point, not a final match for this frame/motors/props. In
+ * particular:
+ *   - .unmixer motor_c0..c3 / max_thrust_n still came from thrust-stand
+ *     characterization of Drone1's specific motors, not re-derived for this
+ *     board's motors — Unmixer's thrust/RPM estimates are not trustworthy yet.
+ *   - .mixer roll/pitch/yaw_factor are the standard logical [FR,RL,FL,RR]
+ *     order; .mixer.motor_map is what maps that onto this airframe's actual
+ *     ESC wiring (motor_out[0..3] = MOT1..MOT4, boards/OrqaH7QuadCore/board.h
+ *     LINE_MOTOR0..3: PD12/PD13/PA1/PA0 on the main ESC connector) — see the
+ *     .mixer comment further down for the lane→corner mapping found on the
+ *     bench. Re-derive motor_map if the ESC wiring changes.
  *   - .controllers below deliberately disables both INDI and PID+PI (plain
- *     PID only) for first bring-up, unlike Drone1's INDI-enabled default —
- *     safest starting point on unverified hardware.
+ *     PID only), unlike Drone1's INDI-enabled default — conservative
+ *     starting point pending flight testing on this airframe.
  *
  * Field order below matches each struct's declaration order in
  * configs/DroneConfig.hpp exactly (plain aggregate init, no designated
@@ -82,16 +90,21 @@ const DroneConfig kDroneConfig = {
     },
 
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
-    { 0, 1, 2, 3, 4, 6, 7 },
+    { 0, 3, 1, 2, 4, 6, 7 },
 
-    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
-    // Index order [FR, RL, FL, RR] must match physical ESC wiring to
-    // LINE_MOTOR0..3 (board.h) — verify motor spin direction/order on the
-    // bench (props off) before first arm.
+    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
+    // Factor arrays are the standard [FR, RL, FL, RR] logical order — motor_map
+    // below is what actually accounts for this airframe's wiring. Bench
+    // testing (props off, 2026-08-10) found lane0/MOT1=RR, lane1/MOT2=FR,
+    // lane2/MOT3=RL, lane3/MOT4=FL, i.e. motor_map[FR]=1, [RL]=2, [FL]=3,
+    // [RR]=0 (the physical lane wired to each logical corner). Spin
+    // direction (CW/CCW per corner) is a separate ESC-firmware setting,
+    // also bench-confirmed correct as of 2026-08-10 — not yet flight-tested.
     {
         { -1.0f, +1.0f, +1.0f, -1.0f },  // roll_factor  [FR, RL, FL, RR]
         { +1.0f, -1.0f, +1.0f, -1.0f },  // pitch_factor
         { +1.0f, +1.0f, -1.0f, -1.0f },  // yaw_factor
+        { 1, 2, 3, 0 },                  // motor_map [FR,RL,FL,RR] -> physical lane
         50, 150, 900,                    // pwm_min, pwm_idle, pwm_max
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
@@ -111,12 +124,24 @@ const DroneConfig kDroneConfig = {
     { true, false, false },
 
     // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
-    // Both disabled: plain PID only, for first bring-up on unverified hardware.
+    // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
     { false, false },
 
-    // .logging — LoggingConfig { log_rate_hz, enable{att,lin,rcin,outp,rpms,strn,imu1,imu2,imu3,indi,baro,ctun,mocp} }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
     {
-        50.0f,
-        { true, true, true, true, true, true, true, true, true, true, true, true, true },
+        50.0f, // log_rate_hz
+        { true, // att
+          true, // lin
+          true, // rcin
+          true, // outp
+          true, // rpms
+          true, // strn
+          true, // imu1
+          true, // imu2
+          false, // imu3
+          true, // indi
+          true, // baro
+          true, // ctun
+          true }, // mocp
     },
 };
