@@ -52,10 +52,11 @@ void FlightStateMachine::run_attitude(const float ctrl_state6[],
     _pid.update(ctrl_state6, input, pid_cmds);
 
     float jerk_cmds[3];
-    _pid_jerk.update(ctrl_state6, input, roll_jerk, jerk_cmds);
+    float roll_rate_tgt;
+    _pid_jerk.update(ctrl_state6, input, roll_jerk, jerk_cmds, roll_rate_tgt);
     _jerk_diag[0] = roll_jerk;
     _jerk_diag[1] = jerk_cmds[0];
-    _jerk_diag[2] = jerk_cmds[1];
+    _jerk_diag[2] = roll_rate_tgt;
     _jerk_diag[3] = jerk_cmds[2];
 
     _indi_diag[0] = current_torque[0];

@@ -77,7 +77,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
-| 0x13 | PIDJ | time_us, roll_jerk, cmd_roll, cmd_pitch, cmd_yaw |
+| 0x13 | PIDJ | time_us, roll_jerk, cmd_roll, roll_rate_tgt, cmd_yaw |
 
 INDI (0x0E) is pure shadow — never selectable by the channel-7 switch. PIDJ (0x13) is the switch's actual alternative to plain PID (`RCIN.indi_stk` > 0.33 selects it); see `src/controllers/README.md`.
 

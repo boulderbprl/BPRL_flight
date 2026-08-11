@@ -85,7 +85,7 @@ public:
     // Always populated from AttitudeINDI (pure shadow — never selectable, see class comment).
     void get_indi_diag(float diag[8]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
-    // diag[4]: [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw]
+    // diag[4]: [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw]
     // Always populated from AttitudePIDJerk, regardless of _use_jerk — this is
     // AttitudePIDJerk's own output, which drives out_cmds when _use_jerk is true.
     void get_jerk_diag(float diag[4]) const { memcpy(diag, _jerk_diag, sizeof(_jerk_diag)); }
@@ -171,7 +171,7 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
-    // [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw] — see get_jerk_diag()
+    // [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw] — see get_jerk_diag()
     float _jerk_diag[4] = {};
 
     AttitudePID     _pid;

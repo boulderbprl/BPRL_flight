@@ -154,10 +154,10 @@ struct __attribute__((packed)) LogMsgINDI {
 
 struct __attribute__((packed)) LogMsgPIDJ {
     uint64_t time_us;
-    float    roll_jerk; // rad/s^3  jerk estimate fed into the roll rate loop's damping term (JerkFit.hpp)
-    float    cmd_roll;  // [-1, 1]  normalized roll torque commanded by AttitudePIDJerk (includes jerk term)
-    float    cmd_pitch; // [-1, 1]  normalized pitch torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
-    float    cmd_yaw;   // [-1, 1]  normalized yaw torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
+    float    roll_jerk;      // rad/s^3  jerk estimate fed into the roll rate loop's damping term (JerkFit.hpp)
+    float    cmd_roll;       // [-1, 1]  normalized roll torque commanded by AttitudePIDJerk (includes jerk term)
+    float    roll_rate_tgt;  // rad/s    outer roll-loop angular rate target (AttitudePIDJerk::update() diagnostic)
+    float    cmd_yaw;        // [-1, 1]  normalized yaw torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
 };
 // Format: "Qffff"   Body: 8+4×4 = 24 B   Record: 27 B
 // Always populated, regardless of FlightStateMachine::_use_jerk — this is
@@ -323,7 +323,7 @@ constexpr LogDef kLogDefs[] = {
     { LOG_MSG_PIDJ,
       "PIDJ",
       "Qffff",
-      "TimeUS,RollJerk,CmdR,CmdP,CmdY",
+      "TimeUS,RollJerk,CmdR,RRateTgt,CmdY",
       sizeof(LogMsgPIDJ) },
 };
 

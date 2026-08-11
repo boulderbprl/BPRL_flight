@@ -35,13 +35,14 @@
  *   input[1..3]  roll_tgt, pitch_tgt, yaw_rate_tgt [-1, 1]
  *   roll_jerk    fitted roll jerk estimate [rad/s^3] (JerkFit.hpp, "Pdd")
  *   out_cmds[3]  normalised torque [roll, pitch, yaw] in [-1, 1]
+ *   roll_rate_tgt  outer roll-loop angular rate target [rad/s] (diagnostic out)
  */
 class AttitudePIDJerk {
 public:
     AttitudePIDJerk();
 
     void update(const float state[], const float input[], float roll_jerk,
-                float out_cmds[3]);
+                float out_cmds[3], float &roll_rate_tgt);
     void reset_all();
 
 private:

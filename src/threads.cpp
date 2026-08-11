@@ -44,7 +44,7 @@ float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[8]       = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch] — INDI shadow diagnostics, always populated
-float   g_jerk_diag[4]       = {};   // [roll_jerk_input, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
+float   g_jerk_diag[4]       = {};   // [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
@@ -1460,11 +1460,11 @@ static THD_FUNCTION(LogThread, arg)
         /* ── PIDJ — shadow AttitudePIDJerk diagnostics (always logged) ── */
         {
             LogMsgPIDJ msg = {};
-            msg.time_us   = t_us;
-            msg.roll_jerk = jerk_diag[0];
-            msg.cmd_roll  = jerk_diag[1];
-            msg.cmd_pitch = jerk_diag[2];
-            msg.cmd_yaw   = jerk_diag[3];
+            msg.time_us       = t_us;
+            msg.roll_jerk     = jerk_diag[0];
+            msg.cmd_roll      = jerk_diag[1];
+            msg.roll_rate_tgt = jerk_diag[2];
+            msg.cmd_yaw       = jerk_diag[3];
             logger.write(LOG_MSG_PIDJ, msg);
         }
 

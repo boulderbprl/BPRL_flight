@@ -12,21 +12,24 @@ AttitudePIDJerk::AttitudePIDJerk()
     // kp=0.001, ki=0.001 — first-cut small values, same order as each other.
     // imax=0.05 caps the jerk integrator's contribution to at most 5% of
     // full torque authority even fully wound up. kd=0 (no D-on-jerk yet).
-    // filt_target_hz/filt_error_hz=0 (disabled) — feed roll_jerk back
-    // unfiltered, since the fit upstream is already filtered.
-    , _roll_jerk (0.001f, 0.001f, 0.0f, 0.05f, 0.0f, 0.0f, 20.0f)
+    // filt_error_hz=40 — estimate_jerk() (JerkFit.hpp) is an unfiltered
+    // linear-regression readout of raw strain channels, so knock down strain
+    // noise before it hits P/I. Kept high enough (>> the ~few-Hz band a
+    // twice-differentiated, filtered p_dot would resolve) to preserve the
+    // fast jerk-band response that's the reason to use strain over gyro here.
+    , _roll_jerk (0.002f, 0.0005f, 0.0f, 0.2f, 0.0f, 40.0f, 20.0f)
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}
 
 void AttitudePIDJerk::update(const float state[], const float input[], float roll_jerk,
-                             float out_cmds[3])
+                             float out_cmds[3], float &roll_rate_tgt)
 {
-    const float roll_rate_tgt  = _roll_att.update(input[1], state[0]);
+    roll_rate_tgt = 38.0f*_roll_att.update(input[1], state[0]);
     const float pitch_rate_tgt = _pitch_att.update(input[2], state[1]);
 
-    const float jerk_correction = _roll_jerk.update(0.0f, roll_jerk);
-    const float roll_torque = _roll_rate.update(roll_rate_tgt, state[3]) - jerk_correction;
+    const float roll_torque = _roll_jerk.update(roll_rate_tgt, roll_jerk);
+    // const float roll_torque = _roll_rate.update(roll_rate_tgt, state[3]) - jerk_correction;
     out_cmds[0] = constrain_float(roll_torque, -1.0f, 1.0f);
     out_cmds[1] = constrain_float(_pitch_rate.update(pitch_rate_tgt, state[4]), -1.0f, 1.0f);
 
