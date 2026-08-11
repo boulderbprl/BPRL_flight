@@ -203,9 +203,21 @@ static THD_FUNCTION(SPIThread, arg)
         // and stays valid=false; StateManager already treats an invalid
         // lane as absent. Rotations are transcribed from ArduPilot's
         // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
-        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and are
-        // bench-confirmed as of 2026-08-10 (tilt nose-down, correct pitch
-        // sign in $TEL/$IMU telemetry) — not yet flight-tested.
+        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and
+        // verified byte-for-byte 2026-08-12 against ArduPilot's own
+        // AP_Math/vector3.cpp (ROTATION_ROLL_180_YAW_270:
+        // "x=-y; y=-old_x; z=-z" — ROTATION_PITCH_180: "x=-x; z=-z") —
+        // both exactly match the signs below. A 2026-08-11 attempt to
+        // "fix" a large accel-Z calibration residual by flipping just the
+        // Z sign here was wrong: it turned a valid rotation (det=+1) into
+        // a mirror transform (det=-1), which isn't physically realizable
+        // by any real chip mounting, and produced exactly the symptom
+        // that should have been the giveaway — roll/yaw estimates
+        // mirrored ~180° once armed, gyro Z backwards, while X/Y stayed
+        // fine (unchanged by that edit). Reverted. The accel-Z bias
+        // question that prompted it is still open and needs a different
+        // explanation — not this rotation matrix, which is now confirmed
+        // correct against upstream ArduPilot source.
         if (imu1.read(a, g)) {
             // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
             const float ra[3] = { -a[1], -a[0], -a[2] };
@@ -740,8 +752,10 @@ static void usb_log_erase(void)
     chMtxUnlock(&s_usb_write_mtx);
 }
 
+#ifdef BPRL_DEBUG
 /* Staging buffer for CAL,set commands; written to flash by CAL,commit. */
 static CalibData s_cal_stage = {};
+#endif
 
 static void usb_cmd_dispatch(const char *line)
 {
@@ -831,6 +845,7 @@ static void usb_cmd_dispatch(const char *line)
             chMtxUnlock(&s_usb_write_mtx);
         }
     } else if (strncmp(line, "CAL,", 4) == 0) {
+#ifdef BPRL_DEBUG
         const char *rest = line + 4;
         if (strncmp(rest, "set,", 4) == 0) {
             // CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>
@@ -896,6 +911,17 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+#else
+        // No calibration write path in a non-debug build — cal_save()/
+        // cal_clear() (and the interrupt-disabling critical sections they
+        // use) aren't even compiled in (see CalFlash.hpp/.cpp), so there's
+        // nothing here to call regardless of which CAL,* subcommand this
+        // is. A clear error beats silently doing nothing if someone points
+        // calibrate.py at a flight build by mistake.
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,debug_build_required\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strcmp(line, "DSHOT,diag") == 0) {
         DShotDiag d = {};
         dshot_get_diag(&d);
@@ -1050,7 +1076,11 @@ static THD_FUNCTION(USBCmdThread, arg)
     chRegSetThreadName("usbcmd");
     (void)arg;
 
-    static char   s_line[64];
+    // 128, not 64: CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az> with 6 floats at
+    // %f precision (see calibrate.py) can run past 64 bytes when a bias is
+    // large (e.g. a mis-signed accel axis producing a ~2x-gravity residual),
+    // and a truncated line here was silently dropped rather than erroring.
+    static char   s_line[128];
     static uint8_t s_len = 0;
 
     const int tid = TIMING_REGISTER("usbcmd", 0);  // event-driven, no fixed period

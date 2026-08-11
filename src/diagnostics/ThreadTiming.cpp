@@ -29,15 +29,22 @@ int timing_register(const char *name, sysinterval_t period_ticks, bool hard_rt)
 void timing_tick_begin(int id)
 {
     if (id < 0) return;
-    g_timing_stats[id].tick_start_us = (uint32_t)TIME_I2US(chVTGetSystemTimeX());
+    g_timing_stats[id].tick_start = chVTGetSystemTimeX();
 }
 
 void timing_tick_end(int id)
 {
     if (id < 0) return;
     ThreadTimingStats &s = g_timing_stats[id];
-    const uint32_t now_us = (uint32_t)TIME_I2US(chVTGetSystemTimeX());
-    const uint32_t exec_us = now_us - s.tick_start_us;  // wraps correctly (uint32 subtraction)
+    // chTimeDiffX subtracts in systime_t's own (possibly narrower-than-32-bit)
+    // width before widening to sysinterval_t, so it wraps at the *real*
+    // rollover period (e.g. ~6.55s at CH_CFG_ST_RESOLUTION=16, not 2^32 us).
+    // Converting to microseconds first and subtracting as uint32_t — the
+    // previous approach — silently assumed a 32-bit systime_t and produced a
+    // ~2^32us garbage delta on any tick straddling a 16-bit rollover.
+    const systime_t now = chVTGetSystemTimeX();
+    const sysinterval_t elapsed = chTimeDiffX(s.tick_start, now);
+    const uint32_t exec_us = (uint32_t)TIME_I2US(elapsed);
 
     if (exec_us < s.exec_min_us) s.exec_min_us = exec_us;
     if (exec_us > s.exec_max_us) s.exec_max_us = exec_us;

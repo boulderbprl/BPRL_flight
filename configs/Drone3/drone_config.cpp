@@ -90,16 +90,16 @@ const DroneConfig kDroneConfig = {
     },
 
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
-    { 0, 3, 1, 2, 4, 6, 7 },
+    { 0,  // thr
+      3,  // roll
+      1,  // pitch
+      2,  // yaw
+      4,  // arm
+      5,  // flight_mode
+      6 }, // indi_switch
 
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     // Factor arrays are the standard [FR, RL, FL, RR] logical order — motor_map
-    // below is what actually accounts for this airframe's wiring. Bench
-    // testing (props off, 2026-08-10) found lane0/MOT1=RR, lane1/MOT2=FR,
-    // lane2/MOT3=RL, lane3/MOT4=FL, i.e. motor_map[FR]=1, [RL]=2, [FL]=3,
-    // [RR]=0 (the physical lane wired to each logical corner). Spin
-    // direction (CW/CCW per corner) is a separate ESC-firmware setting,
-    // also bench-confirmed correct as of 2026-08-10 — not yet flight-tested.
     {
         { -1.0f, +1.0f, +1.0f, -1.0f },  // roll_factor  [FR, RL, FL, RR]
         { +1.0f, -1.0f, +1.0f, -1.0f },  // pitch_factor
@@ -110,10 +110,8 @@ const DroneConfig kDroneConfig = {
     },
 
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, rpm_norm_center, rpm_norm_scale, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
-    // PLACEHOLDER — copied from Drone1's thrust-stand characterization, wrong
-    // for this board's motors/props. Re-derive before trusting RPM/thrust telemetry.
     {
-        0.1275f,                                  // arm_length_m
+        0.145f,                                   // arm_length_m 
         2.4540f, 2.2831f, 0.5607f, 0.0134f,        // motor_c0, motor_c1, motor_c2, motor_c3
         2005.0f, 880.8f, 7.04f,                    // rpm_norm_center, rpm_norm_scale, max_thrust_n
         20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz

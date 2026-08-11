@@ -459,9 +459,21 @@
 /**
  * @brief   Serial over USB number of buffers.
  * @note    The default is 2 buffers.
+ * @note    Bumped from the 2-buffer default: DebugThread pushes 4 lines
+ *          ($TEL/$EKFL/$IMU/$POS) through this queue every 100ms tick via
+ *          chnWriteTimeout(), and obqWriteTimeout() (hal_buffers.c) silently
+ *          truncates — no error, no retry — whenever no empty 256-byte
+ *          buffer becomes free within its timeout. On a board where USB
+ *          interrupt servicing is occasionally delayed by higher-priority
+ *          work, that starves the queue mid-tick, most often hitting
+ *          whichever line is queued 2nd/3rd since the two default buffers
+ *          are already full of earlier lines from the same tick — dropping
+ *          its tail (including the \r\n) and corrupting it for the reader.
+ *          More buffers give more slack to absorb a transient stall without
+ *          losing data, at the cost of 256 bytes RAM per extra buffer.
  */
 #if !defined(SERIAL_USB_BUFFERS_NUMBER) || defined(__DOXYGEN__)
-#define SERIAL_USB_BUFFERS_NUMBER           2
+#define SERIAL_USB_BUFFERS_NUMBER           6
 #endif
 
 /*===========================================================================*/

@@ -103,7 +103,11 @@ class SerialReader:
         return lines
 
     def stop(self):
+        """Signal the reader thread to stop and wait for it to actually exit,
+        so the caller can safely read() the same serial object afterward
+        without racing the background thread for bytes."""
         self._stop.set()
+        self._thread.join(timeout=2.0)
 
 
 # ── Line readers (blocking, for command-response flows) ───────────────────────
