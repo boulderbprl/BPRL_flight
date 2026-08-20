@@ -47,8 +47,8 @@ float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaterni
 float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
-float   g_jerk_diag[4]       = {};   // [roll_jerk_input, cmd_roll, roll_rate_tgt, cmd_yaw] — AttitudePIDJerk shadow diagnostics, always populated (never drives motors)
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
+float   g_indij_diag[12]     = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — AttitudeINDIJerk shadow diagnostics, populated whenever jerk_enabled
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
@@ -64,6 +64,7 @@ CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0
 MUTEX_DECL(strainRate_mtx);
 StrainRateRaw g_strain_rate = {};
 float         g_strain_bias[4] = {};  // per-channel zero-offset, live-calibrated by ControlThread — see JerkFit.hpp
+bool          g_strain_cal_active = false;  // raw channel-6 cal switch state this tick — see radio_strain_cal()
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
@@ -535,7 +536,7 @@ static THD_FUNCTION(ControlThread, arg)
 
         flight_sm.set_active_controller(radio_switch_pos);
 
-        // Strain-fit roll jerk estimate (AttitudePIDJerk shadow term, see JerkFit.hpp).
+        // Strain-fit roll jerk estimate (AttitudeINDIJerk's roll inner loop, see JerkFit.hpp).
         StrainRateRaw strain_snap;
         float         strain_bias_snap[4];
         chMtxLock(&strainRate_mtx);
@@ -549,8 +550,10 @@ static THD_FUNCTION(ControlThread, arg)
         // the new g_strain_bias, replacing whatever was there. Session-only —
         // resets to {0,0,0,0} on every boot, never written to flash. Honored
         // regardless of arm state, so don't trigger it mid-flight: the strain
-        // inputs feeding AttitudePIDJerk's shadow estimate will drift for
-        // however long the switch is held.
+        // inputs feeding AttitudeINDIJerk's roll inner loop will drift for
+        // however long the switch is held — and if Jerk is the controller
+        // actually driving out_cmds[0] when you flip it, that's not just a
+        // shadow-diagnostic drift, it's a real roll torque disturbance.
         {
             static bool     s_cal_active    = false;  // true from press until release
             static bool     s_cal_committed = false;  // true once this press has already written g_strain_bias
@@ -559,6 +562,10 @@ static THD_FUNCTION(ControlThread, arg)
             static constexpr uint32_t CAL_MAX_TICKS = 2000;  // 5 s @ 400 Hz
 
             const bool sw = radio_strain_cal();
+
+            chMtxLock(&strainRate_mtx);
+            g_strain_cal_active = sw;
+            chMtxUnlock(&strainRate_mtx);
 
             if (sw && !s_cal_active) {
                 // Rising edge: start a new press.
@@ -605,8 +612,8 @@ static THD_FUNCTION(ControlThread, arg)
         float ctun_diag[12];
         flight_sm.get_ctun_diag(ctun_diag);
 
-        float jerk_diag[4];
-        flight_sm.get_jerk_diag(jerk_diag);
+        float indij_diag[12];
+        flight_sm.get_indij_diag(indij_diag);
 
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
@@ -623,7 +630,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
-        memcpy(g_jerk_diag, jerk_diag, sizeof(g_jerk_diag));
+        memcpy(g_indij_diag, indij_diag, sizeof(g_indij_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
         g_active_controller = flight_sm.active_index();
@@ -1476,25 +1483,27 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], jerk_diag[4];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], indij_diag[12];
         bool  armed;
         chMtxLock(&state_mtx);
-        memcpy(euler,     g_euler,     sizeof(euler));
-        memcpy(state,     g_state,     sizeof(state));
-        memcpy(inp,       g_input,     sizeof(inp));
-        memcpy(ctrl,      g_ctrl,      sizeof(ctrl));
-        memcpy(indi_diag, g_indi_diag, sizeof(indi_diag));
-        memcpy(ctun_diag, g_ctun_diag, sizeof(ctun_diag));
-        memcpy(jerk_diag, g_jerk_diag, sizeof(jerk_diag));
+        memcpy(euler,      g_euler,      sizeof(euler));
+        memcpy(state,      g_state,      sizeof(state));
+        memcpy(inp,        g_input,      sizeof(inp));
+        memcpy(ctrl,       g_ctrl,       sizeof(ctrl));
+        memcpy(indi_diag,  g_indi_diag,  sizeof(indi_diag));
+        memcpy(ctun_diag,  g_ctun_diag,  sizeof(ctun_diag));
+        memcpy(indij_diag, g_indij_diag, sizeof(indij_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
         /* ── Strain rate snapshot ─────────────────────────────────────── */
         StrainRateRaw strain = {};
         float         strain_bias[4];
+        bool          strain_cal_active;
         chMtxLock(&strainRate_mtx);
-        strain = g_strain_rate;
+        strain             = g_strain_rate;
         memcpy(strain_bias, g_strain_bias, sizeof(strain_bias));
+        strain_cal_active  = g_strain_cal_active;
         chMtxUnlock(&strainRate_mtx);
 
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
@@ -1597,15 +1606,23 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_INDI, msg);
         }
 
-        /* ── PIDJ — shadow AttitudePIDJerk diagnostics (always logged) ── */
-        {
-            LogMsgPIDJ msg = {};
-            msg.time_us       = t_us;
-            msg.roll_jerk     = jerk_diag[0];
-            msg.cmd_roll      = jerk_diag[1];
-            msg.roll_rate_tgt = jerk_diag[2];
-            msg.cmd_yaw       = jerk_diag[3];
-            logger.write(LOG_MSG_PIDJ, msg);
+        /* ── INDIJ — shadow AttitudeINDIJerk diagnostics ─────────────────── */
+        if (log_en.indij) {
+            LogMsgINDIJ msg = {};
+            msg.time_us     = t_us;
+            msg.unmix_roll  = indij_diag[0];
+            msg.unmix_pitch = indij_diag[1];
+            msg.delta_roll  = indij_diag[2];
+            msg.delta_pitch = indij_diag[3];
+            msg.cmd_roll    = indij_diag[4];
+            msg.cmd_pitch   = indij_diag[5];
+            msg.accel_roll  = indij_diag[6];
+            msg.accel_pitch = indij_diag[7];
+            msg.g1_roll       = indij_diag[8];
+            msg.g2_roll       = indij_diag[9];
+            msg.jerk_cmd_roll = indij_diag[10];
+            msg.kappa2_roll   = indij_diag[11];
+            logger.write(LOG_MSG_INDIJ, msg);
         }
 
 #if LOG_CTUN_ENABLED
@@ -1658,10 +1675,11 @@ static THD_FUNCTION(LogThread, arg)
             const JerkEstimate jerk = estimate_jerk(strain, strain_bias, state[StateIdx::P]);
 
             LogMsgJKFT msg = {};
-            msg.time_us = t_us;
-            msg.JerkZ   = jerk.z_jerk;
-            msg.Pdd     = jerk.roll_jerk;
-            msg.valid   = (uint8_t)strain.valid;
+            msg.time_us   = t_us;
+            msg.JerkZ     = jerk.z_jerk;
+            msg.Pdd       = jerk.roll_jerk;
+            msg.valid     = (uint8_t)strain.valid;
+            msg.cal_active = (uint8_t)strain_cal_active;
             logger.write(LOG_MSG_JKFT, msg);
         }
 

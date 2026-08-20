@@ -9,6 +9,7 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     : _phase(FlightPhase::DISARMED)
     , _mode(FlightMode::STABILIZE)
     , _pid(cfg.pid)
+    , _indi_jerk(cfg.indi_jerk)
     , _indi(cfg.indi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
@@ -25,14 +26,14 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     }
     if (cfg.controllers.jerk_enabled) {
         _jerk_index = _num_controllers;
-        _controllers[_num_controllers++] = &_pid_jerk;
+        _controllers[_num_controllers++] = &_indi_jerk;
     }
 }
 
 void FlightStateMachine::reset_all()
 {
     _pid.reset_all();
-    _pid_jerk.reset_all();
+    _indi_jerk.reset_all();
     _indi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
@@ -70,10 +71,14 @@ void FlightStateMachine::run_attitude(const float euler[],
     }
 
     // roll_jerk isn't part of the shared AttitudeController::update()
-    // signature (see class comment) — hand it to AttitudePIDJerk directly
+    // signature (see class comment) — hand it to AttitudeINDIJerk directly
     // before the generic dispatch below, same pattern as set_indi_active().
+    // AttitudeINDIJerk's own NLMS estimators (G1/G2) also need to know
+    // whether it's the controller actually driving out_cmds this tick, same
+    // reasoning as _indi.set_indi_active() above.
     if (_jerk_index >= 0) {
-        _pid_jerk.set_roll_jerk(roll_jerk);
+        _indi_jerk.set_roll_jerk(roll_jerk);
+        _indi_jerk.set_indi_active(_active_index == _jerk_index);
     }
 
     float cmds[MAX_ATTITUDE_CONTROLLERS][3];
@@ -103,12 +108,23 @@ void FlightStateMachine::run_attitude(const float euler[],
     }
 
     if (_jerk_index >= 0) {
-        _jerk_diag[0] = roll_jerk;
-        _jerk_diag[1] = cmds[_jerk_index][0];
-        _jerk_diag[2] = _pid_jerk.roll_rate_tgt();
-        _jerk_diag[3] = cmds[_jerk_index][2];
+        float delta_torque[2], accel_cmd[2], g1[2];
+        _indi_jerk.get_diag(delta_torque, accel_cmd);
+        _indi_jerk.get_g1(g1);
+        _indij_diag[0] = current_torque[0];
+        _indij_diag[1] = current_torque[1];
+        _indij_diag[2] = delta_torque[0];
+        _indij_diag[3] = delta_torque[1];
+        _indij_diag[4] = cmds[_jerk_index][0];
+        _indij_diag[5] = cmds[_jerk_index][1];
+        _indij_diag[6] = accel_cmd[0];
+        _indij_diag[7] = accel_cmd[1];
+        _indij_diag[8]  = g1[0];
+        _indij_diag[9]  = _indi_jerk.get_g2();
+        _indij_diag[10] = _indi_jerk.jerk_cmd_roll();
+        _indij_diag[11] = _indi_jerk.kappa2_roll();
     } else {
-        memset(_jerk_diag, 0, sizeof(_jerk_diag));
+        memset(_indij_diag, 0, sizeof(_indij_diag));
     }
 
     const float *active = cmds[_active_index];

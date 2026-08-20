@@ -41,7 +41,39 @@ const DroneConfig kDroneConfig = {
         0.005f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
         3.0f,    // yaw_gain
     },
-    
+
+    // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
+    // roll_att/pitch_att/roll_rate/pitch_rate/yaw_rate/yaw_hold/g1_seed_*/
+    // indi_output_gain_*/nlms_mu_*/yaw_gain copied from .indi above (same
+    // airframe, same role — roll's g1_seed/indi_output_gain now feed the
+    // "P" term of roll's PD-style correction, jerk_output_gain_roll/
+    // g2_seed_roll the "D" term on top, see AttitudeIndiJerkGains's comment
+    // in DroneConfig.hpp).
+    // roll_accel/g2_seed_roll/jerk_output_gain_roll are new and
+    // uncharacterized — deliberately low-authority (jerk_output_gain_roll
+    // way down at 0.1, roll_accel ki=0, no integrator) pending bench/flight
+    // identification, not a tuned starting point. This replaces
+    // AttitudePIDJerk's config (retired 2026-08-11 after it flipped the
+    // drone on takeoff — see git history around that date for the writeup).
+    {
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 8.20f,  0.2f,  0.25f, 5.0f, 10.0f, 10.0f, 5.0f },    // (P was 34.2) roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; first-cut P-only, needs bench ID
+        0.0075f,  // g1_seed_roll — "P" term seed, see above
+        0.0065f, // g1_seed_pitch
+        0.0045f,  // g2_seed_roll — "D" term seed, bootstrapped from g1_seed_roll (same rigid-body 1/I argument), needs independent bench ID
+        0.9f,    // indi_output_gain_roll (kappa) — "P" term
+        1.0f,    // indi_output_gain_pitch (kappa)
+        0.1f,    // jerk_output_gain_roll (kappa2) — "D" term, deliberately low authority pending characterization
+        0.05f,   // nlms_mu_pid
+        0.005f,  // nlms_mu_indi
+        3.0f,    // yaw_gain
+    },
+
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
@@ -95,9 +127,9 @@ const DroneConfig kDroneConfig = {
     
     // .controllers — ControllersConfig { indi_enabled, jerk_enabled }
     // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, Jerk last if enabled
-    { false, true },
+    { true, true },
    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -110,8 +142,9 @@ const DroneConfig kDroneConfig = {
           true, // imu2
           true, // imu3
           true, // indi
-          true, // baro
-          true, // ctun
-          true }, // mocp
+          false, // baro
+          false, // ctun
+          false, // mocp
+          true }, // indij
     },
 };

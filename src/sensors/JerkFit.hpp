@@ -34,21 +34,41 @@ inline JerkEstimate estimate_jerk(const StrainRateRaw &strain, const float strai
     //     {   0.0253f,   -0.0575f}, // s3
     //     {  -0.4319f,  -33.6420f}, // p
     // };
+    // constexpr float JKFT_MATRIX[5][2] = {
+    //     {  -0.017783f,   -0.23087f}, // s0
+    //     {   0.026056f,    0.21854f}, // s1
+    //     {  -0.013622f,    0.057366f}, // s2
+    //     {   0.022922f,   -0.0023487f}, // s3
+    //     {  -0.70644f ,  -70.504f}, // p
+    // };
+    // constexpr float JKFT_MATRIX[5][2] = {
+    //     {  -0.017783f,   -0.30006f}, // s0
+    //     {   0.026056f,    0.30813f}, // s1
+    //     {  -0.013622f,    0.014352f}, // s2
+    //     {   0.022922f,   -0.072195f}, // s3
+    //     {  -0.70644f ,    0.0f}, // p
+    // };
     constexpr float JKFT_MATRIX[5][2] = {
-        {  -0.017783f,   -0.23087f}, // s0
-        {   0.026056f,    0.21854f}, // s1
-        {  -0.013622f,    0.057366f}, // s2
-        {   0.022922f,   -0.0023487f}, // s3
-        {  -0.70644f ,  -70.504f}, // p
+        {  0.06f,      0.2f}, // sr
+        {  0.06f,     -0.2f}, // sl
     };
 
-    const float inputs[5] = { (float)strain.val[0] - strain_bias[0],
-                               (float)strain.val[1] - strain_bias[1],
-                               (float)strain.val[2] - strain_bias[2],
-                               (float)strain.val[3] - strain_bias[3], p };
+    // const float inputs[5] = { (float)strain.val[0] - strain_bias[0],
+    //                            (float)strain.val[1] - strain_bias[1],
+    //                            (float)strain.val[2] - strain_bias[2],
+    //                            (float)strain.val[3] - strain_bias[3], p };
+
+    // JerkEstimate out{};
+    // for (uint8_t i = 0; i < 5; i++) {
+    //     out.z_jerk    += inputs[i] * JKFT_MATRIX[i][0];
+    //     out.roll_jerk += inputs[i] * JKFT_MATRIX[i][1];
+    // }
+
+    const float inputs[5] = { (((float)strain.val[0] - strain_bias[0]) + ((float)strain.val[1] - strain_bias[1]))/2.0,
+                               (((float)strain.val[2] - strain_bias[2]) + ((float)strain.val[3] - strain_bias[3]))/2.0};
 
     JerkEstimate out{};
-    for (uint8_t i = 0; i < 5; i++) {
+    for (uint8_t i = 0; i < 2; i++) {
         out.z_jerk    += inputs[i] * JKFT_MATRIX[i][0];
         out.roll_jerk += inputs[i] * JKFT_MATRIX[i][1];
     }

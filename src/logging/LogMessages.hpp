@@ -38,11 +38,12 @@ constexpr uint8_t LOG_MSG_JKFT = 0x12U;  // Jerk estimates (z and roll) based on
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged; not selectable, see LOG_MSG_PIDJ)
+constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged; not selectable, see LOG_MSG_INDIJ)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
-constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics (always logged, pure shadow — never selectable, see Attitude_PID_Jerk.hpp)
+constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics — retired, no longer wired into FlightStateMachine (see LOG_MSG_INDIJ), kept only so old logs still decode
+constexpr uint8_t LOG_MSG_INDIJ = 0x14U; // AttitudeINDIJerk diagnostics — INDI with roll_jerk as the roll inner loop, see Attitude_INDI_Jerk.hpp
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -81,7 +82,7 @@ struct __attribute__((packed)) LogMsgRCIN {
     float    yaw_stk;     // [-1, 1]  yaw rate demand from RC
     float    thr_stk;     // [0, 1]   throttle from RC
     float    flight_mode; // [-1, 1]  raw flight-mode switch; <-0.33=STABILIZE, -0.33..0.33=ALT_HOLD, >0.33=POS_HOLD
-    float    indi_stk;    // [-1, 1]  raw attitude-ctrl switch (channel 7); >0.33=PIDJ, else PID (AttitudeINDI is shadow-only, not selected by this switch)
+    float    indi_stk;    // [-1, 1]  raw attitude-ctrl switch (channel 7); >0.33=INDIJ, else PID (AttitudeINDI is shadow-only, not selected by this switch)
     uint8_t  armed;       // 0=disarmed, 1=armed
 };
 // Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
@@ -116,11 +117,12 @@ struct __attribute__((packed)) LogMsgSTRN {
 
 struct __attribute__((packed)) LogMsgJKFT {
     uint64_t time_us;
-    float JerkZ; // m/s^3, raw fit output (no bias correction)
-    float Pdd;   // rad/s^3, bias-corrected (see JerkFit.hpp::ROLL_JERK_BIAS)
-    uint8_t  valid; // 1 once at least one strain rate CAN frame has arrived
+    float   JerkZ;    // m/s^3, raw fit output
+    float   Pdd;      // rad/s^3, per-channel-bias-corrected (see JerkFit.hpp::estimate_jerk()'s strain_bias param)
+    uint8_t valid;    // 1 once at least one strain rate CAN frame has arrived
+    uint8_t cal_active; // 1 while the channel-6 strain-bias-cal switch is held — see radio_strain_cal() / ControlThread's calibration block
 };
-// Format: "QffB"
+// Format: "QffBB"
 
 struct __attribute__((packed)) LogMsgIMU {
     uint64_t time_us;
@@ -150,9 +152,9 @@ struct __attribute__((packed)) LogMsgINDI {
     float    g1_pitch;     // N·m per rad/s²  live NLMS-adapted G1_hat, pitch (seed: DroneConfig::AttitudeIndiGains::g1_seed_pitch)
 };
 // Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
-// Always populated — AttitudeINDI is pure shadow now, never selectable (see
-// FlightStateMachine::_use_jerk), running alongside whichever of
-// AttitudePID/AttitudePIDJerk actually flies (OUTP).
+// Always populated (while indi_enabled) — AttitudeINDI is pure shadow, never
+// selectable, running alongside whichever of AttitudePID/AttitudeINDIJerk
+// actually flies (OUTP).
 
 struct __attribute__((packed)) LogMsgPIDJ {
     uint64_t time_us;
@@ -162,12 +164,33 @@ struct __attribute__((packed)) LogMsgPIDJ {
     float    cmd_yaw;        // [-1, 1]  normalized yaw torque commanded by AttitudePIDJerk (no jerk term — identical to AttitudePID)
 };
 // Format: "Qffff"   Body: 8+4×4 = 24 B   Record: 27 B
-// Always populated, regardless of FlightStateMachine::_use_jerk — this is
-// AttitudePIDJerk's own output, which drives OUTP when the channel-7 switch
-// selects PIDJ (3rd position). Its jerk-PI gains (see Attitude_PID_Jerk.hpp)
-// are first-cut small values — compare cmd_roll here against plain PID's
-// OUTP.roll_tq to see how much correction it's actually contributing before
-// pushing the gains up.
+// Retired — AttitudePIDJerk is no longer wired into FlightStateMachine (its
+// channel-7 switch slot now drives AttitudeINDIJerk instead, see
+// LOG_MSG_INDIJ below) and nothing calls logger.write(LOG_MSG_PIDJ, ...)
+// anymore. Struct/msg_id kept only so old LOG*.BIN files taken before the
+// switch still decode in UAV Log Viewer.
+
+struct __attribute__((packed)) LogMsgINDIJ {
+    uint64_t time_us;
+    float    unmix_roll;   // N·m  measured roll torque from Unmixer (RPM feedback)
+    float    unmix_pitch;  // N·m  measured pitch torque from Unmixer
+    float    delta_roll;   // N·m  roll's combined P+D incremental torque correction (the one actually used) — see jerk_cmd_roll below for the "D" term's target
+    float    delta_pitch;  // N·m  accel-level INDI incremental pitch torque correction (identical to LOG_MSG_INDI)
+    float    cmd_roll;     // [-1, 1]  normalized roll torque commanded by AttitudeINDIJerk
+    float    cmd_pitch;    // [-1, 1]  normalized pitch torque commanded by AttitudeINDIJerk
+    float    accel_roll;   // rad/s²  roll's rate-PID commanded angular acceleration (also the target fed into the accel→jerk stage)
+    float    accel_pitch;  // rad/s²  pitch's rate-PID commanded angular acceleration
+    float    g1_roll;      // N·m per rad/s²  live NLMS-adapted accel-level G1_hat, roll — feeds delta_roll's "P" term
+    float    g2_roll;      // roll-only jerk-level live NLMS-adapted G2_hat — feeds delta_roll's "D" term (seed: DroneConfig::AttitudeIndiJerkGains::g2_seed_roll)
+    float    jerk_cmd_roll; // rad/s³  reference/target jerk fed into the "D" term (AttitudeINDIJerk::jerk_cmd_roll()) — compare against JKFT.Pdd, the actual/measured roll_jerk
+    float    kappa2_roll;  // "D" term output gain, roll — static per-drone config value (DroneConfig::AttitudeIndiJerkGains::jerk_output_gain_roll), repeats every tick, logged for reference
+};
+// Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B
+// Gated by DroneConfig::LoggingConfig::enable.indij, same mechanism as
+// LOG_MSG_INDI's log_en.indi — always populated while AttitudeINDIJerk is in
+// the drone's config (ControllersConfig::jerk_enabled), regardless of
+// whether it's the controller actually driving OUTP (see $TEL's active
+// controller index).
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;
@@ -269,8 +292,8 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_JKFT,
       "JKFT",
-      "QffB",
-      "TimeUS,JerkZ,Pdd,Valid",
+      "QffBB",
+      "TimeUS,JerkZ,Pdd,Valid,CalAct",
       sizeof(LogMsgJKFT) },
 
     { LOG_MSG_IMU1,
@@ -327,6 +350,14 @@ constexpr LogDef kLogDefs[] = {
       "Qffff",
       "TimeUS,RollJerk,CmdR,RRateTgt,CmdY",
       sizeof(LogMsgPIDJ) },
+
+    { LOG_MSG_INDIJ,
+      "INDJ",
+      "Qffffffffffff",
+      // Shortened Unmix->Un and Delta->D to fit under the 63-char labels
+      // limit now that JCmdR/K2R are added — see LogDef's comment on the cap.
+      "TimeUS,UnR,UnP,DR,DP,CmdR,CmdP,AccR,AccP,G1R,G2R,JCmdR,K2R",
+      sizeof(LogMsgINDIJ) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

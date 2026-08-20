@@ -61,6 +61,28 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
+    // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
+    // Unused while .controllers.jerk_enabled=false below; copied from Drone1
+    // only to keep the struct valid — see Drone1's .indi_jerk comment.
+    {
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
+        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
+        0.0035f, // g1_seed_roll
+        0.0045f, // g1_seed_pitch
+        0.0035f, // g2_seed_roll
+        1.0f,    // indi_output_gain_roll (kappa)
+        1.0f,    // indi_output_gain_pitch (kappa)
+        0.1f,    // jerk_output_gain_roll (kappa2)
+        0.05f,   // nlms_mu_pid
+        0.005f,  // nlms_mu_indi
+        1.5f,    // yaw_gain
+    },
+
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
     // Unused — AttitudePIDPI is no longer wired into FlightStateMachine's controller list (see ControllersConfig::jerk_enabled); copied from Drone1 only to keep the struct valid.
     {
@@ -127,7 +149,7 @@ const DroneConfig kDroneConfig = {
     // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
     { false, false },
 
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -142,6 +164,7 @@ const DroneConfig kDroneConfig = {
           true, // indi
           true, // baro
           true, // ctun
-          true }, // mocp
+          true, // mocp
+          true }, // indij
     },
 };

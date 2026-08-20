@@ -49,6 +49,43 @@ struct AttitudeIndiGains {
     float    yaw_gain;         // was AttitudeINDI::YAW_GAIN
 };
 
+// Gains for AttitudeINDIJerk (src/controllers/Attitude_INDI_Jerk.hpp) — same
+// accel-level INDI as AttitudeIndiGains for pitch/yaw and roll's rate→accel
+// stage, plus an additional roll-only accel→jerk stage whose INDI increment
+// uses the live strain-fit roll_jerk measurement (src/sensors/JerkFit.hpp)
+// in place of a second angular-acceleration estimate — i.e. roll_jerk is
+// literally the inner loop for roll, INDI-style (measured-state-anchored,
+// not open-loop). Roll's final correction is PD-style: the accel-level ("P")
+// term (identical in form to AttitudeIndiGains's own roll correction) plus
+// the jerk-level ("D") term on top — see Attitude_INDI_Jerk.hpp's class
+// comment. WIP / first cut, not yet bench/flight characterized.
+struct AttitudeIndiJerkGains {
+    PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
+    PidGains roll_accel;   // roll-only: accel error [rad/s^2] -> jerk target [rad/s^3]
+    // Accel-level effectiveness seeds (N*m per rad/s^2) — same role/units as
+    // AttitudeIndiGains::g1_seed_roll/pitch. Roll's feeds the "P" term of
+    // its PD-style correction (see class comment above); pitch's is
+    // unchanged plain accel-level INDI, same as AttitudeIndiGains.
+    float    g1_seed_roll;
+    float    g1_seed_pitch;
+    // Jerk-level effectiveness seed, roll only — no equivalent pitch signal
+    // (JerkFit.hpp only fits roll_jerk, not pitch). Feeds roll's "D" term.
+    // Bootstrapped from g1_seed_roll until bench-identified independently:
+    // in a rigid-body idealization jerk ~ (1/I)*torque_rate, same I as
+    // g1_seed_roll, so it's a reasonable starting point for NLMS to adapt
+    // away from.
+    float    g2_seed_roll;
+    float    indi_output_gain_roll;    // kappa, "P" term, roll
+    float    indi_output_gain_pitch;   // kappa, accel-level (pitch)
+    float    jerk_output_gain_roll;    // kappa2, "D" term, roll
+    // NLMS adaptation rate (mu), mode-dependent — shared by G1 and G2
+    // (aggressive while this controller is in shadow, slow/trickle while
+    // it's actually driving out_cmds — see AttitudeIndiGains's identical field).
+    float    nlms_mu_pid;
+    float    nlms_mu_indi;
+    float    yaw_gain;
+};
+
 // Gains for AttitudePIDPI (src/controllers/Attitude_PID_PI.hpp) — ported from
 // the BPRL ArduPilot fork's rate-PID + inner angular-acceleration-PI cascade
 // (AC_AttitudeControl_Multi, "switched to PID" commit). roll_accel/pitch_accel
@@ -126,7 +163,7 @@ struct SensorsConfig {
 // always-present default (PID, always list index 0).
 struct ControllersConfig {
     bool indi_enabled;
-    bool jerk_enabled;  // AttitudePIDJerk (roll PI-on-jerk term) — see Attitude_PID_Jerk.hpp
+    bool jerk_enabled;  // AttitudeINDIJerk (roll_jerk as the INDI inner loop) — see Attitude_INDI_Jerk.hpp
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
@@ -134,7 +171,7 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp;
+    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, indij;
 };
 
 struct LoggingConfig {
@@ -145,6 +182,7 @@ struct LoggingConfig {
 struct DroneConfig {
     AttitudePidGains  pid;
     AttitudeIndiGains indi;
+    AttitudeIndiJerkGains indi_jerk;
     AttitudePidPiGains pid_pi;
     AltControlGains   alt;
     PosControlGains   pos;
