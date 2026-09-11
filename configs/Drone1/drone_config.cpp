@@ -112,6 +112,8 @@ const DroneConfig kDroneConfig = {
           true, // indi
           true, // baro
           true, // ctun
-          true }, // mocp
+          true, // mocp
+          true, // enc0
+          true }, // enc1
     },
 };

@@ -156,7 +156,7 @@ def cmd_can_regdump(ser, _args):
 
 # ── CAN scan ──────────────────────────────────────────────────────────────────
 
-REGISTERED_IDS = {0x01, 0x02, 0x03, 0x04, 0x69}
+REGISTERED_IDS = {0x01, 0x02, 0x03, 0x04, 0x69, 0x70, 0x71}
 
 
 def cmd_can_scan(ser, args):

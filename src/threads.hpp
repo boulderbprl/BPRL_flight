@@ -4,6 +4,7 @@
 #include "src/FlightState.hpp"
 #include "src/coms/DShot.hpp"   // ESCTelemetry
 #include "src/sensors/StrainRate.hpp"
+#include "src/sensors/EncoderRPM.hpp"
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
