@@ -62,6 +62,9 @@ CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0
 MUTEX_DECL(strainRate_mtx);
 StrainRateRaw g_strain_rate = {};
 
+MUTEX_DECL(encoderRpm_mtx);
+EncoderRPMRaw g_encoder_rpm[ENCODER_RPM_NUM_NODES] = {};
+
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
 
@@ -1033,6 +1036,21 @@ static void usb_cmd_dispatch(const char *line)
                  (int)snap.val[2], (int)snap.val[3],
                  (unsigned)snap.valid);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "ENC,read") == 0) {
+        EncoderRPMRaw snap[ENCODER_RPM_NUM_NODES];
+        chMtxLock(&encoderRpm_mtx);
+        memcpy(snap, g_encoder_rpm, sizeof(snap));
+        chMtxUnlock(&encoderRpm_mtx);
+        chMtxLock(&s_usb_write_mtx);
+        for (int node = 0; node < ENCODER_RPM_NUM_NODES; node++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "ENC,%d,%.2f,%u,%u,%u\r\n",
+                     node, (double)snap[node].rpm,
+                     (unsigned)snap[node].angle_raw,
+                     (unsigned)snap[node].error_flag,
+                     (unsigned)snap[node].valid);
+        }
+        chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "I2C,scan") == 0) {
         // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
         // Use a 2 ms timeout per probe so a stuck device can't hang the scan
@@ -1457,6 +1475,12 @@ static THD_FUNCTION(LogThread, arg)
         strain = g_strain_rate;
         chMtxUnlock(&strainRate_mtx);
 
+        /* ── Encoder RPM snapshot ────────────────────────────────────── */
+        EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
+        chMtxLock(&encoderRpm_mtx);
+        memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
+        chMtxUnlock(&encoderRpm_mtx);
+
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
         uint32_t rpm_log[4];
         chMtxLock(&esc_mtx);
@@ -1599,6 +1623,22 @@ static THD_FUNCTION(LogThread, arg)
             msg.s3      = strain.val[3];
             msg.valid   = (uint8_t)strain.valid;
             logger.write(LOG_MSG_STRN, msg);
+        }
+
+        /* ── ENC0/ENC1 — per-node shaft-angle encoder RPM ───────────────── */
+        {
+            static constexpr uint8_t ids[ENCODER_RPM_NUM_NODES] = { LOG_MSG_ENC0, LOG_MSG_ENC1 };
+            const bool en[ENCODER_RPM_NUM_NODES] = { log_en.enc0, log_en.enc1 };
+            for (int i = 0; i < ENCODER_RPM_NUM_NODES; i++) {
+                if (!en[i]) continue;
+                LogMsgENC msg = {};
+                msg.time_us    = t_us;
+                msg.rpm        = enc_snap[i].rpm;
+                msg.angle_raw  = enc_snap[i].angle_raw;
+                msg.error_flag = enc_snap[i].error_flag;
+                msg.valid      = (uint8_t)enc_snap[i].valid;
+                logger.write(ids[i], msg);
+            }
         }
 
         /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */

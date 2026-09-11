@@ -19,18 +19,39 @@
  * CAN bus:
  *   1 Mbit/s, classical (non-FD) 11-bit standard frames — matches
  *   src/coms/CAN.hpp on the FC. IDs 0x01-0x04 (IMX5) and 0x69 (StrainRate)
- *   are already taken there; this sends on CAN_ID_ENCODER_RPM (0x70).
- *   Wire the FC side with bprl_can_register(0x70, my_cb, nullptr) — not
- *   done here, this sketch only covers the sensor node.
+ *   are already taken there; each node sends on CAN_ID_ENCODER_RPM_TABLE
+ *   [NODE_ID] (0x70 + NODE_ID). Wire the FC side with
+ *   bprl_can_register(0x70 + n, my_cb, nullptr) per node — not done here,
+ *   this sketch only covers the sensor node.
  *
- * Debug output goes to the native USB serial (Serial), so nothing extra
- * needs to be wired up — open the Arduino Serial Monitor at 115200. If you
- * actually want the hardware UART pins instead, swap every `Serial.` below
- * for `Serial1.` and add Serial1.begin(115200) in setup().
+ * Multi-node bring-up: set NODE_ID below to a unique index (0, 1, ...)
+ * before flashing each board — this is the only per-board edit needed.
+ *
+ * Debug output goes to the native USB serial (Serial) and is compiled out
+ * entirely when DEBUG is 0. When enabled, open the Arduino Serial Monitor
+ * at 115200. If you actually want the hardware UART pins instead, swap
+ * every `Serial.` below for `Serial1.` and add Serial1.begin(115200) in
+ * setup().
  */
 
 #include <SPI.h>
 #include <CANSAME5x.h>
+
+// ── Per-board identity — set before flashing each node ─────────────────
+#define NODE_ID  0   // unique per board: 0, 1, ... — selects this node's CAN ID
+
+// ── Debug logging — set to 0 to compile out all Serial UART traffic ────
+#define DEBUG 0
+
+#if DEBUG
+  #define DEBUG_BEGIN(...)   Serial.begin(__VA_ARGS__)
+  #define DEBUG_PRINT(...)   Serial.print(__VA_ARGS__)
+  #define DEBUG_PRINTLN(...) Serial.println(__VA_ARGS__)
+#else
+  #define DEBUG_BEGIN(...)
+  #define DEBUG_PRINT(...)
+  #define DEBUG_PRINTLN(...)
+#endif
 
 // ── Pin assignments ─────────────────────────────────────────────────────
 #define AS5047P_CS_PIN   A5   // PA05, bit-banged chip select (confirmed wired to A5 on the bench, not A6)
@@ -46,8 +67,11 @@
 static const SPISettings AS5047P_SPI_SETTINGS(1000000, MSBFIRST, SPI_MODE1);
 
 // ── CAN configuration ───────────────────────────────────────────────────
-#define CAN_BAUD_BPS       1000000
-#define CAN_ID_ENCODER_RPM 0x70
+#define CAN_BAUD_BPS 1000000
+
+// One CAN ID per node, indexed by NODE_ID — extend as more boards are added.
+static const uint32_t CAN_ID_ENCODER_RPM_TABLE[] = { 0x70, 0x71 };
+#define CAN_ID_ENCODER_RPM CAN_ID_ENCODER_RPM_TABLE[NODE_ID]
 
 CANSAME5x CAN;
 
@@ -153,26 +177,29 @@ static void send_can_frame(void)
     CAN.beginPacket(CAN_ID_ENCODER_RPM);
     CAN.write((uint8_t *)&frame, sizeof(frame));
     if (!CAN.endPacket()) {
-        Serial.println("CAN tx failed");
+        DEBUG_PRINTLN("CAN tx failed");
     }
 }
 
 void setup()
 {
-    Serial.begin(115200);
+    DEBUG_BEGIN(115200);
 
     pinMode(AS5047P_CS_PIN, OUTPUT);
     digitalWrite(AS5047P_CS_PIN, HIGH);
     SPI.begin();
 
     if (!CAN.begin(CAN_BAUD_BPS)) {
-        Serial.println("CAN init failed");
+        DEBUG_PRINTLN("CAN init failed");
         while (1) { delay(1000); }
     }
 
     as5047p_clear_error();
 
-    Serial.println("AS5047P encoder + CAN RPM node started");
+    DEBUG_PRINT("AS5047P encoder + CAN RPM node started, NODE_ID=");
+    DEBUG_PRINT(NODE_ID);
+    DEBUG_PRINT(" CAN ID=0x");
+    DEBUG_PRINTLN(CAN_ID_ENCODER_RPM, HEX);
 }
 
 void loop()
@@ -193,16 +220,16 @@ void loop()
     if ((uint32_t)(now_us - s_last_print_us) >= PRINT_INTERVAL_US) {
         s_last_print_us = now_us;
         float angle_deg = (float)s_angle_raw * (360.0f / 16384.0f);
-        Serial.print("angle_raw=");
-        Serial.print(s_angle_raw);
-        Serial.print("  angle_deg=");
-        Serial.print(angle_deg, 2);
-        Serial.print("  rpm=");
-        Serial.print(s_rpm_filt, 1);
+        DEBUG_PRINT("angle_raw=");
+        DEBUG_PRINT(s_angle_raw);
+        DEBUG_PRINT("  angle_deg=");
+        DEBUG_PRINT(angle_deg, 2);
+        DEBUG_PRINT("  rpm=");
+        DEBUG_PRINT(s_rpm_filt, 1);
         if (s_error_flag) {
-            Serial.print("  [EF]");
+            DEBUG_PRINT("  [EF]");
         }
-        Serial.println();
+        DEBUG_PRINTLN();
     }
 
     if ((uint32_t)(now_us - s_last_can_us) >= CAN_INTERVAL_US) {

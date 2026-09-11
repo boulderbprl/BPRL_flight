@@ -41,6 +41,8 @@ constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
+constexpr uint8_t LOG_MSG_ENC0 = 0x12U;  // shaft-angle encoder RPM, node 0 (CAN 0x70, Feather M4 + AS5047P)
+constexpr uint8_t LOG_MSG_ENC1 = 0x13U;  // shaft-angle encoder RPM, node 1 (CAN 0x71, Feather M4 + AS5047P)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -111,6 +113,17 @@ struct __attribute__((packed)) LogMsgSTRN {
     uint8_t  valid; // 1 once at least one CAN frame has arrived
 };
 // Format: "QhhhhB"   Body: 8+4×2+1 = 17 B   Record: 20 B
+
+struct __attribute__((packed)) LogMsgENC {
+    uint64_t time_us;
+    float    rpm;         // filtered mechanical RPM, signed by rotation direction
+    uint16_t angle_raw;   // last raw 14-bit shaft angle (0-16383 counts / rev)
+    uint8_t  error_flag;  // AS5047P EF bit latched on the last sample
+    uint8_t  valid;       // 1 once at least one CAN frame has arrived from this node
+};
+// Format: "QfHBB"   Body: 8+4+2+1+1 = 16 B   Record: 19 B
+// Shared body layout for ENC0/ENC1 — same struct, two distinct msg_ids/names
+// so each encoder node shows up as its own series in the log viewer.
 
 struct __attribute__((packed)) LogMsgIMU {
     uint64_t time_us;
@@ -244,6 +257,18 @@ constexpr LogDef kLogDefs[] = {
       "QhhhhB",
       "TimeUS,S0,S1,S2,S3,Valid",
       sizeof(LogMsgSTRN) },
+
+    { LOG_MSG_ENC0,
+      "ENC0",
+      "QfHBB",
+      "TimeUS,RPM,Angle,ErrFlag,Valid",
+      sizeof(LogMsgENC) },
+
+    { LOG_MSG_ENC1,
+      "ENC1",
+      "QfHBB",
+      "TimeUS,RPM,Angle,ErrFlag,Valid",
+      sizeof(LogMsgENC) },
 
     { LOG_MSG_IMU1,
       "IMU1",

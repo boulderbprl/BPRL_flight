@@ -20,6 +20,7 @@ pip install pyserial rich
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
 | `strain_rate.py` | `strain-rate` | No |
+| `encoder_rpm.py` | `encoder-rpm` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
 | `i2c_tools.py` | `i2c-scan` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
@@ -157,6 +158,20 @@ Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag refle
 
 ---
 
+## encoder_rpm.py
+
+> Works on any firmware build.
+
+Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70/0x71, one per Feather M4 + AS5047P board — see `Strain_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
+
+```bash
+python3 tools/encoder_rpm.py encoder-rpm
+```
+
+Polls `ENC,read` at ~5 Hz and shows a live panel per node. The `valid` flag reflects whether that node is actively sending CAN frames; a red error count means the AS5047P latched an error bit on its last sample.
+
+---
+
 ## dshot_tools.py
 
 > Works on any firmware build.
@@ -203,6 +218,7 @@ python3 tools/logs.py log-status
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_enc0.csv` / `_enc1.csv` | TimeUS, RPM (float, signed mechanical RPM), Angle (uint16 raw, 0-16383/rev), ErrFlag (AS5047P EF bit), Valid — one per encoder node |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
