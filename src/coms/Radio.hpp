@@ -32,5 +32,6 @@ float radio_pitch(void);        /* pitch          [-1, 1] */
 float radio_yaw(void);          /* yaw rate       [-1, 1] */
 float radio_flight_mode(void);  /* flight mode sw [-1, 1] from RcChannelMap::flight_mode */
 bool  radio_armed(void);
+bool  radio_valid(void);        /* true while the RC link is delivering fresh frames */
 float radio_indi(void);         /* raw controller-select switch position [-1, 1], RcChannelMap::indi_switch (3-pos) */
 int   radio_switch_position(void);  /* radio_indi() bucketed to 0/1/2 (low/mid/high) — see FlightStateMachine::set_active_controller() */

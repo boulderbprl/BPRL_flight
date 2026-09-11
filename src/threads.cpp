@@ -105,7 +105,7 @@ static StateManager state_mgr;
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-static THD_WORKING_AREA(waI2C,      1024);
+// static THD_WORKING_AREA(waI2C,      1024);  // DISABLED — see I2CThread creation below
 static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
                                               // (former waStateEst was 6144) plus three shadow attitude controllers
                                               // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
@@ -341,6 +341,7 @@ static THD_FUNCTION(CANThread, arg)
 /* ══════════════════════════════════════════════════════════════════════════
  * I2CThread — 200 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
+ * DISABLED (not created below) — see main.cpp's commented i2c_drv_init().
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
 {
@@ -953,6 +954,59 @@ static void usb_cmd_dispatch(const char *line)
             (unsigned)d.edges[3][2], (unsigned)d.edges[3][3],
             (unsigned)d.edges[3][4]);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "HW,status") == 0) {
+        // One-shot hardware connectivity snapshot — every "valid"/"has data"
+        // flag this firmware tracks, in one place, so bench wiring can be
+        // checked without a BPRL_DEBUG build or a scope. Each subsystem is
+        // snapshotted under its own mutex, same pattern as LogThread.
+        IMURaw imu_snap[3];
+        chMtxLock(&imu_mtx);
+        memcpy(imu_snap, g_imu, sizeof(imu_snap));
+        chMtxUnlock(&imu_mtx);
+
+        CANIMURaw can_imu_snap;
+        chMtxLock(&can_imu_mtx);
+        can_imu_snap = g_can_imu;
+        chMtxUnlock(&can_imu_mtx);
+
+        BaroRaw baro_snap;
+        chMtxLock(&baro_mtx);
+        baro_snap = g_baro;
+        chMtxUnlock(&baro_mtx);
+
+        StrainRateRaw strain_snap;
+        chMtxLock(&strainRate_mtx);
+        strain_snap = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+
+        EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
+        chMtxLock(&encoderRpm_mtx);
+        memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
+        chMtxUnlock(&encoderRpm_mtx);
+
+        CANDiag can_diag = {};
+        can_get_diag(can_diag);
+
+        const bool sd_ready = logger.is_ready();
+        const bool rc_valid = radio_valid();
+
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < 3; i++) {
+            chprintf((BaseSequentialStream *)&SDU1, "HW,IMU%d,%u\r\n", i, (unsigned)imu_snap[i].valid);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "HW,CANIMU,%u\r\n", (unsigned)can_imu_snap.valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,BARO,%u\r\n", (unsigned)baro_snap.valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,STRAIN,%u\r\n", (unsigned)strain_snap.valid);
+        for (int i = 0; i < ENCODER_RPM_NUM_NODES; i++) {
+            chprintf((BaseSequentialStream *)&SDU1, "HW,ENC%d,%u,%.2f\r\n",
+                     i, (unsigned)enc_snap[i].valid, (double)enc_snap[i].rpm);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "HW,RADIO,%u\r\n", (unsigned)rc_valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,SD,%u\r\n", (unsigned)sd_ready);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,CANBUS,total_rx=%lu,dispatched=%lu\r\n",
+                 (uint32_t)can_diag.total_rx, (uint32_t)can_diag.dispatched);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,END\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,status") == 0) {
         // Read FDCAN1 diagnostic registers directly (no driver API needed).
         // PSR: protocol status (ACT, LEC, EP, EW, BO).
@@ -1052,26 +1106,34 @@ static void usb_cmd_dispatch(const char *line)
         }
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "I2C,scan") == 0) {
+        // DISABLED — I2CD2 is never started (i2c_drv_init() commented out in
+        // main.cpp), so touching it here would be a call into a driver
+        // that's still in its reset state. Re-enable alongside main.cpp's
+        // i2c_drv_init() call.
+        //
         // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
         // Use a 2 ms timeout per probe so a stuck device can't hang the scan
         // forever and starve the I2CThread of bus access.
-        uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
-        uint8_t dummy[1];
-        i2cAcquireBus(&I2CD2);
-        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-            if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
-                acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
-            }
-        }
-        i2cReleaseBus(&I2CD2);
+        // uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
+        // uint8_t dummy[1];
+        // i2cAcquireBus(&I2CD2);
+        // for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        //     if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
+        //         acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
+        //     }
+        // }
+        // i2cReleaseBus(&I2CD2);
+        // chMtxLock(&s_usb_write_mtx);
+        // for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        //     if (acked[addr >> 3] & (1U << (addr & 7U))) {
+        //         chprintf((BaseSequentialStream *)&SDU1,
+        //                  "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
+        //     }
+        // }
+        // chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
+        // chMtxUnlock(&s_usb_write_mtx);
         chMtxLock(&s_usb_write_mtx);
-        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-            if (acked[addr >> 3] & (1U << (addr & 7U))) {
-                chprintf((BaseSequentialStream *)&SDU1,
-                         "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
-            }
-        }
-        chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
+        chprintf((BaseSequentialStream *)&SDU1, "I2C,ERR,disabled\r\n");
         chMtxUnlock(&s_usb_write_mtx);
 #ifdef BPRL_TIMING
     } else if (strcmp(line, "TIM,status") == 0) {
@@ -1717,7 +1779,9 @@ void threads_start(const ThreadRates &rates)
 
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
+#if BPRL_ENABLE_I2C
+    // chThdCreateStatic(waI2C, sizeof(waI2C), NORMALPRIO + 20, I2CThread, (void *)&rates.i2c);  // DISABLED — see main.cpp
+#endif
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);

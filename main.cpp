@@ -124,8 +124,8 @@ int main(void)
 
     motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
-    i2c_drv_init();        // start I2CD2 at 400 kHz
-    strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
+    // i2c_drv_init();      // DISABLED — past I2C hang during bring-up, strip out while debugging CAN/USB unresponsiveness
+    // strain_rate_init();  // DISABLED — defaults to the I2C interface; not needed for this bring-up
     encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
     threads_start(kRates);

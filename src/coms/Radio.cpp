@@ -37,6 +37,11 @@ float radio_roll()        { return norm_axis(PARSER.channel(kDroneConfig.rc_map.
 float radio_pitch()       { return -norm_axis(PARSER.channel(kDroneConfig.rc_map.pitch)); }
 float radio_yaw()         { return norm_axis(PARSER.channel(kDroneConfig.rc_map.yaw)); }
 bool  radio_armed()       { return PARSER.channel(kDroneConfig.rc_map.arm) > 992u; }
+#if RADIO_PROTOCOL == RADIO_PROTO_CRSF
+bool  radio_valid()       { return PARSER.data_valid(); }
+#else // RADIO_PROTO_SBUS — no single _valid flag; frame_lost/failsafe stand in for it
+bool  radio_valid()       { return !PARSER.frame_lost() && !PARSER.failsafe(); }
+#endif
 float radio_flight_mode() { return norm_axis(PARSER.channel(kDroneConfig.rc_map.flight_mode)); }
 float radio_indi()        { return norm_axis(PARSER.channel(kDroneConfig.rc_map.indi_switch)); }
 

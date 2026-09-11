@@ -2,9 +2,11 @@
 #include "hal.h"
 
 /*
- * I2C bus driver — currently used only by the strain-rate sensor's I2C
- * interface (STRAIN_RATE_I2C, the default; CAN is the override). No
- * magnetometer is present. The barometer (MS5611) is on SPI, not I2C — see
+ * I2C bus driver — used by the strain-rate sensor's I2C interface
+ * (STRAIN_RATE_I2C; CAN is the per-board override, see StrainRate.hpp) on
+ * Cube boards, and unconditionally by the DPS310 barometer on
+ * BPRL_BOARD_ORQA (no SPI baro on that board). No magnetometer is present.
+ * The Cube boards' barometer (MS5611) is on SPI, not I2C — see
  * src/coms/Baro/MS5611.hpp.
  *
  * Adding devices:
