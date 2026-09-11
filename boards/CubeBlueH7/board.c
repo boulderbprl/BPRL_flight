@@ -10,6 +10,30 @@
 #include "hal.h"
 #include "board.h"
 
+/*
+ * __early_init() is a weak hook the reset handler calls (crt0_v7m.S) before
+ * .data/.bss init and before main() — ChibiOS's own STM32H7 reference board
+ * files (and ArduPilot's) override it to call stm32_clock_init() here.
+ * This project's board.c files never did: the default empty stub in
+ * third_party/ChibiOS/.../crt1.c was used instead, so stm32_clock_init()
+ * was never called at all, on any board, ever — the PLL/VOS/prescaler tree
+ * in cfg/mcuconf.h was pure dead code (confirmed: no reference to it
+ * anywhere in the actual link; USE_LINK_GC drops it). The MCU has been
+ * running this whole time on whatever the POR reset default clock leaves
+ * it at (HSI, no PLL, ~64 MHz), not the 400 MHz configured in mcuconf.h.
+ *
+ * CAUTION: fixing this changes every real-time constant in the firmware —
+ * control loop rate, filter time constants, DShot bit timing, tuned PID
+ * gains — on whichever board it's applied to. Do NOT port this to
+ * CubeOrangePlus/OrqaH7QuadCore without deliberate, bench-tested
+ * re-verification; it is currently applied to CubeBlueH7 only, which has
+ * no working flight tuning to disturb.
+ */
+void __early_init(void)
+{
+    stm32_clock_init();
+}
+
 void boardInit(void)
 {
     /*

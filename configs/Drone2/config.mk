@@ -6,14 +6,26 @@ BOARD_FULL  = CubeBlueH7
 # Drone2's ESCs are standard PWM (1000-2000 us pulses on FMU CH1-4), not
 # DShot — override the project-wide DShot default here. See src/coms/PWM.hpp.
 #
-# Deliberately H743, not the physically-correct H753: mirrors Drone1's
-# escape hatch in configs/Drone1/config.mk for the exact same symptom
-# (FC totally unresponsive over USB, ~32s IWDG reset signature) on the same
-# H74x/H75x/H757 chip family — see that file's comment for the full
-# investigation history. Root cause not confirmed for Drone2 specifically;
-# this mirrors a working, verified fix from a sibling board, not a
-# from-scratch diagnosis. board.h notes CubeBlueH7 is pin-identical to
-# CubeOrange+/H743, "only the MCU variant differs: H753 vs H743", and
-# already reuses CubeOrange's STM32H743xI.ld linker script. Revert to
-# -DSTM32H753xx if this doesn't fix it or causes a new regression.
-BOARD_UDEFS = -DSTM32H743xx -DBPRL_BOARD_CUBEBLUE -DMOTOR_PROTOCOL=MOTOR_PROTO_PWM
+# -DSTM32H743xx: this is the physically-correct chip for Cube Blue (confirmed
+# by the user against real hardware and against ArduPilot's own "CubeOrange"
+# hwdef, which targets this exact board/silicon and declares
+# `MCU STM32H7xx STM32H743xx`) — earlier comments here calling this a
+# mislabel/"escape hatch" mixed up which Cube uses which chip; that
+# confusion is resolved now, this define is simply correct. (CubeOrangePlus
+# is the H753/H757-class part; see configs/Drone1/config.mk.)
+#
+# -DSTM32_ENFORCE_H7_REV_XY: ArduPilot's own H743-class mcuconf template
+# (libraries/AP_HAL_ChibiOS/hwdef/common/stm32h7_mcuconf.h) unconditionally
+# defines this for any target clocked <=400 MHz, which is what we run
+# (PLL1: 24 MHz HSE / DIVM 3 -> 8 MHz refclk * DIVN 100 = 800 MHz VCO,
+# /DIVP 2 = 400 MHz). It changes the PWR/VOS overdrive sequencing in
+# ChibiOS's stm32_clock_init() (hal_lld.c) to match this silicon family —
+# without it, that sequencing assumes newer Rev-V-style behavior that may
+# not match the actual chip. This had never actually been exercised on this
+# board: stm32_clock_init() was never called at all until the __early_init()
+# fix in board.c (added alongside this), since no board.c in this project
+# defined that hook — cfg/mcuconf.h's whole PLL/VOS tree was dead code, and
+# the MCU was booting on the ~64 MHz HSI reset default the entire time. If
+# Cube Blue still doesn't boot with both fixes in place, this define — not
+# the H743 chip macro — is the next thing to suspect/revert.
+BOARD_UDEFS = -DSTM32H743xx -DSTM32_ENFORCE_H7_REV_XY -DBPRL_BOARD_CUBEBLUE -DMOTOR_PROTOCOL=MOTOR_PROTO_PWM
