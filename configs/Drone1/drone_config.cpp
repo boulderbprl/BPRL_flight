@@ -131,12 +131,12 @@ const DroneConfig kDroneConfig = {
    
     // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
     {
-        50.0f, // log_rate_hz
+        70.0f, // log_rate_hz
         { true, // att
           true, // lin
           true, // rcin
           true, // outp
-          true, // rpms
+          false, // rpms
           true, // strn
           true, // imu1
           true, // imu2
