@@ -1479,8 +1479,13 @@ static THD_FUNCTION(LogThread, arg)
 
     while (true) {
         TIMING_TICK_BEGIN(tid);
-        /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
-        const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
+        /* Timestamp in microseconds -- genuine microsecond resolution, not
+         * millisecond-quantized (see git history for why this used to
+         * multiply a TIME_I2MS() value by 1000: that made every message
+         * type in a tick collapse onto an identical coarse timestamp,
+         * which downstream log readers see as mass duplicate-timestamp
+         * records). */
+        const uint64_t t_us = (uint64_t)TIME_I2US(chVTGetSystemTime());
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
         float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], indij_diag[12];
