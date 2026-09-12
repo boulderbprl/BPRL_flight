@@ -172,6 +172,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/IMUs/ICM45686.cpp \
          src/coms/IMUs/ICM20602.cpp \
          src/coms/IMUs/ICM20948.cpp \
+         src/coms/IMUs/ICM20649.cpp \
          src/coms/Baro/MS5611.cpp \
          src/coms/Baro/DPS310.cpp \
          src/coms/SPI.cpp \

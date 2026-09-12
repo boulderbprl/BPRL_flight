@@ -6,6 +6,7 @@
 #else
 #include "src/coms/Baro/MS5611.hpp"
 #if defined(BPRL_BOARD_CUBEBLUE)
+#include "src/coms/IMUs/ICM20649.hpp"
 #include "src/coms/IMUs/ICM20948.hpp"
 #include "src/coms/IMUs/ICM20602.hpp"
 #else
@@ -48,20 +49,27 @@
  *
  * ── BPRL_BOARD_CUBEBLUE ──────────────────────────────────────────────────
  * Pin map below is from boards/CubeBlueH7/board.h's LINE_IMU*_CS (sourced
- * from ArduPilot's stock CubeOrange hwdef.inc reference schematic), NOT
- * yet WHOAMI-confirmed against a physical CubeBlueH7 unit the way the
- * CubeOrangePlus mapping above was. A wrong CS/chip pairing fails safe —
- * ICM45686/ICM20948/ICM20602 have distinct, non-colliding WHOAMI values, so
- * a mismatched driver just fails init() and that lane's g_imu[i].valid
- * stays false rather than fusing garbage — but confirm on the bench before
- * trusting attitude output for flight (e.g. watch $IMU telemetry for all
- * three lanes going valid=1 at power-on).
- *   imu1  ICM-20948   SPI1   CS=PC2   — primary
+ * from ArduPilot's stock CubeOrange hwdef.inc reference schematic).
+ * WHOAMI-confirmed on two physical CubeBlueH7 units — and the "primary"
+ * slot's chip is NOT what earlier revisions of this file assumed: imu1
+ * reads back WHOAMI=0xE1 (ICM-20649, a pin/protocol-compatible "high-g"
+ * sibling of the ICM-20948, wider accel range, different gyro FS_SEL
+ * encoding — see ICM20649.hpp), not ICM-20948's 0xEA. ArduPilot's own
+ * CubeOrange/hwdef.inc already accounts for exactly this on the same chip
+ * position (CHECK_IMU2_PRESENT $CHECK_ICM20649) — this is the hardware's
+ * real, intended population, confirmed via ArduPilot's own register header
+ * (AP_InertialSensor_Invensensev2_registers.h: INV2_WHOAMI_ICM20649=0xE1),
+ * not a defect. A wrong CS/chip pairing still fails safe — every chip class
+ * here has a distinct, non-colliding WHOAMI value, so a mismatched driver
+ * just fails init() and that lane's g_imu[i].valid stays false rather than
+ * fusing garbage.
+ *   imu1  ICM-20649   SPI1   CS=PC2   — primary (NOT ICM-20948, see above)
  *   imu2  ICM-20948   SPI4   CS=PE4   — external
  *   imu3  ICM-20602   SPI4   CS=PC13  — external
  *   baro1 MS5611      SPI1   CS=PD7  (same pin as CubeOrangePlus)
- * SPI mode: ICM-20948/ICM-20602 use MODE3 (CPOL=1, CPHA=1), matching
- * ArduPilot's hwdef.dat for this chip family (ICM-45686 uses MODE0).
+ * SPI mode: ICM-20649/ICM-20948/ICM-20602 use MODE3 (CPOL=1, CPHA=1),
+ * matching ArduPilot's hwdef.dat for this chip family (ICM-45686 uses
+ * MODE0).
  *
  * spi_drv_init() must be called from inside SPIThread because
  * ICM/MS5611 init sequences use chThdSleepMilliseconds.
@@ -70,7 +78,7 @@
 extern ICM42688 imu1;
 extern ICM42688 imu2;
 #elif defined(BPRL_BOARD_CUBEBLUE)
-extern ICM20948 imu1;
+extern ICM20649 imu1;
 extern ICM20948 imu2;
 extern ICM20602 imu3;
 extern MS5611   baro1;

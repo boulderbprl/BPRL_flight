@@ -105,7 +105,9 @@ static StateManager state_mgr;
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-// static THD_WORKING_AREA(waI2C,      1024);  // DISABLED — see I2CThread creation below
+#if !defined(BPRL_BOARD_CUBEBLUE)
+static THD_WORKING_AREA(waI2C,      1024);  // not needed on CubeBlueH7 — all-SPI sensors
+#endif
 static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
                                               // (former waStateEst was 6144) plus three shadow attitude controllers
                                               // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
@@ -165,7 +167,10 @@ static THD_FUNCTION(SPIThread, arg)
         // The CubeOrangePlus rotations below (ROLL_180_YAW_135 etc.) were
         // derived for that board's specific ICM-45686 mounting and do NOT
         // apply here — CubeBlueH7 carries genuinely different, differently
-        // -mounted chips (2x ICM-20948 + 1x ICM-20602). Their actual mounting
+        // -mounted chips (1x ICM-20649 [imu1, primary] + 1x ICM-20948
+        // [imu2, ext] + 1x ICM-20602 [imu3, ext] — see src/coms/SPI.hpp for
+        // why imu1 isn't the ICM-20948 this comment used to assume). Their
+        // actual mounting
         // rotation relative to vehicle body axes is not derivable from source
         // and has not been bench-verified, so this passes each chip's native
         // axes straight through as NED z-down (X-fwd, Y-right, Z-down) with
@@ -994,6 +999,12 @@ static void usb_cmd_dispatch(const char *line)
         for (int i = 0; i < 3; i++) {
             chprintf((BaseSequentialStream *)&SDU1, "HW,IMU%d,%u\r\n", i, (unsigned)imu_snap[i].valid);
         }
+        // Raw WHOAMI byte alongside IMU0's valid flag — this is how the
+        // primary slot's chip was identified as ICM-20649 (0xE1) rather than
+        // the originally-assumed ICM-20948 (0xEA); kept as a permanent bench
+        // diagnostic since board-to-board IMU population has already varied
+        // once (see src/coms/SPI.hpp).
+        chprintf((BaseSequentialStream *)&SDU1, "HW,IMU0,whoami=0x%02X\r\n", (unsigned)imu1.whoami());
         chprintf((BaseSequentialStream *)&SDU1, "HW,CANIMU,%u\r\n", (unsigned)can_imu_snap.valid);
         chprintf((BaseSequentialStream *)&SDU1, "HW,BARO,%u\r\n", (unsigned)baro_snap.valid);
         chprintf((BaseSequentialStream *)&SDU1, "HW,STRAIN,%u\r\n", (unsigned)strain_snap.valid);
@@ -1777,23 +1788,39 @@ void threads_start(const ThreadRates &rates)
     //   LogThread       -15  50 Hz SD card logging
     //   USBCmdThread    -20  event-driven USB commands
 
-    // ── Cube Blue bring-up: every thread disabled for stage 0. Re-enable
-    // one at a time (rebuild + reflash + confirm ALIVE keeps ticking on the
-    // debug UART between each) — see main.cpp for the staged plan. ──
-    (void)rates;
-    // chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
-    // chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-#if BPRL_ENABLE_I2C
-    // chThdCreateStatic(waI2C, sizeof(waI2C), NORMALPRIO + 20, I2CThread, (void *)&rates.i2c);  // DISABLED — see main.cpp
+    // ── IMPORTANT: none of these chThdCreateStatic calls were ever
+    // board-conditional in git history. The Cube Blue bring-up's "disable
+    // everything, add back one at a time" (this whole function was
+    // commented out at HEAD, commit 42448c9, before this bring-up session
+    // even started) therefore disabled every thread — including
+    // ControlThread, i.e. no flight control at all — for EVERY board, not
+    // just CubeBlueH7. Restored full thread set for CubeOrangePlus/Orqa
+    // below, matching the last confirmed-working configuration (commit
+    // 61c453a, confirmed flying on CubeOrangePlus). Cube Blue keeps its own
+    // deliberate, still-in-progress staged config. ──
+    chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
+    chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
+#if defined(BPRL_BOARD_CUBEBLUE)
+    // Cube Blue bring-up, stage 1: root cause (linker script offset, see
+    // main.cpp) fixed and confirmed — board boots, USB CDC TX/RX both work,
+    // all sensors read correctly (python3 tools/hw_status.py). ControlThread
+    // stays disabled on purpose: it's the thread that calls
+    // motor_output_write() during normal (non-test) operation, and
+    // motor_output_init() hasn't been re-enabled either — hold both for a
+    // deliberate, separate stage. I2CThread stays off too — this board's
+    // sensors are all SPI, no I2C peripheral to poll.
+    // chThdCreateStatic(waControl, sizeof(waControl), NORMALPRIO + 22, ControlThread, (void *)&rates.control);
+#else
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
+    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
 #endif
-    // chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
-    // chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
-    // chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
-    // chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);
+    chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
+    chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
+    chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);
 #ifdef BPRL_DEBUG
-    // chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
+    chThdCreateStatic(waDebug,     sizeof(waDebug),     NORMALPRIO - 10, DebugThread,     (void *)&rates.debug);
 #endif
-    // chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
+    chThdCreateStatic(waUSBCmd,    sizeof(waUSBCmd),    NORMALPRIO - 20, USBCmdThread,    nullptr);
 
-    // chThdCreateStatic(waLog, sizeof(waLog), NORMALPRIO - 15, LogThread, (void *)&rates.log);
+    chThdCreateStatic(waLog, sizeof(waLog), NORMALPRIO - 15, LogThread, (void *)&rates.log);
 }

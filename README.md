@@ -60,7 +60,7 @@ BPRL_flight/
 │   │
 │   ├── coms/                 Peripheral drivers
 │   │   ├── SPI.hpp/.cpp      SPI bus init: on-board IMUs (3× Cube boards, 2× Drone3/Orqa — chip set/count is board-conditional, see below) + MS5611 barometer (Cube boards only; Drone3's barometer is I2C, see Baro/DPS310 below)
-│   │   ├── IMUs/             ICM45686.hpp/.cpp (Drone1/CubeOrangePlus: drives imu1/2/3), ICM42688.hpp/.cpp (Drone3/Orqa: drives imu1/2; also supports an alternate 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated there), ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (Drone2/CubeBlueH7: drives imu1/2/3)
+│   │   ├── IMUs/             ICM45686.hpp/.cpp (Drone1/CubeOrangePlus: drives imu1/2/3), ICM42688.hpp/.cpp (Drone3/Orqa: drives imu1/2; also supports an alternate 1×45686+2×42688 CubeOrangePlus hardware variant, not instantiated there), ICM20649.hpp/.cpp + ICM20948.hpp/.cpp + ICM20602.hpp/.cpp (Drone2/CubeBlueH7: drive imu1/imu2/imu3 respectively — NOT 2×ICM20948+1×ICM20602 as earlier hardware assumptions had it, see IMU Drivers below)
 │   │   ├── Baro/             MS5611.hpp/.cpp — SPI1 CS=PD7 state-machine driver (Cube boards). DPS310.hpp/.cpp — I2C2 addr 0x77, polled from I2CThread (Drone3/Orqa's only barometer — no SPI baro on that board)
 │   │   ├── CAN.hpp/.cpp      FDCAN1 driver (register-level, interrupt-driven, self-healing — not ChibiOS's HAL_USE_CAN), IMX5 callback, device table
 │   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface (Cube boards) or DPS310 barometer (Drone3/Orqa)
@@ -631,7 +631,7 @@ The firmware reads two or three on-board IMUs (board-conditional) plus one exter
 
 | Index | Variable | `DRONE=Drone1` sensor/bus | `DRONE=Drone2` sensor/bus | `DRONE=Drone3` sensor/bus | DOF |
 |---|---|---|---|---|---|
-| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20948, SPI1 CS=PC2 | ICM-42688, SPI1 CS=PA4 | 6 (accel + gyro) |
+| 0 | `g_imu[0]` | ICM-45686, SPI1 CS=PG1 | ICM-20649, SPI1 CS=PC2 | ICM-42688, SPI1 CS=PA4 | 6 (accel + gyro) |
 | 1 | `g_imu[1]` | ICM-45686, SPI4 CS=PC15 | ICM-20948, SPI4 CS=PE4 | ICM-42688, SPI4 CS=PE11 | 6 (accel + gyro) |
 | 2 | `g_imu[2]` | ICM-45686, SPI4 CS=PC13 | ICM-20602, SPI4 CS=PC13 | *(not present — stays `valid=false`)* | 6 (accel + gyro) |
 | — | `g_can_imu` | IMX5 (INS) | IMX5 (INS) | IMX5 (INS) | FDCAN1, attitude + rates |
@@ -648,14 +648,19 @@ InvenSense 6-DOF MEMS (accelerometer + gyroscope), FIFO-based output. **One driv
 - **SPI speeds:** ~781 kHz for init, 6.25–12.5 MHz for burst reads (per-instance clock divider)
 - **Axis rotation** (`SPIThread`, `src/threads.cpp`) to body-frame NED z-down, per IMU: imu1 `ROTATION_ROLL_180_YAW_135`, imu2 `ROTATION_YAW_90`, imu3 `ROTATION_PITCH_180_YAW_90`
 
-### ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `DRONE=Drone2`
+### ICM-20649 / ICM-20948 / ICM-20602 (`src/coms/IMUs/ICM20649.hpp/.cpp`, `ICM20948.hpp/.cpp`, `ICM20602.hpp/.cpp`) — `DRONE=Drone2`
 
 Classic InvenSense MPU-9250-family parts — register-based digital low-pass filter (DLPF) rather than the 45686/42688's analog anti-alias filter stage, and no FIFO/oversampling (single sample per `SPIThread` tick).
 
-- **ICM-20948** (`imu1`/`imu2`, 9-DOF part used here as 6-DOF): ±16 g / ±2000 °/s, ~1.125 kHz ODR. `GYRO_CFG1`/`ACCEL_CFG` enable the DLPF but leave `DLPFCFG=0` — the chip's widest/default bandwidth, not deliberately narrowed.
+**`imu1`'s chip was misidentified for most of this board's development.** It reads back WHOAMI=0xE1 (ICM-20649), not ICM-20948's 0xEA — confirmed on two separate physical units, and matching ArduPilot's own `CubeOrange/hwdef.inc`, which already checks for exactly this variant on exactly this chip position (`CHECK_IMU2_PRESENT $CHECK_ICM20649`). ICM-20649 is a pin/protocol-compatible "high-g" sibling of the ICM-20948 (same register map) but is **not** register-compatible for full-scale-range selection: it needs a different `GYRO_CFG1` FS_SEL bit pattern for the same ±2000 °/s range (`0x04` vs. ICM-20948's `0x06`) and a different accelerometer scale factor for its wider range (1024 LSB/g @ ±30 g vs. ICM-20948's 2048 LSB/g @ ±16 g) — treating a detected ICM-20649 as an ICM-20948 would silently halve every accel reading on this lane. That's why it has its own driver class rather than sharing one with ICM-20948.
+
+- **ICM-20649** (`imu1`): ±30 g / ±2000 °/s, ~1.125 kHz ODR. Same bank-switched register layout as ICM-20948 below, different FS_SEL encoding — see `ICM20649.cpp` for the exact bit values.
+- **ICM-20948** (`imu2`, 9-DOF part used here as 6-DOF): ±16 g / ±2000 °/s, ~1.125 kHz ODR. `GYRO_CFG1`/`ACCEL_CFG` enable the DLPF but leave `DLPFCFG=0` — the chip's widest/default bandwidth, not deliberately narrowed.
 - **ICM-20602** (`imu3`): ±16 g / ±2000 °/s, 1 kHz ODR, DLPF **explicitly** configured — `DLPF_CFG=1` (~184 Hz gyro bandwidth), `A_DLPF_CFG=1` (99 Hz accel bandwidth).
-- **SPI mode:** MODE3 (CPOL=1, CPHA=1) for both — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
-- **Axis rotation:** ⚠️ **unverified placeholder.** `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) currently passes each chip's native axes straight through with no rotation — the CubeOrangePlus rotation constants above were derived for that board's specific ICM-45686 mounting and do not apply to these different, differently-mounted chips. The real mounting orientation isn't derivable from source; **bench-verify before flight** (e.g. tilt nose-down, confirm pitch sign in `$TEL`/`$IMU` telemetry via `tools/telemetry.py`) and update the rotation math once known. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
+- **SPI mode:** MODE3 (CPOL=1, CPHA=1) for all three — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
+- **Axis rotation:** ⚠️ **unverified placeholder.** `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) currently passes each chip's native axes straight through with no rotation — the CubeOrangePlus rotation constants above were derived for that board's specific ICM-45686 mounting and do not apply to these different, differently-mounted chips. The real mounting orientation isn't derivable from source; **bench-verify before flight** (e.g. tilt nose-down, confirm pitch sign in `$TEL`/`$IMU` telemetry via `tools/telemetry.py`) and update the rotation math once known. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12, 20649=0xE1 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
+
+**Board bring-up status:** as of this writing, Drone2 is confirmed booting, enumerating its own USB CDC identity, and reading all three IMUs valid (`python3 tools/hw_status.py`). The root cause of it never booting at all was a linker script bug — the app was linked at flash address 0, colliding with the board's own bootloader (see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld)) — not a USB or sensor bug. `ControlThread` and `motor_output_init()` (`main.cpp`, `src/threads.cpp`) remain deliberately disabled pending a separate, explicit bring-up stage, since that's the point where the firmware starts actually commanding the ESCs.
 
 ### ICM-42688 (`src/coms/IMUs/ICM42688.hpp/.cpp`) — `DRONE=Drone3`
 
@@ -735,5 +740,5 @@ make flash-stlink DRONE=Drone2
 ```
 
 **Option B — STM32CubeProgrammer (no usbipd needed):**
-Build in WSL2, then flash `build/BPRL.bin` using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08000000` (CubeBlueH7) or `0x08020000` (CubeOrangePlus).
+Build in WSL2, then flash `build/BPRL.bin` using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08020000` for **either** Cube board (CubeBlueH7 or CubeOrangePlus) — both ship the same 128 KB BL5 bootloader reservation at the bottom of flash, so the app starts 128 KB in on both. `0x08000000` is the bootloader's own address; writing the app there overwrites/corrupts the bootloader instead of installing the app (this line used to say `0x08000000` for CubeBlueH7, which was wrong — see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld) for how this was found and fixed). Orqa (OrqaH7QuadCore) uses `0x08060000` instead — see [`boards/OrqaH7QuadCore/STM32H743xI_app.ld`](boards/OrqaH7QuadCore/STM32H743xI_app.ld) (384 KB bootloader reservation, larger than the Cube boards' since it also handles OSD font/DFU recovery).
 

@@ -158,15 +158,41 @@ int main(void)
         /* .log     = */ { TIME_MS2I(1000.0f / kDroneConfig.logging.log_rate_hz) },  // from DroneConfig
     };
 
-    // ── Cube Blue bring-up: everything below disabled, add back one at a
-    // time once each stage is confirmed stable over DBG_PRINTF()/SDU1.
-    // Thread pool itself is trimmed in threads_start() (src/threads.cpp). ──
+    // ── IMPORTANT: none of the calls below were ever board-conditional in
+    // git history. The Cube Blue bring-up's "disable everything" (this
+    // whole block was commented out at HEAD, commit 42448c9, before this
+    // bring-up session even started) therefore disabled every peripheral —
+    // including motor_output_init() — for EVERY board, not just
+    // CubeBlueH7. Restored full peripheral init for CubeOrangePlus/Orqa
+    // below, matching the last confirmed-working configuration (commit
+    // 61c453a, confirmed flying on CubeOrangePlus) plus encoder_rpm_init(),
+    // a real feature added since. Cube Blue keeps its own deliberate,
+    // still-in-progress staged config. ──
+#if defined(BPRL_BOARD_CUBEBLUE)
+    // Cube Blue bring-up, stage 1: root cause found and fixed (linker
+    // script had the app linked at 0x08000000 — flash address zero, on top
+    // of the board's own 128 KB bootloader reservation — so the bootloader
+    // never jumped to the app at all; see boards/CubeBlueH7/STM32H743xI.ld).
+    // Confirmed booting + USB CDC TX/RX both working, all sensors reading
+    // correctly (python3 tools/hw_status.py). motor_output_init() and
+    // ControlThread (src/threads.cpp) stay disabled on purpose until this
+    // stage is confirmed stable — ControlThread is what actually calls
+    // motor_output_write() outside of a USB "MT," test command. i2c_drv_init()/
+    // strain_rate_init() stay off too — this board's sensors are all SPI.
     // motor_output_init();
-    // can_drv_init();        // start FDCAN1, register IMX5 callbacks
-    // i2c_drv_init();      // DISABLED — past I2C hang during bring-up, strip out while debugging CAN/USB unresponsiveness
-    // strain_rate_init();  // DISABLED — defaults to the I2C interface; not needed for this bring-up
-    // encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
-    // radio_input_init();    // start USART3 CRSF receiver at 420000 baud
+    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    // i2c_drv_init();
+    // strain_rate_init();
+    encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
+    radio_input_init();    // start USART3 CRSF receiver at 420000 baud
+#else
+    motor_output_init();
+    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    i2c_drv_init();        // start I2CD2 at 400 kHz
+    strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
+    encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
+    radio_input_init();    // start USART3 CRSF receiver at 420000 baud
+#endif
     threads_start(kRates);
     DBG_PRINTF("BOOT: threads_start() returned\r\n");
 
@@ -176,17 +202,6 @@ int main(void)
         IWDG1->KR = 0xAAAAU;   /* kick watchdog every second */
         chThdSleepMilliseconds(1000);
         DBG_PRINTF("ALIVE %lu\r\n", (unsigned long)alive++);
-
-        /* TEMPORARY — force a bus disconnect/reconnect every 5s so the host
-         * re-reads the serial-number string descriptor (see usb_serial.cpp)
-         * and shows live "has USB_EVENT_CONFIGURED fired / SOF interrupt
-         * count" state via `lsusb -v` / dmesg, even though DBG_PRINTF's
-         * actual data never arrives. Remove once the real bug is found. */
-        if (alive % 5 == 0) {
-            usbDisconnectBus(&USBD1);
-            chThdSleepMilliseconds(200);
-            usbConnectBus(&USBD1);
-        }
     }
     return 0;
 }

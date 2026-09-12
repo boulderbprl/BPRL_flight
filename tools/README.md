@@ -15,6 +15,7 @@ pip install pyserial rich
 | Script | Subcommands | DEBUG build? |
 |---|---|---|
 | `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel` | Required |
+| `hw_status.py` | `hw-status` (default) | No |
 | `motor_test.py` | `motor-test` | No |
 | `calibrate.py` | `calibrate` | Required |
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
@@ -51,6 +52,27 @@ python3 tools/telemetry.py telemetry
 python3 tools/telemetry.py ekf-status
 python3 tools/telemetry.py imu-compare
 python3 tools/telemetry.py pos-vel
+```
+
+---
+
+## hw_status.py
+
+> Works on any firmware build.
+
+Live per-subsystem connectivity monitor — polls the `HW,status` USB command (~2 Hz) and renders a panel showing whether each sensor/link is actually reporting valid data right now: all on-board IMUs, the CAN INS (IMX5), barometer, strain rate sensor, both encoder RPM nodes, RC link, and SD card, plus raw FDCAN1 RX/dispatch counters.
+
+```bash
+python3 tools/hw_status.py
+python3 tools/hw_status.py --port /dev/ttyACM0
+```
+
+This is usually the fastest first check during bring-up or after wiring changes — it answers "is X actually connected and working" for every subsystem at once, without needing a `-DBPRL_DEBUG` build. It was how a wrong-IMU-chip assumption on CubeBlueH7's primary IMU slot was caught: `HW,IMU0` reported invalid on every boot, and reading `HW,status`'s raw `whoami=0x%02X` field for that slot (also queryable directly — see below) showed a chip identity (`0xE1`, ICM-20649) that didn't match what the driver expected (ICM-20948, `0xEA`).
+
+If you need the raw response instead of the rendered panel (e.g. to see a diagnostic field the panel doesn't render yet), query `HW,status` directly:
+
+```bash
+python3 -c "import serial,time; s=serial.Serial('/dev/ttyACM0',115200,timeout=1); s.write(b'HW,status\n'); time.sleep(0.3); print(s.read(4096).decode(errors='replace'))"
 ```
 
 ---
@@ -326,6 +348,9 @@ make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG && make flash DRONE=Drone1
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
+
+# Hardware status (any build)
+python3 tools/hw_status.py
 
 # Motor test
 python3 tools/motor_test.py motor-test

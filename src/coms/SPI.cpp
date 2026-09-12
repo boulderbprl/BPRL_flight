@@ -58,7 +58,10 @@ void spi_drv_init(void)
 
 #elif defined(BPRL_BOARD_CUBEBLUE)
 
-// ── IMU1: ICM-20948 — SPI1  CS=PC2  MODE3 (CPOL=1, CPHA=1) ───────────────────
+// ── IMU1: ICM-20649 — SPI1  CS=PC2  MODE3 (CPOL=1, CPHA=1) ───────────────────
+// NOT ICM-20948 — WHOAMI-confirmed as ICM-20649 (0xE1) on real hardware on
+// two separate units; see ICM20649.hpp for why. CS pin/bus/mode/divider are
+// unaffected by this — only the chip class changed.
 static const SPIConfig imu1_init = {
     false, nullptr, GPIOC, 2U,
     SPI_CFG1_MBR_DIV64 | SPI_CFG1_DSIZE_VALUE(7),
@@ -100,7 +103,7 @@ static const SPIConfig imu3_fast = {
     nullptr, nullptr
 };
 
-ICM20948 imu1;
+ICM20649 imu1;
 ICM20948 imu2;
 ICM20602 imu3;
 

@@ -32,6 +32,21 @@
 void __early_init(void)
 {
     stm32_clock_init();
+
+    /* Ensure ITCM and DTCM are enabled — the PX4/ArduPilot ChibiOS bootloader
+     * on this board (confirmed: tools/flash_upload.py speaks its protocol,
+     * "BL rev=5") can leave them disabled before jumping to the app.
+     * ArduPilot's own board.c does exactly this, with this exact comment,
+     * for exactly this reason (hwdef/common/board.c __early_init). Our
+     * linker script (STM32H743xI.ld) places 128 KB of RAM directly in DTCM
+     * at 0x20000000 ("ram5"), so if DTCM is left disabled/indeterminate by
+     * the bootloader, that's the RAM this firmware's stack, .data and .bss
+     * actually live in — plausibly the root cause of every "works
+     * sometimes, not others, even with byte-identical firmware" symptom
+     * seen bringing this board up. Never done anywhere in this codebase
+     * before this. */
+    SCB->ITCMCR |= 1U;   /* ITCM enable */
+    SCB->DTCMCR |= 1U;   /* DTCM enable */
 }
 
 void boardInit(void)
@@ -64,8 +79,10 @@ void boardInit(void)
     palSetPadMode(GPIOB, 0U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
     palClearLine(LINE_LED_ACTIVITY);
 
-    /* ── SPI1 — primary IMU bus (ICM-20948, PC2 CS) ─────────────────────
-     * PA5=SCK, PA6=MISO, PA7=MOSI → AF5                                   */
+    /* ── SPI1 — primary IMU bus (ICM-20649, PC2 CS) ─────────────────────
+     * PA5=SCK, PA6=MISO, PA7=MOSI → AF5
+     * WHOAMI-confirmed as ICM-20649, not ICM-20948 as originally assumed
+     * (see src/coms/IMUs/ICM20649.hpp).                                   */
     palSetPadMode(GPIOA, 5U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOA, 6U, PAL_MODE_ALTERNATE(5) | PAL_STM32_PUPDR_PULLUP);
     palSetPadMode(GPIOA, 7U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
