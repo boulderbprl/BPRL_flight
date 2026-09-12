@@ -176,6 +176,17 @@ int main(void)
         IWDG1->KR = 0xAAAAU;   /* kick watchdog every second */
         chThdSleepMilliseconds(1000);
         DBG_PRINTF("ALIVE %lu\r\n", (unsigned long)alive++);
+
+        /* TEMPORARY — force a bus disconnect/reconnect every 5s so the host
+         * re-reads the serial-number string descriptor (see usb_serial.cpp)
+         * and shows live "has USB_EVENT_CONFIGURED fired / SOF interrupt
+         * count" state via `lsusb -v` / dmesg, even though DBG_PRINTF's
+         * actual data never arrives. Remove once the real bug is found. */
+        if (alive % 5 == 0) {
+            usbDisconnectBus(&USBD1);
+            chThdSleepMilliseconds(200);
+            usbConnectBus(&USBD1);
+        }
     }
     return 0;
 }

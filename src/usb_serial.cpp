@@ -89,20 +89,49 @@ static const uint8_t vcom_string2[] = {
   'U', 0, 'S', 0, 'B', 0
 };
 
-/* String 3: serial number */
-static const uint8_t vcom_string3[] = {
-  USB_DESC_BYTE(8),
-  USB_DESC_BYTE(USB_DESCRIPTOR_STRING),
-  '0' + CH_KERNEL_MAJOR, 0,
-  '0' + CH_KERNEL_MINOR, 0,
-  '0' + CH_KERNEL_PATCH, 0
-};
+/* ══════════════════════════════════════════════════════════════════════════
+ * TEMPORARY — Cube Blue bring-up: enumeration/enumeration-config works
+ * (dmesg shows clean GET_DESCRIPTOR/SET_CONFIGURATION/cdc_acm bind every
+ * time) but bulk data never arrives at the host. Since string descriptors
+ * are proven reliable (that's how "BPRL Debug USB" shows up in dmesg), the
+ * serial-number string is repurposed here to report live internal state —
+ * whether USB_EVENT_CONFIGURED ever fired and whether SOF interrupts are
+ * happening — readable via `lsusb -v` / dmesg after main.cpp forces a
+ * re-enumeration a few seconds into boot. No wired UART needed. Remove once
+ * the real bug is found. ══════════════════════════════════════════════════ */
+volatile bool     g_usb_configured_fired = false;
+volatile uint32_t g_usb_sof_count        = 0;
+
+static uint8_t vcom_string3_buf[2 + 2 * 12];
+static USBDescriptor vcom_string3_desc;
+
+static void build_diag_string(void)
+{
+  static const char hex[] = "0123456789ABCDEF";
+  char tmp[12];
+  uint32_t sof = g_usb_sof_count;
+  tmp[0] = 'C';
+  tmp[1] = g_usb_configured_fired ? '1' : '0';
+  tmp[2] = 'S';
+  tmp[3] = hex[(sof >> 12) & 0xF];
+  tmp[4] = hex[(sof >> 8)  & 0xF];
+  tmp[5] = hex[(sof >> 4)  & 0xF];
+  tmp[6] = hex[ sof        & 0xF];
+  uint8_t len = 7;
+  vcom_string3_buf[0] = USB_DESC_BYTE(2 + 2 * len);
+  vcom_string3_buf[1] = USB_DESC_BYTE(USB_DESCRIPTOR_STRING);
+  for (uint8_t i = 0; i < len; i++) {
+    vcom_string3_buf[2 + i * 2]     = (uint8_t)tmp[i];
+    vcom_string3_buf[2 + i * 2 + 1] = 0;
+  }
+  vcom_string3_desc.ud_size   = (uint8_t)(2 + 2 * len);
+  vcom_string3_desc.ud_string = vcom_string3_buf;
+}
 
 static const USBDescriptor vcom_strings[] = {
   {sizeof vcom_string0, vcom_string0},
   {sizeof vcom_string1, vcom_string1},
   {sizeof vcom_string2, vcom_string2},
-  {sizeof vcom_string3, vcom_string3}
 };
 
 static const USBDescriptor *get_descriptor(USBDriver *usbp,
@@ -115,7 +144,11 @@ static const USBDescriptor *get_descriptor(USBDriver *usbp,
   case USB_DESCRIPTOR_DEVICE:       return &vcom_device_descriptor;
   case USB_DESCRIPTOR_CONFIGURATION: return &vcom_configuration_descriptor;
   case USB_DESCRIPTOR_STRING:
-    if (dindex < 4u) return &vcom_strings[dindex];
+    if (dindex == 3u) {
+      build_diag_string();
+      return &vcom_string3_desc;
+    }
+    if (dindex < 3u) return &vcom_strings[dindex];
     break;
   }
   return nullptr;
@@ -164,6 +197,7 @@ static void usb_event(USBDriver *usbp, usbevent_t event)
     usbInitEndpointI(usbp, USB_DATA_EP,  &ep1config);
     usbInitEndpointI(usbp, USB_INTR_EP,  &ep2config);
     sduConfigureHookI(&SDU1);
+    g_usb_configured_fired = true;
     chSysUnlockFromISR();
     return;
   case USB_EVENT_RESET:
@@ -191,6 +225,7 @@ static void usb_event(USBDriver *usbp, usbevent_t event)
 static void sof_handler(USBDriver *usbp)
 {
   (void)usbp;
+  g_usb_sof_count++;
   osalSysLockFromISR();
   sduSOFHookI(&SDU1);
   osalSysUnlockFromISR();

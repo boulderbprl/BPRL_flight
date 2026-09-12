@@ -100,6 +100,15 @@ void boardInit(void)
     /* ── USB OTG_FS — micro USB (PA11=DM, PA12=DP) → AF10 ─────────────── */
     palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOA, 12U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);
+    /* PA9 = VBUS sense, tied internally to the OTG_FS peripheral's hardware
+     * VBUS comparator regardless of GPIO function — ChibiOS's OTG driver
+     * never touches GCCFG's VBUS-sensing bits itself, so it depends on this
+     * pin being wired up for the comparator to read a real level. Left
+     * unconfigured (floating, reset default) it can read a bogus/unstable
+     * VBUS state: enough for enumeration to sometimes limp through on a
+     * lucky transient, not enough to sustain real bulk data transfer.
+     * ArduPilot's hwdef.inc for this exact board: "PA9 VBUS INPUT OPENDRAIN". */
+    palSetPadMode(GPIOA, 9U, PAL_MODE_INPUT);
 
     /* ── FDCAN1 (PD1=TX, PD0=RX) → AF9 ────────────────────────────────── */
     palSetPadMode(GPIOD, 1U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);

@@ -176,6 +176,13 @@
 #define STM32_SAI1SEL                       STM32_SAI1SEL_PLL1_Q_CK
 #define STM32_LPTIM1SEL                     STM32_LPTIM1SEL_PCLK1
 #define STM32_CECSEL                        STM32_CECSEL_LSI_CK
+/* Tried deriving USB's 48 MHz from PLL3_Q instead of HSI48 (to match
+ * ArduPilot's CubeOrange config) as a hypothesis for "enumerates but no
+ * data" — reverted: it instead made the board never boot at all (stuck
+ * enumerating as the bootloader, never reaching the app), so something in
+ * that PLL3 retune is wrong/unstable on this silicon. Back to HSI48 for
+ * every board until that's understood; the "enumerates, no data" bug is
+ * still open. */
 #define STM32_USBSEL                        STM32_USBSEL_HSI48_CK
 #define STM32_I2C123SEL                     STM32_I2C123SEL_PCLK1
 #define STM32_RNGSEL                        STM32_RNGSEL_HSI48_CK
