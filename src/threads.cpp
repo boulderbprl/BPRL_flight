@@ -105,9 +105,7 @@ static StateManager state_mgr;
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-#if !defined(BPRL_BOARD_CUBEBLUE)
-static THD_WORKING_AREA(waI2C,      1024);  // not needed on CubeBlueH7 — all-SPI sensors
-#endif
+static THD_WORKING_AREA(waI2C,      1024);  // CubeBlueH7: I2C2 hosts the strain-gauge array sensor
 static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
                                               // (former waStateEst was 6144) plus three shadow attitude controllers
                                               // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
@@ -163,45 +161,60 @@ static THD_FUNCTION(SPIThread, arg)
         float a[3], g[3];
 
 #if defined(BPRL_BOARD_CUBEBLUE)
-        // ── CubeBlueH7 axis rotations: UNVERIFIED PLACEHOLDER ────────────────
-        // The CubeOrangePlus rotations below (ROLL_180_YAW_135 etc.) were
-        // derived for that board's specific ICM-45686 mounting and do NOT
-        // apply here — CubeBlueH7 carries genuinely different, differently
-        // -mounted chips (1x ICM-20649 [imu1, primary] + 1x ICM-20948
-        // [imu2, ext] + 1x ICM-20602 [imu3, ext] — see src/coms/SPI.hpp for
-        // why imu1 isn't the ICM-20948 this comment used to assume). Their
-        // actual mounting
-        // rotation relative to vehicle body axes is not derivable from source
-        // and has not been bench-verified, so this passes each chip's native
-        // axes straight through as NED z-down (X-fwd, Y-right, Z-down) with
-        // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
-        // sign or axis mapping will be wrong on this board's lanes — verify
-        // on the bench before flight (e.g. tilt nose-down, confirm pitch
-        // angle sign in $TEL/$IMU telemetry; see tools/telemetry.py) and
-        // replace this block with the correct ROTATION_* mapping once known.
+        // ── CubeBlueH7 axis rotations: bench-derived, NOT the CubeOrange
+        // hwdef.inc transcription this block used to carry. That transcription
+        // assumed this board's IMUs are mounted the same way as CubeOrange's —
+        // wrong: bench testing (hand rotation about each body axis, watching
+        // $TEL/$IMU P/Q/R) showed a consistent roll<->pitch axis swap plus a
+        // yaw sign flip on all three IMUs, meaning this board's physical
+        // mounting genuinely differs from CubeOrange's, not just a sign typo.
+        //
+        // Derivation: for each IMU, the previous (wrong) rotation matrix M
+        // is known and invertible (pure signed-permutation), so raw = M^T *
+        // observed_wrong_output recovers which native axis actually responded
+        // to each physical roll/pitch/yaw input. Solving for the new rotation
+        // that maps that native axis to the correct P/Q/R sign lands exactly
+        // on three of ArduPilot's own named rotations (cross-checked against
+        // AP_Math/vector3.cpp Vector3::rotate(), not just pattern-matched):
+        //   imu1 (PC2,  ICM-20649): ROTATION_ROLL_180  y=-y,     z=-z
+        //   imu2 (PE4,  ICM-20948): ROTATION_YAW_90    x=-y_old, y=x_old
+        //   imu3 (PC13, ICM-20602): ROTATION_YAW_180   x=-x,     y=-y
+        // Bench-confirm again after this change (tilt nose-down -> +pitch,
+        // right-wing-down -> +roll, nose-right -> +yaw; tools/telemetry.py)
+        // before trusting it for flight — this fixes the specific symptom
+        // reported, not a from-scratch re-derivation of the physical mount.
         if (imu1.read(a, g)) {
+            // ROTATION_ROLL_180 → NED z-down: [x, -y, -z]
+            const float ra[3] = { a[0], -a[1], -a[2] };
+            const float rg[3] = { g[0], -g[1], -g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[0].accel[k] = a[k] - g_cal.accel_bias[0][k];
-                g_imu[0].gyro[k]  = g[k] - g_cal.gyro_bias[0][k];
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
             }
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu2.read(a, g)) {
+            // ROTATION_YAW_90 → NED z-down: [-y, x, z]
+            const float ra[3] = { -a[1], a[0], a[2] };
+            const float rg[3] = { -g[1], g[0], g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[1].accel[k] = a[k] - g_cal.accel_bias[1][k];
-                g_imu[1].gyro[k]  = g[k] - g_cal.gyro_bias[1][k];
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
             }
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
         if (imu3.read(a, g)) {
+            // ROTATION_YAW_180 → NED z-down: [-x, -y, z]
+            const float ra[3] = { -a[0], -a[1], a[2] };
+            const float rg[3] = { -g[0], -g[1], g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[2].accel[k] = a[k] - g_cal.accel_bias[2][k];
-                g_imu[2].gyro[k]  = g[k] - g_cal.gyro_bias[2][k];
+                g_imu[2].accel[k] = ra[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = rg[k] - g_cal.gyro_bias[2][k];
             }
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
@@ -346,7 +359,6 @@ static THD_FUNCTION(CANThread, arg)
 /* ══════════════════════════════════════════════════════════════════════════
  * I2CThread — 200 Hz  NORMALPRIO+20
  * Calls each registered I2C device's poll function once per tick.
- * DISABLED (not created below) — see main.cpp's commented i2c_drv_init().
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
 {
@@ -1003,8 +1015,13 @@ static void usb_cmd_dispatch(const char *line)
         // primary slot's chip was identified as ICM-20649 (0xE1) rather than
         // the originally-assumed ICM-20948 (0xEA); kept as a permanent bench
         // diagnostic since board-to-board IMU population has already varied
-        // once (see src/coms/SPI.hpp).
-        chprintf((BaseSequentialStream *)&SDU1, "HW,IMU0,whoami=0x%02X\r\n", (unsigned)imu1.whoami());
+        // once (see src/coms/SPI.hpp). Distinct tag from "HW,IMU0" (the valid
+        // flag printed above) — sharing that tag used to clobber it in any
+        // parser keying rows by tag name (tools/hw_status.py included: it
+        // showed IMU0 as permanently invalid because this line, printed
+        // after the valid-flag loop, overwrote the "1"/"0" it had just
+        // parsed with this line's "whoami=0x.." string instead).
+        chprintf((BaseSequentialStream *)&SDU1, "HW,IMU0WHOAMI,0x%02X\r\n", (unsigned)imu1.whoami());
         chprintf((BaseSequentialStream *)&SDU1, "HW,CANIMU,%u\r\n", (unsigned)can_imu_snap.valid);
         chprintf((BaseSequentialStream *)&SDU1, "HW,BARO,%u\r\n", (unsigned)baro_snap.valid);
         chprintf((BaseSequentialStream *)&SDU1, "HW,STRAIN,%u\r\n", (unsigned)strain_snap.valid);
@@ -1117,34 +1134,26 @@ static void usb_cmd_dispatch(const char *line)
         }
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "I2C,scan") == 0) {
-        // DISABLED — I2CD2 is never started (i2c_drv_init() commented out in
-        // main.cpp), so touching it here would be a call into a driver
-        // that's still in its reset state. Re-enable alongside main.cpp's
-        // i2c_drv_init() call.
-        //
         // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
         // Use a 2 ms timeout per probe so a stuck device can't hang the scan
         // forever and starve the I2CThread of bus access.
-        // uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
-        // uint8_t dummy[1];
-        // i2cAcquireBus(&I2CD2);
-        // for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-        //     if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
-        //         acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
-        //     }
-        // }
-        // i2cReleaseBus(&I2CD2);
-        // chMtxLock(&s_usb_write_mtx);
-        // for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-        //     if (acked[addr >> 3] & (1U << (addr & 7U))) {
-        //         chprintf((BaseSequentialStream *)&SDU1,
-        //                  "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
-        //     }
-        // }
-        // chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
-        // chMtxUnlock(&s_usb_write_mtx);
+        uint8_t acked[16] = {};  // bitmask: bit (addr&7) of byte (addr>>3)
+        uint8_t dummy[1];
+        i2cAcquireBus(&I2CD2);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (i2cMasterReceiveTimeout(&I2CD2, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
+                acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
+            }
+        }
+        i2cReleaseBus(&I2CD2);
         chMtxLock(&s_usb_write_mtx);
-        chprintf((BaseSequentialStream *)&SDU1, "I2C,ERR,disabled\r\n");
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (acked[addr >> 3] & (1U << (addr & 7U))) {
+                chprintf((BaseSequentialStream *)&SDU1,
+                         "I2C,SCAN,0x%02x,ack\r\n", (unsigned)addr);
+            }
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
         chMtxUnlock(&s_usb_write_mtx);
 #ifdef BPRL_TIMING
     } else if (strcmp(line, "TIM,status") == 0) {
@@ -1800,20 +1809,14 @@ void threads_start(const ThreadRates &rates)
     // deliberate, still-in-progress staged config. ──
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-#if defined(BPRL_BOARD_CUBEBLUE)
-    // Cube Blue bring-up, stage 1: root cause (linker script offset, see
-    // main.cpp) fixed and confirmed — board boots, USB CDC TX/RX both work,
-    // all sensors read correctly (python3 tools/hw_status.py). ControlThread
-    // stays disabled on purpose: it's the thread that calls
-    // motor_output_write() during normal (non-test) operation, and
-    // motor_output_init() hasn't been re-enabled either — hold both for a
-    // deliberate, separate stage. I2CThread stays off too — this board's
-    // sensors are all SPI, no I2C peripheral to poll.
-    // chThdCreateStatic(waControl, sizeof(waControl), NORMALPRIO + 22, ControlThread, (void *)&rates.control);
-#else
+    // Cube Blue bring-up, stage 2: ControlThread re-enabled and confirmed
+    // stable. I2CThread is TEMPORARILY back off here — see main.cpp's
+    // i2c_drv_init() call site for why (CAL,set replies going silent,
+    // still being isolated). Re-enable this alongside i2c_drv_init() there.
+#if !defined(BPRL_BOARD_CUBEBLUE)
     chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
-    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
 #endif
+    chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);

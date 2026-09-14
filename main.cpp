@@ -44,48 +44,13 @@
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
 #include "src/sensors/StrainRate.hpp"
+#include "src/sensors/StrainGauge.hpp"
 #include "src/sensors/EncoderRPM.hpp"
 #include "src/coms/PWM.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/usb_serial.hpp"
 #include "configs/DroneConfig.hpp"
 #include "chprintf.h"
-#include <cstdarg>
-
-/* ══════════════════════════════════════════════════════════════════════════
- * TEMPORARY — Cube Blue hardware bring-up diagnostic (remove once confirmed
- * stable). Neither Cube board has a usable status LED, so the old staged
- * LED-blink diagnostic below is silent on real hardware and was never a
- * valid signal. This prints boot-stage text instead, over the same built-in
- * USB port (SDU1, micro USB / OTG_FS) used to flash — no Telem UART needed.
- *
- * Trade-off vs. a wired UART: SDU1 doesn't exist as a channel until
- * usb_serial_init() runs and the host enumerates it, so anything that hangs
- * before that point — including the clock/PWR bring-up in stm32_clock_init()
- * now wired up via __early_init() (see board.c) — produces NO output at all,
- * just a Cube that never shows up as a serial port. That silence is still
- * informative (narrows the hang to at-or-before usb_serial_init()); it just
- * can't distinguish clock init vs. chSysInit() vs. USB bring-up itself the
- * way per-stage UART prints could. If it comes to that, a wired UART on
- * either Telem port is the fallback for finer resolution.
- *
- * chprintf()'s normal SDU1 write blocks with an infinite timeout — first
- * boot showed the device enumerate, then silently reset on the IWDG ~30 s
- * later every time, which is what an indefinite block looks like (nothing
- * downstream of it, including the IWDG-feed loop, ever runs again). Bounded
- * to 100 ms so a slow/absent host can't wedge the watchdog feed. */
-static void DBG_PRINTF(const char *fmt, ...)
-{
-    char buf[128];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = chvsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
-    if (n > 0) {
-        chnWriteTimeout((BaseAsynchronousChannel *)&SDU1, (const uint8_t *)buf,
-                         (size_t)n, TIME_MS2I(100));
-    }
-}
 
 int main(void)
 {
@@ -134,8 +99,6 @@ int main(void)
 
     usb_serial_init();
     chThdSleepMilliseconds(1500);   /* wait for host USB enumeration */
-    DBG_PRINTF("\r\n\r\nBOOT: usb_serial_init() OK — halInit()/chSysInit() also"
-               " succeeded, since we got this far\r\n");
 
     /* ══════════════════════════════════════════════════════════════════════
      * Thread rate sequencer
@@ -169,20 +132,22 @@ int main(void)
     // a real feature added since. Cube Blue keeps its own deliberate,
     // still-in-progress staged config. ──
 #if defined(BPRL_BOARD_CUBEBLUE)
-    // Cube Blue bring-up, stage 1: root cause found and fixed (linker
-    // script had the app linked at 0x08000000 — flash address zero, on top
-    // of the board's own 128 KB bootloader reservation — so the bootloader
-    // never jumped to the app at all; see boards/CubeBlueH7/STM32H743xI.ld).
-    // Confirmed booting + USB CDC TX/RX both working, all sensors reading
-    // correctly (python3 tools/hw_status.py). motor_output_init() and
-    // ControlThread (src/threads.cpp) stay disabled on purpose until this
-    // stage is confirmed stable — ControlThread is what actually calls
-    // motor_output_write() outside of a USB "MT," test command. i2c_drv_init()/
-    // strain_rate_init() stay off too — this board's sensors are all SPI.
-    // motor_output_init();
+    // Cube Blue bring-up, stage 2: motor_output_init()/ControlThread
+    // re-enabled and confirmed stable (linker fix, boot, USB, all sensors
+    // reading via python3 tools/hw_status.py). i2c_drv_init()/I2CThread/
+    // strain_gauge_init() are TEMPORARILY back off — re-enabling them
+    // this session lined up with CAL,set replies going silent
+    // (tools/calibrate.py: "No response to CAL,set for IMU0"). A lock-
+    // ordering bug in StrainGauge.cpp's error path (i2c_drv_reset() called
+    // before releasing the I2C bus, unlike StrainRate.cpp's pattern) was
+    // found and fixed, but the symptom persisted after that fix, so I2C is
+    // parked off here again until the actual cause is isolated — re-enable
+    // by uncommenting the three lines below once that's done.
+    motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
-    // i2c_drv_init();
-    // strain_rate_init();
+    // i2c_drv_init();      // start I2CD2 at 400 kHz
+    // strain_gauge_init(); // register I2C 0x09/0x10 strain gauge array nodes
+    // strain_rate_init();  // mutually exclusive with strain_gauge_init() above
     encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #else
@@ -194,14 +159,11 @@ int main(void)
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #endif
     threads_start(kRates);
-    DBG_PRINTF("BOOT: threads_start() returned\r\n");
 
     /* Main thread: low-priority idle, feeds IWDG. */
-    uint32_t alive = 0;
     while (true) {
         IWDG1->KR = 0xAAAAU;   /* kick watchdog every second */
         chThdSleepMilliseconds(1000);
-        DBG_PRINTF("ALIVE %lu\r\n", (unsigned long)alive++);
     }
     return 0;
 }

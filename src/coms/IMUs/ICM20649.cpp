@@ -73,7 +73,13 @@ bool ICM20649::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     reg_write(B2_GYRO_CFG1,    GYRO_FS_2000DPS_20649 | 0x01); // ±2000 dps, DLPF on
     reg_write(B2_ACCEL_SMPL_1, 0x00);
     reg_write(B2_ACCEL_SMPL_2, 0x00); // 1.125 kHz ODR
-    reg_write(B2_ACCEL_CFG,    0x19); // ±30 g (max range — same raw FS_SEL
+    // 0x1F = DLPFCFG(0b011=3)<<3 | ACCEL_FS_SEL(0b11)<<1 | FCHOICE(1) — same
+    // bit pattern as ICM20948.cpp's fix, for the same reason: the old value
+    // (0x19) omitted the FS_SEL bits (bits[2:1]=00 -> chip's MINIMUM range,
+    // not ±30g/max range as the old comment claimed), while ACCEL_SCALE
+    // still assumed max-range 1024 LSB/g. Found via bench accel Z reading
+    // ~8x gravity on this chip's lane.
+    reg_write(B2_ACCEL_CFG,    0x1F); // ±30 g (max range — same raw FS_SEL
                                        // bits as ICM-20948's ±16g setting;
                                        // see ACCEL_SCALE above), DLPF on
 
