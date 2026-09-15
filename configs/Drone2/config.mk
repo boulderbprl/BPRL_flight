@@ -3,8 +3,19 @@
 # Sets exactly what the old BOARD=blue branch used to set.
 
 BOARD_FULL  = CubeBlueH7
-# Drone2's ESCs are standard PWM (1000-2000 us pulses on FMU CH1-4), not
-# DShot — override the project-wide DShot default here. See src/coms/PWM.hpp.
+# Drone2's ESCs are standard PWM (1000-2000 us pulses), not DShot — override
+# the project-wide DShot default here. See src/coms/PWM.hpp.
+#
+# MOTOR_PROTO_IOMCU (not MOTOR_PROTO_PWM): this board's AUX outputs
+# (MOTOR_PROTO_PWM, FMU TIM1/TIM4) were bench-confirmed unreliable — only
+# one of four channels ever connects, and even that one can't be
+# throttle-controlled. Reproduced under stock ArduPilot firmware on the
+# same hardware, ruling out this project's firmware as the cause. MAIN 1-4,
+# driven by the carrier board's separate IO co-processor instead of the
+# FMU's own timers, worked correctly under ArduPilot on the same board —
+# hence MOTOR_PROTO_IOMCU (see src/coms/IOMCU.hpp). If AUX is ever fixed at
+# the hardware level (or a different Cube Blue unit is used), MOTOR_PROTO_PWM
+# is the fallback to revert to; it's unchanged and still fully functional.
 #
 # -DSTM32H743xx: this is the physically-correct chip for Cube Blue (confirmed
 # by the user against real hardware and against ArduPilot's own "CubeOrange"
@@ -28,4 +39,4 @@ BOARD_FULL  = CubeBlueH7
 # the MCU was booting on the ~64 MHz HSI reset default the entire time. If
 # Cube Blue still doesn't boot with both fixes in place, this define — not
 # the H743 chip macro — is the next thing to suspect/revert.
-BOARD_UDEFS = -DSTM32H743xx -DSTM32_ENFORCE_H7_REV_XY -DBPRL_BOARD_CUBEBLUE -DMOTOR_PROTOCOL=MOTOR_PROTO_PWM
+BOARD_UDEFS = -DSTM32H743xx -DSTM32_ENFORCE_H7_REV_XY -DBPRL_BOARD_CUBEBLUE -DMOTOR_PROTOCOL=MOTOR_PROTO_IOMCU

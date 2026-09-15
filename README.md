@@ -69,6 +69,26 @@ BPRL_flight/
 │   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
 │   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
 │   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
+│   │       ⚠️ DO NOT switch this to the external Ramtron/FM25 SPI FRAM chip
+│   │       without a lot more bench care than a first attempt got. Tried once
+│   │       (2026-09-14): added an SPI2/FRAM driver + repurposed the CalFlash
+│   │       backend for CubeOrangePlus/CubeBlueH7, and Cube Blue immediately
+│   │       started crash-looping (briefly enumerates as the PX4 bootloader,
+│   │       2dae:1017, then vanishes — repeating). Reverting every line of
+│   │       that change did NOT fix it — the exact pre-change binary
+│   │       (byte-identical build size to the last confirmed-good one) still
+│   │       crash-looped after reflashing. Only reflashing something entirely
+│   │       different (ArduPilot, then an older commit) got the board
+│   │       responding again; after that, this project's current code worked
+│   │       fine too. That points at some persistent hardware/peripheral
+│   │       state (GPIO/SPI2/RAM-adjacent) that the SPI2 pin config or FRAM
+│   │       transaction latched into a bad state and normal resets didn't
+│   │       clear — not a straightforward source-level bug reachable by
+│   │       reading the diff. The attempt (driver, board.c pin config,
+│   │       CalFlash dispatch) has been fully removed from the tree. If this
+│   │       gets revisited, do it on a board you can fully power-cycle
+│   │       (unplug, not just reset) between every single test, and suspect
+│   │       PD10/SPI2 specifically before anything else.
 │   │
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
 │   │   ├── PID.hpp/.cpp                 PID base class with derivative filter + anti-windup
@@ -565,15 +585,33 @@ make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
 # see Timing and Utilization below)
 make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING
 
-# Clean build directory
+# Clean build directory (wipes ALL drones'/flags' build/.dep — see below)
 make clean
 ```
 
 The old `BOARD=blue`/`BOARD=orange` selector is retired — `make BOARD=...` now fails with a clear error pointing at `DRONE=` instead of silently building whatever `DRONE` defaults to (a silent wrong-drone build is a worse failure mode on a flight controller than a build error). See [Per-drone configuration](#per-drone-configuration) above.
 
-Build artefacts are written to `build/BPRL.bin` and `build/BPRL.hex`. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile). Switching `DRONE=` doesn't segregate `build/` by drone — run `make clean` when switching, the same as was needed switching `BOARD=` before.
+Build artefacts are written to `build/<DRONE>/BPRL.bin` and `build/<DRONE>/BPRL.hex` (e.g. `build/Drone2/BPRL.bin`), or `build/<DRONE>-<UDEFS_EXTRA>/` (e.g. `build/Drone2-BPRL_DEBUG/`) when `UDEFS_EXTRA` is set — **segregated per-drone AND per-UDEFS_EXTRA**, so switching either is always safe with no `make clean` needed. This used to share a single `build/` directory across all drones (with a README note to `make clean` when switching) — real-world use showed that's exactly the kind of caveat that's easy to forget: `make`'s incremental build only compares file mtimes, so it can't detect that `BOARD_UDEFS`/`UDEFS_EXTRA` changed between invocations, and would print "Nothing to be done" while silently leaving the *previous* build in place under the new name. Compiler optimization defaults to `-O3` (`USE_OPT` in the Makefile).
+
+`make clean` (and its synonym `make clean-all`) always wipes every drone's and every flag combination's build output at once (`rm -rf build .dep`) — it ignores `DRONE=`/`UDEFS_EXTRA=` on the command line. There is no target that cleans only one drone's build; the per-drone/per-flag segregation above already makes that unnecessary in normal use.
 
 ### Upload
+
+**`UDEFS_EXTRA` is not remembered between separate `make` invocations — it must be repeated on the flash command too.** `BUILDDIR` (and therefore which `.bin` gets flashed) is recomputed from whatever `UDEFS_EXTRA` is on *that specific command line*, so:
+
+```bash
+# WRONG — builds the debug binary, then flashes the *non-debug* one instead,
+# because `make flash DRONE=Drone2` alone resolves to build/Drone2/ (no
+# UDEFS_EXTRA), not build/Drone2-BPRL_DEBUG/:
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
+make flash DRONE=Drone2 PORT=/dev/ttyACM0
+
+# CORRECT — one invocation, or repeat UDEFS_EXTRA on both:
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG flash PORT=/dev/ttyACM0
+# — or —
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG
+make flash DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG PORT=/dev/ttyACM0
+```
 
 **Via Cube USB bootloader:**
 ```bash
@@ -659,9 +697,9 @@ Classic InvenSense MPU-9250-family parts — register-based digital low-pass fil
   > **Fixed 8x accel scale bug (both ICM-20649 and ICM-20948):** `ACCEL_CFG`'s `reg_write()` used `0x19` on both chips, intending each chip's maximum accel range (±30 g / ±16 g respectively, per the driver comments and `ACCEL_SCALE` constant). `0x19` omits the `ACCEL_FS_SEL` bits entirely (`bits[2:1]=00`), which actually selects each chip's *minimum* range — while `ACCEL_SCALE` still assumed the max-range LSB/g. Net effect: every accel reading on `imu1`/`imu2` was ~8x too large (bench-confirmed: Z read ~-77 to -79 m/s² at rest instead of ~-9.8). Fixed to `0x1F` (adds the missing `FS_SEL=11` bits) in both `ICM20649.cpp` and `ICM20948.cpp`. `imu3` (ICM-20602, different register layout) was never affected.
 - **ICM-20602** (`imu3`): ±16 g / ±2000 °/s, 1 kHz ODR, DLPF **explicitly** configured — `DLPF_CFG=1` (~184 Hz gyro bandwidth), `A_DLPF_CFG=1` (99 Hz accel bandwidth).
 - **SPI mode:** MODE3 (CPOL=1, CPHA=1) for all three — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
-- **Axis rotation:** ⚠️ **bench-derived, superseding an earlier CubeOrange-hwdef transcription that was wrong.** The rotation previously carried here (transcribed from ArduPilot's `CubeOrange/hwdef.inc`, on the assumption this board is mounted the same way) was bench-tested and failed: hand-rotating the airframe about each body axis showed a consistent roll↔pitch axis swap plus a yaw sign flip on all three IMUs — this board's physical IMU mounting genuinely differs from CubeOrange's. The current rotation in `SPIThread`'s `BPRL_BOARD_CUBEBLUE` branch (`src/threads.cpp`) was derived by inverting the old (known, wrong) rotation matrix against the observed bad output to recover each chip's actual native-axis response, then solving for the rotation that corrects it — landing on three different named ArduPilot rotations: `imu1` (PC2) `ROTATION_ROLL_180`, `imu2` (PE4) `ROTATION_YAW_90`, `imu3` (PC13) `ROTATION_YAW_180`. **Bench-verify again** (tilt nose-down/right-wing-down/nose-right, confirm P/Q/R sign in `$TEL`/`$IMU` via `tools/telemetry.py`) before trusting it in the air — this fixes the specific symptom that was measured, not a from-scratch confirmation of the physical mount. A wrong pin/chip pairing fails safe (distinct WHOAMI per chip — 45686=0xE9, 20948=0xEA, 20602=0x12, 20649=0xE1 — so a mismatch just leaves `g_imu[i].valid` false rather than fusing garbage); a wrong *rotation* would not fail safe, since the chip would still report valid data, just with the wrong sign/axis mapping.
 
-**Board bring-up status:** as of this writing, Drone2 is confirmed booting, enumerating its own USB CDC identity, and reading all three IMUs valid (`python3 tools/hw_status.py`). The root cause of it never booting at all was a linker script bug — the app was linked at flash address 0, colliding with the board's own bootloader (see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld)) — not a USB or sensor bug. `ControlThread`, `motor_output_init()`, and `i2c_drv_init()`/`I2CThread` (`main.cpp`, `src/threads.cpp`) are now re-enabled (stage 2), but **not yet bench-verified** — motor output and the axis-rotation math above both need on-bench confirmation before this board is flight-ready (see the flight-systems checklist in project history/memory for the test order).
+
+**Board bring-up status:** as of this writing, Drone2 is confirmed booting, enumerating its own USB CDC identity, and reading all three IMUs valid (`python3 tools/hw_status.py`). The root cause of it never booting at all was a linker script bug — the app was linked at flash address 0, colliding with the board's own bootloader (see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld)) — not a USB or sensor bug. `ControlThread`, `motor_output_init()`, and now `i2c_drv_init()`/`I2CThread`/`strain_gauge_init()` (`main.cpp`, `src/threads.cpp`) are all re-enabled (stages 2-3), and IMU calibration (`tools/calibrate.py`) is confirmed working end-to-end. I2C was a suspect during that calibration debugging (disabling it lined up with `CAL,set` failures) but was cleared — the real bug was in `tools/calibrate.py` itself, unrelated to I2C. None of motor output, axis rotation, or I2C/the strain gauge array have had their own dedicated bench pass yet — confirm each before trusting this board in flight.
 
 ### ICM-42688 (`src/coms/IMUs/ICM42688.hpp/.cpp`) — `DRONE=Drone3`
 
@@ -741,5 +779,5 @@ make flash-stlink DRONE=Drone2
 ```
 
 **Option B — STM32CubeProgrammer (no usbipd needed):**
-Build in WSL2, then flash `build/BPRL.bin` using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08020000` for **either** Cube board (CubeBlueH7 or CubeOrangePlus) — both ship the same 128 KB BL5 bootloader reservation at the bottom of flash, so the app starts 128 KB in on both. `0x08000000` is the bootloader's own address; writing the app there overwrites/corrupts the bootloader instead of installing the app (this line used to say `0x08000000` for CubeBlueH7, which was wrong — see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld) for how this was found and fixed). Orqa (OrqaH7QuadCore) uses `0x08060000` instead — see [`boards/OrqaH7QuadCore/STM32H743xI_app.ld`](boards/OrqaH7QuadCore/STM32H743xI_app.ld) (384 KB bootloader reservation, larger than the Cube boards' since it also handles OSD font/DFU recovery).
+Build in WSL2, then flash `build/<DRONE>/BPRL.bin` (e.g. `build/Drone2/BPRL.bin`) using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08020000` for **either** Cube board (CubeBlueH7 or CubeOrangePlus) — both ship the same 128 KB BL5 bootloader reservation at the bottom of flash, so the app starts 128 KB in on both. `0x08000000` is the bootloader's own address; writing the app there overwrites/corrupts the bootloader instead of installing the app (this line used to say `0x08000000` for CubeBlueH7, which was wrong — see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld) for how this was found and fixed). Orqa (OrqaH7QuadCore) uses `0x08060000` instead — see [`boards/OrqaH7QuadCore/STM32H743xI_app.ld`](boards/OrqaH7QuadCore/STM32H743xI_app.ld) (384 KB bootloader reservation, larger than the Cube boards' since it also handles OSD font/DFU recovery).
 

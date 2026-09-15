@@ -1,8 +1,77 @@
 #include "src/coms/DShot.hpp"
+#include "src/coms/PWM.hpp"
 #include "ch.h"
 #include "hal.h"
 #include <cstring>
 #include <cstdint>
+
+// ╔══════════════════════════════════════════════════════════════════════╗
+// ║ ⚠️  DSHOT REGRESSION CHECKPOINT — 2026-09-14                           ║
+// ║ Read this whole block before touching DShot.cpp if bidirectional      ║
+// ║ DShot ever misbehaves after this date. DShot itself was NOT           ║
+// ║ intentionally changed here — this note exists because this file got   ║
+// ║ touched (twice) as a side effect of debugging CubeBlueH7's separate,  ║
+// ║ unrelated standard-PWM output (src/coms/PWM.cpp, MOTOR_PROTO_PWM),    ║
+// ║ and DShot has a known history of being painful to re-debug from       ║
+// ║ scratch. Two distinct changes landed, both explained below. If        ║
+// ║ CubeOrangePlus/Orqa DShot (MOTOR_PROTO_DSHOT boards) regresses and    ║
+// ║ you trace it here, the fix is almost certainly to revert change #2    ║
+// ║ (mcuconf.h/halconf.h), not #1 — see why below.                        ║
+// ╚══════════════════════════════════════════════════════════════════════╝
+//
+// CHANGE #1 (this file): wrapped in `#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT`
+// -----------------------------------------------------------------------
+// Before this, DShot.cpp's raw ISR vector handlers for TIM1/TIM4
+// (OSAL_IRQ_HANDLER below) were always linked in regardless of
+// MOTOR_PROTOCOL — only whether dshot_init()/dshot_write() ever get *called*
+// was protocol-gated (in PWM.cpp), not whether this file's content existed
+// at all. That was harmless as long as PWM.cpp's own MOTOR_PROTO_PWM path
+// also used raw TIM1/TIM4 registers (no ChibiOS driver involved -> no
+// vector ownership conflict). It stopped being harmless once PWM.cpp's
+// MOTOR_PROTO_PWM path switched to ChibiOS's own PWMDriver (change #2
+// below) for TIM1/TIM4 on CubeBlueH7: ChibiOS's PWM driver generates its
+// own vector handlers for those same interrupts, and linking both produced
+// "multiple definition of VectorXX" at build time (a link error, caught
+// immediately — this could not have silently miscompiled).
+//   RISK TO DSHOT BOARDS: effectively none. On CubeOrangePlus/Orqa,
+//   MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT is always true (PWM.hpp's default,
+//   unless a config.mk explicitly overrides it — only Drone2's does), so
+//   this #if evaluates true and every line below compiles exactly as it did
+//   before this change, verbatim, with nothing removed or reordered.
+//   TO FULLY UNDO: delete this whole comment block, the
+//   `#include "src/coms/PWM.hpp"` line above, the `#if MOTOR_PROTOCOL ==
+//   MOTOR_PROTO_DSHOT` below, and the matching `#endif // MOTOR_PROTOCOL ==
+//   MOTOR_PROTO_DSHOT` at the very end of this file (after the existing
+//   `#endif // BPRL_BOARD_ORQA`).
+//
+// CHANGE #2 (elsewhere): src/coms/PWM.cpp's MOTOR_PROTO_PWM path rewritten
+// to use ChibiOS's own PWMDriver instead of hand-rolled TIM1/TIM4 registers
+// -----------------------------------------------------------------------
+// This is the change that actually motivated #1, and the one to suspect
+// first if DShot regresses. It touches shared config files, not DShot.cpp
+// itself, but those files are NOT board-conditional by default in ChibiOS,
+// so a mistake here is the more plausible way to affect DShot boards:
+//   - cfg/halconf.h: HAL_USE_PWM is now `#if defined(BPRL_BOARD_CUBEBLUE)
+//     TRUE #else FALSE #endif` (was unconditionally FALSE before).
+//   - cfg/mcuconf.h: STM32_PWM_USE_TIM1 / STM32_PWM_USE_TIM4 are now the
+//     same BPRL_BOARD_CUBEBLUE-gated TRUE/FALSE (were unconditionally
+//     FALSE before).
+//   Both are explicitly gated so DShot boards (BPRL_BOARD_CUBEBLUE not
+//   defined) keep FALSE/FALSE, identical to before — ChibiOS's PWM driver
+//   should not even compile in for them. If that gate is ever wrong or
+//   gets "simplified" back to unconditional TRUE, that's the regression:
+//   it would silently pull ChibiOS's PWM driver init into DShot boards'
+//   startup path (RCC/NVIC touches for TIM1/TIM4) alongside DShot's own
+//   raw register bring-up of those same timers, with no build error to
+//   catch it this time.
+//   TO FULLY UNDO: in cfg/halconf.h and cfg/mcuconf.h, replace the
+//   BPRL_BOARD_CUBEBLUE-gated blocks with plain `FALSE` for HAL_USE_PWM /
+//   STM32_PWM_USE_TIM1 / STM32_PWM_USE_TIM4, and revert src/coms/PWM.cpp's
+//   MOTOR_PROTO_PWM branch to hand-rolled register writes (see git history
+//   around this date for the prior version) — or simplest of all, `git
+//   diff`/`git checkout` this whole set of files against the commit before
+//   2026-09-14's PWM debugging session started.
+#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
 
 /*
  * DShot600 bidirectional.
@@ -1200,4 +1269,6 @@ void dshot_get_diag(DShotDiag *out)
     chSysUnlock();
 }
 
-#endif
+#endif // BPRL_BOARD_ORQA
+
+#endif // MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT

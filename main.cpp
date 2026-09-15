@@ -30,8 +30,19 @@
  *   1. Write: void my_poll(void *ctx)
  *   2. Add: bprl_i2c_register(MY_ADDR, my_poll, nullptr);  below.
  *
- * ── Switching motor protocol to DShot ───────────────────────────────────────
- *   Replace the body of motor_output_write() in src/coms/PWM.cpp only.
+ * ── Switching motor protocol ─────────────────────────────────────────────────
+ *   Set MOTOR_PROTOCOL in src/coms/PWM.hpp (or -DMOTOR_PROTOCOL=... in a
+ *   drone's config.mk, see configs/Drone2/config.mk for the pattern):
+ *     MOTOR_PROTO_DSHOT (default) / MOTOR_PROTO_PWM — Cube AUX2-5 or Orqa
+ *       MOT1-4, driven directly by FMU timers (src/coms/DShot.*, PWM.cpp).
+ *     MOTOR_PROTO_IOMCU — Cube carrier boards' MAIN 1-4, driven by the
+ *       carrier board's separate IO co-processor over UART instead of FMU
+ *       timers (src/coms/IOMCU.hpp) — for boards where AUX is unreliable.
+ *       Uses USART6 (PC6/PC7) — do not also set RADIO_PROTOCOL=SBUS on a
+ *       board using this; SBUS wants the same USART6/PC7 pin pair (see
+ *       "Switching radio protocol" below) and the two would conflict. CRSF,
+ *       the actual default on Cube boards, uses USART2/TELEM1 instead and
+ *       does not conflict.
  *
  * ── Switching radio protocol ────────────────────────────────────────────────
  *   Change RADIO_PROTOCOL in src/coms/Radio.hpp (or pass -DRADIO_PROTOCOL=...
@@ -132,22 +143,21 @@ int main(void)
     // a real feature added since. Cube Blue keeps its own deliberate,
     // still-in-progress staged config. ──
 #if defined(BPRL_BOARD_CUBEBLUE)
-    // Cube Blue bring-up, stage 2: motor_output_init()/ControlThread
-    // re-enabled and confirmed stable (linker fix, boot, USB, all sensors
-    // reading via python3 tools/hw_status.py). i2c_drv_init()/I2CThread/
-    // strain_gauge_init() are TEMPORARILY back off — re-enabling them
-    // this session lined up with CAL,set replies going silent
-    // (tools/calibrate.py: "No response to CAL,set for IMU0"). A lock-
-    // ordering bug in StrainGauge.cpp's error path (i2c_drv_reset() called
-    // before releasing the I2C bus, unlike StrainRate.cpp's pattern) was
-    // found and fixed, but the symptom persisted after that fix, so I2C is
-    // parked off here again until the actual cause is isolated — re-enable
-    // by uncommenting the three lines below once that's done.
+    // Cube Blue bring-up, stage 3: motor_output_init()/ControlThread
+    // (stage 2) and now i2c_drv_init()/I2CThread (stage 3) all re-enabled.
+    // I2C was a suspect during IMU calibration debugging (disabling it
+    // lined up with tools/calibrate.py's "No response to CAL,set"
+    // failures) but was cleared — disabling it entirely did not fix that
+    // symptom, and the actual cause was a race in calibrate.py's own
+    // background reader thread (fixed there, unrelated to firmware). Not
+    // yet bench-verified running on its own on this board, though —
+    // exercise the strain gauge array (I2C 0x09/0x10, StrainGauge.hpp)
+    // before trusting it in flight.
     motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
-    // i2c_drv_init();      // start I2CD2 at 400 kHz
-    // strain_gauge_init(); // register I2C 0x09/0x10 strain gauge array nodes
-    // strain_rate_init();  // mutually exclusive with strain_gauge_init() above
+    i2c_drv_init();        // start I2CD2 at 400 kHz
+    strain_gauge_init();   // register I2C 0x09/0x10 strain gauge array nodes
+    // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
     encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #else

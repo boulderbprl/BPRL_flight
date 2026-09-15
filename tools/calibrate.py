@@ -20,7 +20,7 @@ import argparse
 import time
 
 from bprl_common import (
-    console, open_port, add_port_args, SerialReader,
+    console, open_port, add_port_args,
     parse_imu_line,
 )
 
@@ -88,14 +88,19 @@ def cmd_calibrate(ser, args):
             console.print(f"[red]CAL,clear failed: {resp} — aborting.")
         return
 
-    # Only start the background reader now, for the passive collection phase.
-    # Starting it earlier would race the direct ser.read() calls above (and
-    # the CAL,set/commit/query calls below) for bytes on the same serial
-    # object — pyserial doesn't fan out one read() to multiple threads, so
-    # whichever reader's blocking read happens to be live "wins" a given
-    # chunk and the other sees nothing.
-    reader = SerialReader(ser)
-
+    # Collect synchronously on the main thread — no background SerialReader
+    # here. It used to run one for this phase, stopped via reader.stop()
+    # before the write phase below. reader.stop()'s self._thread.join(
+    # timeout=2.0) does not guarantee the thread actually exited (join()
+    # with a timeout returns regardless, and this code never checked
+    # is_alive() afterward) — if that background thread were ever still
+    # mid-read() past the join, it would race the write phase's own
+    # ser.read() calls for whatever bytes arrive next, including the
+    # CAL,SET reply, exactly the "whichever reader's blocking read happens
+    # to be live wins a chunk, the other sees nothing" scenario the old
+    # comment here warned about but didn't fully close off. Reading
+    # directly on this one thread for the entire function removes the
+    # possibility outright rather than relying on the join timeout.
     console.print(f"Collecting {duration} s of IMU data...")
 
     sums_gyro  = [[0.0]*3 for _ in range(3)]
@@ -103,25 +108,27 @@ def cmd_calibrate(ser, args):
     counts     = [0, 0, 0]
     t_end      = time.monotonic() + duration
 
+    buf = b""
     with Progress(transient=True) as prog:
         task = prog.add_task("Collecting...", total=duration)
         while time.monotonic() < t_end:
-            for line in reader.pop_lines():
-                s = parse_imu_line(line)
-                if s is None:
-                    continue
-                for i in range(3):
-                    if not s.valid[i]:
+            chunk = ser.read(256)   # paced by the port's own read timeout
+            if chunk:
+                buf += chunk
+                while b"\n" in buf:
+                    line_b, buf = buf.split(b"\n", 1)
+                    s = parse_imu_line(line_b.decode("ascii", errors="replace").strip())
+                    if s is None:
                         continue
-                    counts[i] += 1
-                    for k in range(3):
-                        sums_gyro[i][k]  += s.gyro[i][k]
-                        sums_accel[i][k] += s.accel[i][k]
+                    for i in range(3):
+                        if not s.valid[i]:
+                            continue
+                        counts[i] += 1
+                        for k in range(3):
+                            sums_gyro[i][k]  += s.gyro[i][k]
+                            sums_accel[i][k] += s.accel[i][k]
             elapsed = duration - (t_end - time.monotonic())
             prog.update(task, completed=min(elapsed, duration))
-            time.sleep(0.05)
-
-    reader.stop()
 
     # Not every board populates all 3 IMU slots (e.g. Orqa has only 2 physical
     # IMUs — g_imu[2] is never written, so counts[2] stays 0 forever). Only

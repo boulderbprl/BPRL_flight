@@ -48,6 +48,18 @@ bprl_can_register(0x10, my_callback, nullptr);
 
 ## DShot — Bidirectional DShot 600 (`DShot.hpp/.cpp`)
 
+> ⚠️ **If DShot ever regresses on CubeOrangePlus/Orqa, start at the "DSHOT
+> REGRESSION CHECKPOINT" comment at the top of `DShot.cpp`.** It documents
+> two changes made on 2026-09-14 while debugging CubeBlueH7's *separate*
+> standard-PWM output (`PWM.cpp`, `MOTOR_PROTO_PWM`) — DShot.cpp got touched
+> only as a side effect (wrapped in `#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT`
+> so it compiles to nothing on a PWM-protocol board), and `cfg/mcuconf.h`/
+> `cfg/halconf.h` gained board-conditional `STM32_PWM_USE_TIM1`/`TIM4`/
+> `HAL_USE_PWM` flags for ChibiOS's own PWM driver. Both are explicitly
+> gated off for DShot boards and should be no-ops for them, but the
+> checkpoint comment gives the exact revert steps if that gate is ever
+> wrong.
+
 Motor output protocol is selected at compile time via `MOTOR_PROTOCOL` in `PWM.hpp`:
 
 ```cpp
@@ -67,6 +79,10 @@ TIM1 carries 3 motors sharing one timer via ArduPilot's CC2 cross-capture trick 
 | 1 | PE9  | TIM1 CH1 |
 | 2 | PD13 | TIM4 CH2 |
 | 3 | PE13 | TIM1 CH3 |
+
+**⚠️ These pins are the Cube carrier board's AUX outputs (AUX2-5), not MAIN.** Specifically: motor 0 (FR)→AUX3, motor 1 (RL)→AUX4, motor 2 (FL)→AUX5, motor 3 (RR)→AUX2. On real Cube/Pixhawk-family hardware, **MAIN 1-8 is driven by a separate IO co-processor** (a small STM32F1-class chip) that the main FMU talks to over a dedicated serial link — `PE9`/`PE11`/`PE13`/`PD13` above are direct FMU timer pins, which only ever reach the AUX connector, not MAIN. Plugging ESCs into MAIN 1-4 while running `MOTOR_PROTO_PWM`/`MOTOR_PROTO_DSHOT` gets you a real board that boots, a real signal generated correctly in firmware, and zero volts at the ESC — nothing drives those pins from this path, so the ESCs sit there beeping their own "no signal" alert forever.
+>
+> **Update**: on CubeBlueH7, AUX itself later turned out to be unreliable at the hardware level (bench-confirmed, and independently reproduced under stock ArduPilot firmware on the same unit) — see the **IOMCU** section below for the driver that talks to the IO co-processor directly and drives MAIN 1-4 instead. If you're on AUX and it's working fine, no need to switch; if AUX is flaky like it was here, `MOTOR_PROTO_IOMCU` is the fix, not a wiring change.
 
 - **TX** (burst DMA, 400 Hz): TIM1 via `TIM1_UP→DMAR`, DCR burst of 4 CCRs (DBL=3, FIFO+INCR4) covers CH1/CH2/CH3 simultaneously (CH4 column always 0, never CC4E-enabled — pure padding to reach a DMA-supported burst size). TIM4 via `TIM4_UP→DMAR`, DBL=0 (single CCR, CH2 only).
 - **RX — GCR telemetry:** TIM1's dedicated IC stream rotates across CH1/CH2/CH3 (~133 Hz each motor, via the CC2 cross-capture trick — CC2S selects TI2 direct for motor 0 or TI1 cross for motor 1, so only 2 distinct DMAMUX capture IDs cover 3 motors). TIM4 captures every frame (400 Hz, no rotation needed for a single motor).
@@ -99,6 +115,32 @@ Both boards' `dshot_write(throttle[4])` takes throttle values in **physical DSho
 | 0 | 0 | Disarm / stop |
 | 1 | 48 | Minimum throttle |
 | 1000 | 2047 | Full throttle |
+
+---
+
+## IOMCU — Cube carrier boards' MAIN 1-4 (`IOMCU.hpp/.cpp`, `MOTOR_PROTO_IOMCU`)
+
+Every Cube/Pixhawk-family carrier board has a **second MCU** (a factory-present, separate STM32F1-class "IO co-processor") that drives the **MAIN 1-8** connector — electrically independent of the FMU's own AUX outputs (`DShot`/`PWM` above, TIM1/TIM4). This driver talks to that already-running chip over a UART; it does **not** implement or flash any firmware onto it — whatever's already on the IO co-processor (from its last ArduPilot session, or the factory) is what this driver talks to.
+
+**Why this exists**: CubeBlueH7's AUX outputs were bench-confirmed unreliable — only one of four channels ever connects, and even that one can't be throttle-controlled — and the same failure was independently reproduced under **stock ArduPilot firmware** on the same hardware, ruling out this project's firmware as the cause. ArduPilot's own MAIN 1-4 test on the same board worked correctly. `MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU` (set in `configs/Drone2/config.mk`) is the result.
+
+**Scope is deliberately minimal** — PWM output only. No RC passthrough, no failsafe mixing, no DShot-via-IOMCU, no telemetry/status readback, no safety-switch state machine, no firmware CRC-check/reflash. ArduPilot's own `AP_IOMCU`/`iofirmware` implement all of that; none of it is needed here, and pulling it in would multiply the risk surface for no benefit on this board. `MOTOR_PROTO_PWM` (AUX, unchanged) remains the fallback if AUX is ever fixed at the hardware level or a different unit is used.
+
+**Interface**: USART6, PC6=TX/PC7=RX, AF7 — reserved for exactly this purpose by comments already in this codebase before this driver existed (`cfg/mcuconf.h`'s `STM32_SERIAL_USE_USART6` and `src/coms/SBUS.cpp` both call it out as "FMU<->IOMCU bridge; not used by firmware"). 1,500,000 baud, 8N1.
+
+**Protocol**: register-based request/response packets (not copied from ArduPilot's source — reimplemented from its wire format). `byte0 = count(6 bits) | code(2 bits)<<6`, `byte1 = crc`, `byte2 = page`, `byte3 = offset`, then `count` little-endian `uint16` registers (max 22, so max packet 48 bytes). CRC-8, poly 0x07, init 0, no reflection, no final XOR, computed with the `crc` byte itself zeroed. A write's reply is always a fixed 4-byte ACK. Reads use a compact 4-byte request (CRC over just those 4 bytes) — the modern IO firmware accepts this.
+
+**Two silent-failure gates that are easy to under-scope** (both are one-time writes in `iomcu_init()`, `PAGE_SETUP`=50):
+- `CHANNEL_MASK` (offset 27) defaults to **0** on the IO's own boot — miss this and every channel stays at zero output forever, with every packet still ACKing `CODE_SUCCESS`. No error, ever.
+- Safety: either `FORCE_SAFETY_OFF` (offset 12, magic value `22027`) or `IGNORE_SAFETY` (offset 20, channel bitmask) — without one of these the IO silently zeroes PWM output regardless of what's written to `PAGE_DIRECT_PWM`, gated on the (possibly-never-pressed) hardware safety button.
+
+**200 ms IO-side watchdog**: if no `PAGE_DIRECT_PWM` write arrives for 200 ms, the IO zeroes every output itself. `IOMCUThread` (`src/threads.cpp`) must keep sending well above 5 Hz for as long as motor output is wanted — it targets ~400 Hz, bounded in practice by the actual UART round-trip.
+
+**Why `motor_output_write()` doesn't touch the UART directly**: a write+ACK transaction is a blocking round-trip (bounded by a 10 ms timeout in the worst case). `ControlThread` runs the 400 Hz control loop and must never block on that — injecting UART jitter into attitude control is not acceptable. So `motor_output_write()` (`PWM.cpp`'s `MOTOR_PROTO_IOMCU` branch) only calls `iomcu_set_pwm()` — an O(1) mutex lock + memcpy + unlock, no UART access at all. `IOMCUThread` is a **separate, dedicated thread** that owns `SD6` exclusively, reads the published values, and performs the actual send/ACK cycle at its own pace — decoupling control-loop timing from IO-comms timing entirely. This mirrors how `EncoderRPM.hpp`/`StrainGauge.hpp` publish sensor data into a `*Raw` struct for other threads to read, just in the write direction.
+
+**Bench bring-up order**: `IOMCU,status` (USB command) reads `PAGE_CONFIG` and should report `protocol_version=4,protocol_version2=10` — if this fails, the UART/pin/CRC plumbing itself is wrong and nothing past this point will work either; don't move on to motor testing until it passes.
+
+**Output-channel mapping**: `g_iomcu_cmd.pwm_us[i]` drives MAIN `(i+1)` — a fresh assignment (MAIN has no pre-existing physical-lane convention the way AUX's `DShot.cpp` pin table does). If a motor ends up on the wrong physical corner, that's a `MotorMixerConfig::motor_map` fix in the drone config, not a change here — same as the existing AUX/DShot output paths.
 
 ---
 

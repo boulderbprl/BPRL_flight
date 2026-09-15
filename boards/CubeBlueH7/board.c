@@ -111,8 +111,17 @@ void boardInit(void)
     palSetPadMode(GPIOD, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 9U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
 
-    /* PC7 (SBUSo/USART6) intentionally left unconfigured — SBUS disabled.
-     * RC input is CRSF on TELEM1 (USART2, PD5/PD6). */
+    /* ── USART6 — FMU<->IOMCU bridge (PC6=TX, PC7=RX) → AF7 ─────────────
+     * Talks to the carrier board's IO co-processor, which drives MAIN 1-8
+     * (src/coms/IOMCU.hpp) — only actually started (sdStart) when
+     * MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU; harmless to configure the pins
+     * unconditionally here otherwise, same as every other peripheral in
+     * this function. PC7 previously said "SBUSo/USART6, intentionally
+     * left unconfigured — SBUS disabled" — still true (RC input stays
+     * CRSF on TELEM1, USART2, PD5/PD6), this is a different, second use of
+     * the same USART6 peripheral. */
+    palSetPadMode(GPIOC, 6U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOC, 7U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
 
     /* ── USB OTG_FS — micro USB (PA11=DM, PA12=DP) → AF10 ─────────────── */
     palSetPadMode(GPIOA, 11U, PAL_MODE_ALTERNATE(10) | PAL_STM32_OSPEED_HIGHEST);

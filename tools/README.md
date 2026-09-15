@@ -257,13 +257,12 @@ The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilo
 
 Per-thread execution-time and CPU-utilization instrumentation, added to check whether the ChibiOS thread set (SPI, CAN, I2C, Control, Radio, Heartbeat, MAVLink, Debug, Log, USBCmd) is actually schedulable at its configured rates and priorities, rather than assuming it. `Control` now includes what used to be a separate `StateEst` thread's EKF work — the two were merged into one 400 Hz thread (see the root README's [Thread priority table](../README.md#thread-priority-table)). See `src/diagnostics/ThreadTiming.hpp` for the implementation and `threads_start()` in `src/threads.cpp` for the current priority ordering.
 
-Build and flash:
+Build and flash — **`UDEFS_EXTRA` must be repeated on the `flash` command too**, since `make` doesn't remember flags between separate invocations and `flash`'s target `.bin` is chosen from whatever `UDEFS_EXTRA` is on that specific command line (build output is segregated per-`DRONE` *and* per-`UDEFS_EXTRA` — `build/Drone1-BPRL_TIMING/` here, not the plain `build/Drone1/`; see the root README's [Build and Upload](../README.md#6-build-and-upload)):
 
 ```bash
-make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_TIMING
-make flash DRONE=Drone1
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_TIMING flash
 # combine with debug telemetry if needed:
-make DRONE=Drone2 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
+make DRONE=Drone2 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING" flash
 ```
 
 There's no dedicated `tools/*.py` wrapper yet — query the two commands directly over the USB serial port, e.g. with pyserial's bundled terminal:
@@ -328,9 +327,15 @@ Uploads a compiled `.bin` firmware image over USB using the ChibiOS bootloader p
 make flash DRONE=Drone2
 make flash DRONE=Drone1 PORT=/dev/ttyACM0
 
-# Or directly
-python3 tools/flash_upload.py build/BPRL.bin
-python3 tools/flash_upload.py --port /dev/ttyACM0 build/BPRL.bin
+# If a build used UDEFS_EXTRA (e.g. -DBPRL_DEBUG), repeat it on flash too —
+# otherwise `make flash` resolves to the plain, non-debug build/<DRONE>/
+# directory instead of the one you actually built:
+make flash DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG PORT=/dev/ttyACM0
+
+# Or directly (path must match the build's actual directory, e.g.
+# build/Drone2/BPRL.bin or build/Drone2-BPRL_DEBUG/BPRL.bin)
+python3 tools/flash_upload.py build/Drone2/BPRL.bin
+python3 tools/flash_upload.py --port /dev/ttyACM0 build/Drone2/BPRL.bin
 ```
 
 If the board is already running firmware, the script sends a reboot-to-bootloader command automatically. Sequence: detect port → reboot if needed → erase → program in 252-byte chunks → CRC-32 verify → reboot.
@@ -343,8 +348,9 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 # Flash (default drone: DRONE=Drone1)
 make flash DRONE=Drone1
 
-# Debug build + flash
-make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG && make flash DRONE=Drone1
+# Debug build + flash — UDEFS_EXTRA must be on BOTH make and flash (one line
+# avoids forgetting it on the second command; see Timing section above)
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG flash
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
@@ -367,6 +373,6 @@ python3 tools/can_tools.py can-scan --duration 2
 python3 tools/calibrate.py calibrate
 
 # Timing/schedulability build + query (see Timing section above)
-make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING && make flash DRONE=Drone2
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING flash
 python3 -m serial.tools.miniterm /dev/ttyACM0 115200   # then type: TIM,status
 ```

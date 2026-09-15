@@ -360,10 +360,30 @@
 /*
  * PWM driver system settings.
  */
+// TIM1/TIM4: CubeBlueH7's standard-PWM motor output (src/coms/PWM.cpp,
+// MOTOR_PROTO_PWM) uses ChibiOS's own tested PWMDriver instead of hand-
+// rolled register writes (matching ArduPilot's own AP_HAL_ChibiOS::RCOutput,
+// which does the same via pwmStart()/PWMConfig for every protocol it
+// supports). NOT harmless to enable unconditionally, unlike most other
+// peripherals in this file: DShot.cpp defines its own raw ISR vector
+// handlers for TIM1/TIM4 interrupts, and those are always compiled in
+// regardless of MOTOR_PROTOCOL (DShot.cpp itself isn't protocol-gated,
+// only which of its functions PWM.cpp calls is) — enabling ChibiOS's own
+// PWM driver globally makes it generate its own handlers for the same
+// vectors, producing "multiple definition of VectorXX" link errors on
+// every board, including the DShot ones that never touch PWMD1/PWMD4 at
+// runtime. Gated to CubeBlueH7 specifically (currently the only board
+// whose config.mk sets MOTOR_PROTOCOL=MOTOR_PROTO_PWM) so DShot-protocol
+// boards never link in ChibiOS's PWM driver at all.
+#if defined(BPRL_BOARD_CUBEBLUE)
+#define STM32_PWM_USE_TIM1                  TRUE
+#define STM32_PWM_USE_TIM4                  TRUE
+#else
 #define STM32_PWM_USE_TIM1                  FALSE
+#define STM32_PWM_USE_TIM4                  FALSE
+#endif
 #define STM32_PWM_USE_TIM2                  FALSE
 #define STM32_PWM_USE_TIM3                  FALSE
-#define STM32_PWM_USE_TIM4                  FALSE
 #define STM32_PWM_USE_TIM5                  FALSE
 #define STM32_PWM_USE_TIM8                  FALSE
 #define STM32_PWM_USE_TIM12                 FALSE
@@ -407,8 +427,10 @@
 #define STM32_SERIAL_USE_UART5              FALSE
 #if defined(BPRL_BOARD_ORQA)
 #define STM32_SERIAL_USE_USART6             TRUE   /* TX6/RX6 — CRSF radio (SD6) */
+#elif defined(BPRL_BOARD_CUBEBLUE)
+#define STM32_SERIAL_USE_USART6             TRUE   /* PC6/PC7 — FMU<->IOMCU bridge (SD6), MOTOR_PROTO_IOMCU only; see src/coms/IOMCU.hpp */
 #else
-#define STM32_SERIAL_USE_USART6             FALSE  /* FMU↔IOMCU bridge; not used by firmware */
+#define STM32_SERIAL_USE_USART6             FALSE  /* FMU<->IOMCU bridge; not used by firmware */
 #endif
 #define STM32_SERIAL_USE_UART7              FALSE
 #define STM32_SERIAL_USE_UART8              FALSE

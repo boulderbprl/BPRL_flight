@@ -19,6 +19,7 @@
 #endif
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
+#include "src/coms/IOMCU.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/MotorMixer.hpp"
@@ -115,6 +116,9 @@ static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 static THD_WORKING_AREA(waUSBCmd,   4096);  // 4 KB: FatFS log access + line parser
 static THD_WORKING_AREA(waMAVLink,  2048);  // MAVLink parser + heartbeat sender
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+static THD_WORKING_AREA(waIOMCU,    2048);  // FMU<->IOMCU UART transactions (MAIN 1-4)
+#endif
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    2048);
 #endif
@@ -479,8 +483,15 @@ static THD_FUNCTION(ControlThread, arg)
         // logical [FR,RL,FL,RR] via motor_map — Unmixer's geometry, $TEL,
         // and the SD log all assume that logical order, matching
         // MotorMixer's output convention (see MotorMixerConfig).
-        ESCTelemetry sm_telem[4];
+        // Zero-initialized: on a MOTOR_PROTO_PWM board (no DShot driver
+        // compiled in — see DShot.cpp's own header comment) this stays at
+        // its zeroed/invalid state, which is the physically correct
+        // answer — plain PWM ESCs have no RPM telemetry feedback path at
+        // all, unlike bidirectional DShot.
+        ESCTelemetry sm_telem[4] = {};
+#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
         dshot_get_telemetry(sm_telem);
+#endif
         uint32_t rpm_lane[4];
         for (int lane = 0; lane < 4; lane++) {
             const uint32_t raw = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
@@ -944,6 +955,7 @@ static void usb_cmd_dispatch(const char *line)
         chMtxUnlock(&s_usb_write_mtx);
 #endif
     } else if (strcmp(line, "DSHOT,diag") == 0) {
+#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
         DShotDiag d = {};
         dshot_get_diag(&d);
         chMtxLock(&s_usb_write_mtx);
@@ -971,6 +983,66 @@ static void usb_cmd_dispatch(const char *line)
             (unsigned)d.edges[3][2], (unsigned)d.edges[3][3],
             (unsigned)d.edges[3][4]);
         chMtxUnlock(&s_usb_write_mtx);
+#else
+        // No DShot driver compiled in on a MOTOR_PROTO_PWM board — DShot.cpp
+        // compiles to nothing in that case (see its own header comment).
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "DSHOT,ERR,not_dshot_build\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
+#if MOTOR_PROTOCOL == MOTOR_PROTO_PWM
+    } else if (strcmp(line, "PWM,status") == 0) {
+        // Live register dump for TIM1/TIM4 (Cube-board standard PWM
+        // driver, src/coms/PWM.cpp) — read twice with a short delay so
+        // CNT's movement between the two reads proves the timer is
+        // actually clocked and counting, not just sitting in a
+        // configured-but-frozen state. Distinguishes "firmware never
+        // enabled the timer/channel" (CEN=0 or CCxE=0 here) from
+        // "registers look correct but no signal reaches the connector"
+        // (a wiring/hardware question, not a firmware one).
+        uint32_t t1_cr1 = TIM1->CR1, t1_ccer = TIM1->CCER, t1_bdtr = TIM1->BDTR;
+        uint32_t t1_ccr1 = TIM1->CCR1, t1_ccr2 = TIM1->CCR2, t1_ccr3 = TIM1->CCR3;
+        uint32_t t1_sr = TIM1->SR;
+        uint32_t t1_cnt_a = TIM1->CNT;
+        uint32_t t4_cr1 = TIM4->CR1, t4_ccer = TIM4->CCER;
+        uint32_t t4_ccr2 = TIM4->CCR2, t4_sr = TIM4->SR;
+        uint32_t t4_cnt_a = TIM4->CNT;
+        chThdSleepMilliseconds(2);
+        uint32_t t1_cnt_b = TIM1->CNT;
+        uint32_t t4_cnt_b = TIM4->CNT;
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "PWM,TIM1,CR1=0x%03x,CCER=0x%03x,BDTR=0x%04x,SR=0x%03x,"
+            "CCR1=%u,CCR2=%u,CCR3=%u,CNT=%u->%u\r\n",
+            (unsigned)t1_cr1, (unsigned)t1_ccer, (unsigned)t1_bdtr, (unsigned)t1_sr,
+            (unsigned)t1_ccr1, (unsigned)t1_ccr2, (unsigned)t1_ccr3,
+            (unsigned)t1_cnt_a, (unsigned)t1_cnt_b);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "PWM,TIM4,CR1=0x%03x,CCER=0x%03x,SR=0x%03x,CCR2=%u,CNT=%u->%u\r\n",
+            (unsigned)t4_cr1, (unsigned)t4_ccer, (unsigned)t4_sr,
+            (unsigned)t4_ccr2, (unsigned)t4_cnt_a, (unsigned)t4_cnt_b);
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+    } else if (strcmp(line, "IOMCU,status") == 0) {
+        // PAGE_CONFIG read — the critical first bring-up check for the
+        // FMU<->IOMCU UART (src/coms/IOMCU.hpp): if this doesn't come back
+        // as protocol_version=4/protocol_version2=10, the UART/pin/CRC
+        // plumbing itself is wrong and nothing past this point (channel
+        // mask, safety-off, PWM writes) will work either — don't waste
+        // time on those until this passes.
+        uint16_t regs[2] = {};
+        bool ok = iomcu_read_registers(IOMCU_PAGE_CONFIG, 0, 2, regs);
+        chMtxLock(&s_usb_write_mtx);
+        if (ok) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                "IOMCU,OK,protocol_version=%u,protocol_version2=%u\r\n",
+                (unsigned)regs[0], (unsigned)regs[1]);
+        } else {
+            chprintf((BaseSequentialStream *)&SDU1, "IOMCU,ERR,no_response\r\n");
+        }
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strcmp(line, "HW,status") == 0) {
         // One-shot hardware connectivity snapshot — every "valid"/"has data"
         // flag this firmware tracks, in one place, so bench wiring can be
@@ -1520,6 +1592,33 @@ static THD_FUNCTION(MAVLinkThread, arg)
     }
 }
 
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+/* ══════════════════════════════════════════════════════════════════════════
+ * IOMCUThread — targets ~400 Hz, actual rate bounded by UART round-trip
+ * Owns the FMU<->IOMCU UART (SD6) exclusively. Sends whatever's currently
+ * published in g_iomcu_cmd (via iomcu_set_pwm(), called from PWM.cpp's
+ * motor_output_write()) as one PAGE_DIRECT_PWM write per tick. This is the
+ * only thread that ever touches SD6 after iomcu_init() — see IOMCU.hpp for
+ * why ControlThread must never block on this UART directly.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(IOMCUThread, arg)
+{
+    (void)arg;
+    chRegSetThreadName("iomcu");
+
+    const int tid = TIMING_REGISTER("iomcu", TIME_MS2I(2));
+
+    while (true) {
+        TIMING_TICK_BEGIN(tid);
+        iomcu_send_now();  // false on timeout/CRC error just means try again
+                            // next tick — harmless as long as one lands within
+                            // the IO's 200 ms failsafe window (see IOMCU.hpp).
+        TIMING_TICK_END(tid);
+        chThdSleepMilliseconds(2);
+    }
+}
+#endif
+
 static THD_FUNCTION(LogThread, arg)
 {
     chRegSetThreadName("log");
@@ -1790,6 +1889,7 @@ void threads_start(const ThreadRates &rates)
     //   CANThread       +28  event-driven CAN RX
     //   ControlThread   +22  400 Hz EKF + PID/mixer/DShot
     //   I2CThread       +20  200 Hz aux-sensor polling
+    //   IOMCUThread     +12  ~400 Hz FMU<->IOMCU (MOTOR_PROTO_IOMCU only)
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
     //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
@@ -1809,14 +1909,14 @@ void threads_start(const ThreadRates &rates)
     // deliberate, still-in-progress staged config. ──
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-    // Cube Blue bring-up, stage 2: ControlThread re-enabled and confirmed
-    // stable. I2CThread is TEMPORARILY back off here — see main.cpp's
-    // i2c_drv_init() call site for why (CAL,set replies going silent,
-    // still being isolated). Re-enable this alongside i2c_drv_init() there.
-#if !defined(BPRL_BOARD_CUBEBLUE)
+    // Cube Blue bring-up, stage 3: ControlThread (stage 2) and now
+    // I2CThread (stage 3) both re-enabled — see main.cpp's i2c_drv_init()
+    // call site for why I2C was parked and why it's now cleared.
     chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
-#endif
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+    chThdCreateStatic(waIOMCU,     sizeof(waIOMCU),     NORMALPRIO + 12, IOMCUThread,     nullptr);
+#endif
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);

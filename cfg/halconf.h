@@ -122,9 +122,20 @@
 
 /**
  * @brief   Enables the PWM subsystem.
+ * Needed for src/coms/PWM.cpp's MOTOR_PROTO_PWM path (CubeBlueH7's standard
+ * servo output via TIM1/TIM4, using ChibiOS's own PWMDriver — see that
+ * file's header comment). Board-conditional, matching cfg/mcuconf.h's
+ * STM32_PWM_USE_TIM1/TIM4 gating: ChibiOS's own hal_pwm_lld.h hard-errors
+ * ("PWM driver activated but no TIM peripheral assigned") if HAL_USE_PWM is
+ * on while every STM32_PWM_USE_TIMx is off, which is the case on every
+ * other board (they use DShot.cpp's raw registers instead).
  */
 #if !defined(HAL_USE_PWM) || defined(__DOXYGEN__)
+#if defined(BPRL_BOARD_CUBEBLUE)
+#define HAL_USE_PWM                         TRUE
+#else
 #define HAL_USE_PWM                         FALSE
+#endif
 #endif
 
 /**
