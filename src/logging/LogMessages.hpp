@@ -43,6 +43,8 @@ constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer p
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
 constexpr uint8_t LOG_MSG_ENC0 = 0x12U;  // shaft-angle encoder RPM, node 0 (CAN 0x70, Feather M4 + AS5047P)
 constexpr uint8_t LOG_MSG_ENC1 = 0x13U;  // shaft-angle encoder RPM, node 1 (CAN 0x71, Feather M4 + AS5047P)
+constexpr uint8_t LOG_MSG_ENC2 = 0x14U;  // shaft-angle encoder RPM, node 2 (CAN 0x72, Feather M4 + AS5047P)
+constexpr uint8_t LOG_MSG_ENC3 = 0x15U;  // shaft-angle encoder RPM, node 3 (CAN 0x73, Feather M4 + AS5047P)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -122,7 +124,7 @@ struct __attribute__((packed)) LogMsgENC {
     uint8_t  valid;       // 1 once at least one CAN frame has arrived from this node
 };
 // Format: "QfHBB"   Body: 8+4+2+1+1 = 16 B   Record: 19 B
-// Shared body layout for ENC0/ENC1 — same struct, two distinct msg_ids/names
+// Shared body layout for ENC0-ENC3 — same struct, four distinct msg_ids/names
 // so each encoder node shows up as its own series in the log viewer.
 
 struct __attribute__((packed)) LogMsgIMU {
@@ -266,6 +268,18 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_ENC1,
       "ENC1",
+      "QfHBB",
+      "TimeUS,RPM,Angle,ErrFlag,Valid",
+      sizeof(LogMsgENC) },
+
+    { LOG_MSG_ENC2,
+      "ENC2",
+      "QfHBB",
+      "TimeUS,RPM,Angle,ErrFlag,Valid",
+      sizeof(LogMsgENC) },
+
+    { LOG_MSG_ENC3,
+      "ENC3",
       "QfHBB",
       "TimeUS,RPM,Angle,ErrFlag,Valid",
       sizeof(LogMsgENC) },

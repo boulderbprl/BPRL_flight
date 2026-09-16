@@ -70,7 +70,7 @@ static const SPISettings AS5047P_SPI_SETTINGS(1000000, MSBFIRST, SPI_MODE1);
 #define CAN_BAUD_BPS 1000000
 
 // One CAN ID per node, indexed by NODE_ID — extend as more boards are added.
-static const uint32_t CAN_ID_ENCODER_RPM_TABLE[] = { 0x70, 0x71 };
+static const uint32_t CAN_ID_ENCODER_RPM_TABLE[] = { 0x70, 0x71, 0x72, 0x73 };
 #define CAN_ID_ENCODER_RPM CAN_ID_ENCODER_RPM_TABLE[NODE_ID]
 
 CANSAME5x CAN;
@@ -101,6 +101,39 @@ static bool       s_have_prev      = false;
 static float      s_rpm_filt       = 0.0f;
 static uint16_t   s_angle_raw      = 0;
 static uint8_t     s_error_flag    = 0;
+
+// ── Bus_Off watchdog ─────────────────────────────────────────────────────
+// CANSAME5x::endPacket() (Adafruit_CAN/src/CANSAME5x.cpp, ~line 344-384)
+// returns a truthy value on BOTH the real-success path and its 8ms-timeout
+// fallthrough, so the `if (!CAN.endPacket())` check below can never fire —
+// this sketch has no visibility into a stuck Bus_Off node through the
+// library's own API. The library's bus_autorecover() (clears CCCR.INIT
+// when PSR.BO is set) only runs from inside endPacket()/parsePacket(), and
+// this node never calls parsePacket() (TX-only), so endPacket() is the
+// only place it's ever triggered — the very call whose result we can't
+// trust. Poll the SAME51 CAN0 peripheral's PSR.BO bit directly instead,
+// and force a full CAN.begin() if it's been stuck Bus_Off longer than the
+// library's per-call recovery should ever need.
+#define BUS_OFF_REINIT_TICKS  20   // ~200 ms of continuous Bus_Off at CAN_INTERVAL_US cadence
+
+static uint32_t   s_bus_off_ticks   = 0;
+static uint32_t   s_bus_off_reinits = 0;
+
+static void check_can_bus_health(void)
+{
+    if (CAN0->PSR.bit.BO) {
+        s_bus_off_ticks++;
+        if (s_bus_off_ticks >= BUS_OFF_REINIT_TICKS) {
+            s_bus_off_reinits++;
+            DEBUG_PRINT("CAN stuck Bus_Off, forcing reinit, count=");
+            DEBUG_PRINTLN(s_bus_off_reinits);
+            CAN.begin(CAN_BAUD_BPS);
+            s_bus_off_ticks = 0;
+        }
+    } else {
+        s_bus_off_ticks = 0;
+    }
+}
 
 static uint16_t calc_even_parity_bit(uint16_t value)
 {
@@ -177,7 +210,7 @@ static void send_can_frame(void)
     CAN.beginPacket(CAN_ID_ENCODER_RPM);
     CAN.write((uint8_t *)&frame, sizeof(frame));
     if (!CAN.endPacket()) {
-        DEBUG_PRINTLN("CAN tx failed");
+        DEBUG_PRINTLN("CAN tx failed");   // see check_can_bus_health() — this rarely fires in practice
     }
 }
 
@@ -235,5 +268,6 @@ void loop()
     if ((uint32_t)(now_us - s_last_can_us) >= CAN_INTERVAL_US) {
         s_last_can_us = now_us;
         send_can_frame();
+        check_can_bus_health();
     }
 }

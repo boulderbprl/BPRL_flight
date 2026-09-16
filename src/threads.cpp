@@ -499,6 +499,26 @@ static THD_FUNCTION(ControlThread, arg)
         }
         uint32_t rpm[4];
         for (int i = 0; i < 4; i++) rpm[i] = rpm_lane[kDroneConfig.mixer.motor_map[i]];
+
+#if MOTOR_PROTOCOL != MOTOR_PROTO_DSHOT
+        // CAN shaft-encoder RPM substitutes for DShot telemetry on airframes
+        // that don't have DShot's own RPM feedback (see SensorsConfig's
+        // has_encoder_rpm comment in DroneConfig.hpp). DShot RPM always wins
+        // when DShot is actually the active protocol — this whole block
+        // compiles out in that case.
+        if (kDroneConfig.sensors.has_encoder_rpm) {
+            EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
+            chMtxLock(&encoderRpm_mtx);
+            memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
+            chMtxUnlock(&encoderRpm_mtx);
+            for (int node = 0; node < ENCODER_RPM_NUM_NODES; node++) {
+                const int8_t motor = kDroneConfig.sensors.encoder_motor_map[node];
+                if (motor < 0 || !enc_snap[node].valid) continue;
+                rpm[motor] = (uint32_t)fabsf(enc_snap[node].rpm);
+            }
+        }
+#endif
+
         chMtxLock(&esc_mtx);
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
         chMtxUnlock(&esc_mtx);
@@ -1806,10 +1826,10 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_STRN, msg);
         }
 
-        /* ── ENC0/ENC1 — per-node shaft-angle encoder RPM ───────────────── */
+        /* ── ENC0-ENC3 — per-node shaft-angle encoder RPM ────────────────── */
         {
-            static constexpr uint8_t ids[ENCODER_RPM_NUM_NODES] = { LOG_MSG_ENC0, LOG_MSG_ENC1 };
-            const bool en[ENCODER_RPM_NUM_NODES] = { log_en.enc0, log_en.enc1 };
+            static constexpr uint8_t ids[ENCODER_RPM_NUM_NODES] = { LOG_MSG_ENC0, LOG_MSG_ENC1, LOG_MSG_ENC2, LOG_MSG_ENC3 };
+            const bool en[ENCODER_RPM_NUM_NODES] = { log_en.enc0, log_en.enc1, log_en.enc2, log_en.enc3 };
             for (int i = 0; i < ENCODER_RPM_NUM_NODES; i++) {
                 if (!en[i]) continue;
                 LogMsgENC msg = {};

@@ -90,8 +90,9 @@ const DroneConfig kDroneConfig = {
         20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz
     },
    
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
-    { true, true, true },
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
+    { true, true, true, false, { -1, -1, -1, -1 } },
     
     // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
     // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, PID+PI last if enabled 
@@ -114,6 +115,8 @@ const DroneConfig kDroneConfig = {
           true, // ctun
           true, // mocp
           true, // enc0
-          true }, // enc1
+          true, // enc1
+          true, // enc2
+          true }, // enc3
     },
 };

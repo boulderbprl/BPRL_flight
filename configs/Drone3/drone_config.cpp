@@ -117,9 +117,10 @@ const DroneConfig kDroneConfig = {
         20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz
     },
 
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU, no mocap link.
-    { true, false, false },
+    // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
+    { true, false, false, false, { -1, -1, -1, -1 } },
 
     // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
     // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
@@ -142,6 +143,8 @@ const DroneConfig kDroneConfig = {
           true, // ctun
           true, // mocp
           true, // enc0
-          true }, // enc1
+          true, // enc1
+          true, // enc2
+          true }, // enc3
     },
 };

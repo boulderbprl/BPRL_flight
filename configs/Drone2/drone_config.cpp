@@ -70,7 +70,15 @@ const DroneConfig kDroneConfig = {
     },
     
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
-    { 0, 1, 2, 3, 4, 6, 7 },
+    {
+        0,  // thr
+        1,  // roll
+        2,  // pitch
+        3,  // yaw
+        4,  // arm
+        6,  // flight_mode
+        7,  // indi_switch
+    },
     
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     {
@@ -90,11 +98,27 @@ const DroneConfig kDroneConfig = {
         20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz
     },
     
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
-    { true, true, true },
-    
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
+    // shaft-encoder RPM (src/sensors/EncoderRPM.hpp) substitutes in, all 4 motors now instrumented:
+    //   NODE_ID 0 (CAN 0x70) — front-right (FR, logical 0)
+    //   NODE_ID 1 (CAN 0x71) — back-right  (RR, logical 3)
+    //   NODE_ID 2 (CAN 0x72) — back-left   (RL, logical 1)
+    //   NODE_ID 3 (CAN 0x73) — front-left  (FL, logical 2)
+    // see Strain_CAN/Feather_Code/Feather_Code.ino's NODE_ID comment for which physical board is which.
+    {
+        true,           // has_baro
+        false,           // has_can_imx5_ins
+        false,           // has_mocap_link
+        true,           // has_encoder_rpm
+        { 0, 3, 1, 2 }, // encoder_motor_map — [node0..node3] -> logical motor (FR=0/RL=1/FL=2/RR=3)
+    },
+
     // .controllers — ControllersConfig { indi_enabled, pid_pi_enabled }
-    { false, false },  // pid_pi_enabled: off by default, see .pid_pi comment above — not yet bench/flight tuned
+    {
+        false,  // indi_enabled
+        false,  // pid_pi_enabled — off by default, see .pid_pi comment above — not yet bench/flight tuned
+    },
     
     // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
     {
@@ -113,6 +137,8 @@ const DroneConfig kDroneConfig = {
           true, // ctun
           true, // mocp
           true, // enc0
-          true }, // enc1
+          true, // enc1
+          true, // enc2
+          true }, // enc3
     },
 };

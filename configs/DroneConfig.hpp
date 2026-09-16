@@ -116,10 +116,26 @@ struct UnmixerConfig {
 // has_mocap_link are metadata only for now (those paths already self-gate at
 // runtime via g_can_imu.valid/g_mocap.valid staying false absent traffic);
 // has_baro actually gates whether SPIThread bothers polling the barometer.
+//
+// has_encoder_rpm selects the CAN shaft-angle encoder nodes (src/sensors/
+// EncoderRPM.hpp, one Feather M4 + AS5047P per node, CAN 0x70-0x73) as the
+// RPM source for the EKF vibration-notch tracker and the INDI Unmixer, in
+// place of DShot bidirectional telemetry. It only ever takes effect when
+// DShot itself isn't the active motor protocol (MOTOR_PROTOCOL !=
+// MOTOR_PROTO_DSHOT, src/coms/PWM.hpp — a per-board compile-time choice, see
+// configs/<Drone>/config.mk) — DShot RPM always wins when DShot is selected.
+// encoder_motor_map[node] is that node's logical motor index (FR=0, RL=1,
+// FL=2, RR=3 — MotorMixerConfig's logical order, NOT the CAN/NODE_ID
+// numbering) for whichever physical motor that encoder is actually clamped
+// to; -1 means the node isn't wired to a motor on this airframe. Verify
+// against the physical harness before enabling — a wrong mapping feeds one
+// motor's RPM into another motor's notch/torque estimate.
 struct SensorsConfig {
-    bool has_baro;
-    bool has_can_imx5_ins;
-    bool has_mocap_link;
+    bool    has_baro;
+    bool    has_can_imx5_ins;
+    bool    has_mocap_link;
+    bool    has_encoder_rpm;
+    int8_t  encoder_motor_map[4];   // [node0..node3] -> logical motor index, or -1
 };
 
 // Which attitude controllers this drone offers on the RC switch, beyond the
@@ -134,7 +150,7 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, enc0, enc1;
+    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, enc0, enc1, enc2, enc3;
 };
 
 struct LoggingConfig {

@@ -2,10 +2,10 @@
 """
 BPRL Encoder RPM Monitor — live display of shaft-angle encoder RPM nodes.
 
-Reads mechanical RPM + raw shaft angle from up to two Feather M4 + AS5047P
-CAN nodes (CAN 0x70 = node 0, 0x71 = node 1), broadcast per
-Strain_CAN/Feather_Code/Feather_Code.ino and decoded on the FC by
-src/sensors/EncoderRPM.cpp.
+Reads mechanical RPM + raw shaft angle from up to four Feather M4 + AS5047P
+CAN nodes (CAN 0x70 = node 0, 0x71 = node 1, 0x72 = node 2, 0x73 = node 3),
+broadcast per Strain_CAN/Feather_Code/Feather_Code.ino and decoded on the FC
+by src/sensors/EncoderRPM.cpp.
 
 Works on any firmware build (no BPRL_DEBUG required).
 
@@ -29,7 +29,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-NUM_NODES = 2
+NUM_NODES = 4
 ENC_RE = re.compile(r"ENC,(\d+),(-?[\d.]+),(\d+),(\d+),(\d+)")
 
 
@@ -77,7 +77,7 @@ def cmd_encoder_rpm(ser, _args):
                         f"[{'red' if error_flag else col}]{error_flag}[/{'red' if error_flag else col}]",
                         status)
 
-        return Panel(tbl, title="Encoder RPM (CAN 0x70/0x71)", border_style="cyan")
+        return Panel(tbl, title="Encoder RPM (CAN 0x70-0x73)", border_style="cyan")
 
     console.print("[dim]Polling ENC,read at ~5 Hz — Ctrl-C to exit[/dim]")
     try:

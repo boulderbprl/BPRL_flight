@@ -16,7 +16,7 @@
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
  *   src/sensors/StrainRate.*  Strain rate sensor, CAN/I2C switchable via STRAIN_RATE_INTERFACE.
- *   src/sensors/EncoderRPM.*  Shaft-angle encoder RPM nodes, CAN 0x70/0x71 (Feather M4 + AS5047P).
+ *   src/sensors/EncoderRPM.*  Shaft-angle encoder RPM nodes, CAN 0x70-0x73 (Feather M4 + AS5047P).
  *   src/coms/PWM.*, DShot.* Motor output — bidirectional DShot 600 by default (MOTOR_PROTOCOL in PWM.hpp).
  *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
  *   src/controllers/       PID, AttitudeController, MotorMixer.
@@ -158,14 +158,14 @@ int main(void)
     i2c_drv_init();        // start I2CD2 at 400 kHz
     strain_gauge_init();   // register I2C 0x09/0x10 strain gauge array nodes
     // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
-    encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
+    encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #else
     motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
     i2c_drv_init();        // start I2CD2 at 400 kHz
     strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
-    encoder_rpm_init();    // register CAN 0x70/0x71 shaft-angle encoder nodes
+    encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #endif
     threads_start(kRates);

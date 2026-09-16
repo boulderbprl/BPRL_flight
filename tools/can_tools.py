@@ -156,7 +156,7 @@ def cmd_can_regdump(ser, _args):
 
 # ── CAN scan ──────────────────────────────────────────────────────────────────
 
-REGISTERED_IDS = {0x01, 0x02, 0x03, 0x04, 0x69, 0x70, 0x71}
+REGISTERED_IDS = {0x01, 0x02, 0x03, 0x04, 0x69, 0x70, 0x71, 0x72, 0x73}
 
 
 def cmd_can_scan(ser, args):
@@ -176,7 +176,20 @@ def cmd_can_scan(ser, args):
         return
 
     console.print(f"[dim]Scanning all CAN IDs for {duration} s...[/dim]")
-    time.sleep(duration)
+    # Keep draining the port for the whole window instead of sleeping blind.
+    # The FC's USB CDC (SDU1) TX buffer is only 256 bytes
+    # (SERIAL_USB_BUFFERS_SIZE in ChibiOS) and is shared with DebugThread's
+    # 10 Hz $TEL stream behind a mutex that USBCmdThread must hold to send
+    # its response (s_usb_write_mtx in threads.cpp). If nobody reads the
+    # port for the whole duration, that buffer fills, DebugThread blocks
+    # mid-write while holding the mutex, and CAN,scan,stop's response can
+    # get stuck behind it — sometimes past our post-stop collection window,
+    # silently dropping one whole CAN,SCAN,id=... line. Worse the longer
+    # `duration` is. Reading continuously here keeps the pipe from ever
+    # backing up in the first place.
+    scan_deadline = time.monotonic() + duration
+    while time.monotonic() < scan_deadline:
+        ser.readline()   # discard — $TEL/other unsolicited output, or empty on timeout
 
     ser.write(b"CAN,scan,stop\r\n")
     entries  = []

@@ -30,7 +30,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 
-NUM_ENC_NODES = 2
+NUM_ENC_NODES = 4
 
 ROW_RE = re.compile(r"HW,([A-Z0-9]+),(.*)")
 
