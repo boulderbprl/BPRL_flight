@@ -1210,6 +1210,17 @@ static void usb_cmd_dispatch(const char *line)
                  (int)snap.val[2], (int)snap.val[3],
                  (unsigned)snap.valid);
         chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_GAUGE,zero") == 0) {
+        strain_gauge_calibrate();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "STRAIN_GAUGE,zero,OK\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_GAUGE,reset") == 0) {
+        bool sg_ok = strain_gauge_reset();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "STRAIN_GAUGE,reset,%s\r\n", sg_ok ? "OK" : "FAIL");
+        chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "ENC,read") == 0) {
         EncoderRPMRaw snap[ENCODER_RPM_NUM_NODES];
         chMtxLock(&encoderRpm_mtx);
@@ -1317,6 +1328,8 @@ static THD_FUNCTION(DebugThread, arg)
 
     uint32_t prev_quat_cnt = 0, prev_rate_cnt = 0;
     uint32_t can_quat_hz   = 0, can_rate_hz   = 0;
+    uint32_t prev_strain_cnt = 0;
+    uint32_t strain_hz      = 0;
     int      rate_tick     = 0;
 
     const int tid = TIMING_REGISTER("debug", period);
@@ -1324,7 +1337,8 @@ static THD_FUNCTION(DebugThread, arg)
     systime_t next = chVTGetSystemTime();
     while (true) {
         TIMING_TICK_BEGIN(tid);
-        /* ── Update CAN INS rate estimate once per second (10 ticks) ───── */
+        /* ── Update CAN INS / strain gauge rate estimates once per second
+         *    (10 ticks) ─────────────────────────────────────────────────── */
         if (++rate_tick >= 10) {
             uint32_t qc = s_can_quat_cnt;
             uint32_t rc = s_can_rate_cnt;
@@ -1332,6 +1346,13 @@ static THD_FUNCTION(DebugThread, arg)
             can_rate_hz   = rc - prev_rate_cnt;
             prev_quat_cnt = qc;
             prev_rate_cnt = rc;
+
+            chMtxLock(&strainGauge_mtx);
+            uint32_t sc = g_strain_gauge.update_count;
+            chMtxUnlock(&strainGauge_mtx);
+            strain_hz       = sc - prev_strain_cnt;
+            prev_strain_cnt = sc;
+
             rate_tick     = 0;
         }
 
@@ -1576,6 +1597,52 @@ static THD_FUNCTION(DebugThread, arg)
             }
         }
 
+        /* ── Emit $STRAIN line over USB (strain gauge array, single node) ── */
+        /* Format: $STRAIN,<ms>,<valid>,<last_ms>,<hz>,
+         *   ARM1,<5 values>,ARM2,<4 values>
+         * Single I2C node at 0x09, 9 real channels total, bench-confirmed
+         * split at a physical arm boundary: data[0..4] (5 ch) = ARM1,
+         * data[5..8] (4 ch) = ARM2 — see StrainGauge.hpp for how this was
+         * determined (the sensor's chunk index doesn't actually select
+         * distinct data; only 9 channels are real). <hz> is the actual
+         * sensor update rate (successful reads/sec) computed from
+         * g_strain_gauge.update_count above — distinct from this thread's
+         * fixed 10 Hz print rate. */
+        {
+            bool     s_valid;
+            uint32_t s_last_ms;
+            int16_t  s_data[STRAIN_GAUGE_NUM_CHANNELS];
+            chMtxLock(&strainGauge_mtx);
+            s_valid   = g_strain_gauge.valid;
+            s_last_ms = g_strain_gauge.last_update_ms;
+            memcpy(s_data, g_strain_gauge.data, sizeof(s_data));
+            chMtxUnlock(&strainGauge_mtx);
+
+            static char strain_buf[192];
+            MemoryStream strain_ms;
+            msObjectInit(&strain_ms, (uint8_t *)strain_buf, sizeof(strain_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&strain_ms, "$STRAIN,%lu,%d,%lu,%lu",
+                     (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                     (int)s_valid, (unsigned long)s_last_ms,
+                     (unsigned long)strain_hz);
+            chprintf((BaseSequentialStream *)&strain_ms, ",ARM1");
+            for (int i = 0; i < STRAIN_GAUGE_ARM1_CHANNELS; i++) {
+                chprintf((BaseSequentialStream *)&strain_ms, ",%d", s_data[i]);
+            }
+            chprintf((BaseSequentialStream *)&strain_ms, ",ARM2");
+            for (int i = STRAIN_GAUGE_ARM1_CHANNELS;
+                 i < STRAIN_GAUGE_ARM1_CHANNELS + STRAIN_GAUGE_ARM2_CHANNELS; i++) {
+                chprintf((BaseSequentialStream *)&strain_ms, ",%d", s_data[i]);
+            }
+            chprintf((BaseSequentialStream *)&strain_ms, "\r\n");
+            size_t slen = strain_ms.eos;
+            if (slen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)strain_buf, slen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
         TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
@@ -1675,12 +1742,6 @@ static THD_FUNCTION(LogThread, arg)
         chMtxLock(&strainRate_mtx);
         strain = g_strain_rate;
         chMtxUnlock(&strainRate_mtx);
-
-        /* ── Encoder RPM snapshot ────────────────────────────────────── */
-        EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
-        chMtxLock(&encoderRpm_mtx);
-        memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
-        chMtxUnlock(&encoderRpm_mtx);
 
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
         uint32_t rpm_log[4];
@@ -1824,22 +1885,6 @@ static THD_FUNCTION(LogThread, arg)
             msg.s3      = strain.val[3];
             msg.valid   = (uint8_t)strain.valid;
             logger.write(LOG_MSG_STRN, msg);
-        }
-
-        /* ── ENC0-ENC3 — per-node shaft-angle encoder RPM ────────────────── */
-        {
-            static constexpr uint8_t ids[ENCODER_RPM_NUM_NODES] = { LOG_MSG_ENC0, LOG_MSG_ENC1, LOG_MSG_ENC2, LOG_MSG_ENC3 };
-            const bool en[ENCODER_RPM_NUM_NODES] = { log_en.enc0, log_en.enc1, log_en.enc2, log_en.enc3 };
-            for (int i = 0; i < ENCODER_RPM_NUM_NODES; i++) {
-                if (!en[i]) continue;
-                LogMsgENC msg = {};
-                msg.time_us    = t_us;
-                msg.rpm        = enc_snap[i].rpm;
-                msg.angle_raw  = enc_snap[i].angle_raw;
-                msg.error_flag = enc_snap[i].error_flag;
-                msg.valid      = (uint8_t)enc_snap[i].valid;
-                logger.write(ids[i], msg);
-            }
         }
 
         /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */

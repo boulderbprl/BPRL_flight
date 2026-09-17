@@ -10,6 +10,7 @@ Usage:
     python3 tools/telemetry.py ekf-status             # per-lane EKF roll/pitch/yaw table
     python3 tools/telemetry.py imu-compare            # side-by-side IMU accel+gyro with deltas
     python3 tools/telemetry.py pos-vel                # XYZ position/velocity vs mocap ground truth
+    python3 tools/telemetry.py strain                 # strain gauge array, 4 arms x 9 channels
 
 Options:
     --port /dev/ttyACMx   Serial port (auto-detected if omitted)
@@ -28,6 +29,7 @@ from bprl_common import (
     ImuSample, parse_imu_line,
     EkfLaneState, parse_ekfl_line,
     PosVelState, parse_pos_line,
+    StrainState, parse_strain_line,
 )
 
 from rich.layout import Layout
@@ -463,6 +465,67 @@ def cmd_pos_vel(ser, _args):
         reader.stop()
 
 
+# ── Strain gauge array ────────────────────────────────────────────────────────
+
+def build_strain_panel(s: StrainState) -> Panel:
+    age   = time.monotonic() - s.last_rx
+    stale = age > 1.0
+    t_sec = s.time_ms / 1000.0
+
+    if not s.usb_rx_any:
+        stale_note = "  [dim](no USB data)[/dim]"
+    elif not s.received_any:
+        stale_note = "  [dim](waiting for $STRAIN — requires -DBPRL_DEBUG build)[/dim]"
+    elif stale:
+        stale_note = "  [yellow](stale)[/yellow]"
+    else:
+        stale_note = ""
+
+    total_ch = sum(len(a) for a in s.arms)
+    tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
+    tbl.add_column("Arm", min_width=6)
+    for i in range(total_ch):
+        tbl.add_column(f"ch{i}", min_width=7, justify="right")
+
+    # Global channel index per row (blank outside that arm's own slice) so
+    # the arm boundary is visible directly in the column layout.
+    offset = 0
+    for arm_idx, arm_vals in enumerate(s.arms):
+        cells = ([f"[bold]ARM{arm_idx + 1}[/bold]"]
+                 + [""] * offset
+                 + [f"{v:6d}" for v in arm_vals]
+                 + [""] * (total_ch - offset - len(arm_vals)))
+        tbl.add_row(*cells)
+        offset += len(arm_vals)
+
+    valid_tag = "[green]● valid[/green]" if s.valid else "[dim]○ absent[/dim]"
+    hz_style  = "green" if s.hz >= 50 else ("yellow" if s.hz > 0 else "red")
+    hz_tag    = f"[{hz_style}]{s.hz:3d} Hz[/{hz_style}]"
+    diag  = f"  [dim]lines_rx={s.lines_rx}[/dim]"
+    title = (f"BPRL Strain Gauge  {valid_tag}  {hz_tag}  last_update={s.last_update_ms} ms"
+              f"   t={t_sec:8.1f} s{stale_note}{diag}")
+    return Panel(tbl, title=title, border_style="magenta")
+
+
+def cmd_strain(ser, _args):
+    state  = StrainState()
+    reader = SerialReader(ser)
+    try:
+        with Live(build_strain_panel(state), refresh_per_second=10,
+                  console=console) as live:
+            while True:
+                for line in reader.pop_lines():
+                    state.lines_rx += 1
+                    if not parse_strain_line(line, state):
+                        state.usb_rx_any = True
+                live.update(build_strain_panel(state))
+                time.sleep(0.05)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        reader.stop()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -475,6 +538,7 @@ def main():
     sub.add_parser("ekf-status",  help="Per-lane EKF roll/pitch/yaw/p/q/r table")
     sub.add_parser("imu-compare", help="Side-by-side IMU accel+gyro comparison with deltas")
     sub.add_parser("pos-vel",     help="Live XYZ position/velocity vs mocap ground truth")
+    sub.add_parser("strain",     help="Strain gauge array, 4 arms x 9 channels")
 
     args = parser.parse_args()
     if args.command is None:
@@ -490,6 +554,8 @@ def main():
             cmd_imu_compare(ser, args)
         elif args.command == "pos-vel":
             cmd_pos_vel(ser, args)
+        elif args.command == "strain":
+            cmd_strain(ser, args)
     finally:
         ser.close()
 

@@ -151,12 +151,12 @@ int main(void)
     // symptom, and the actual cause was a race in calibrate.py's own
     // background reader thread (fixed there, unrelated to firmware). Not
     // yet bench-verified running on its own on this board, though —
-    // exercise the strain gauge array (I2C 0x09/0x10, StrainGauge.hpp)
+    // exercise the strain gauge array (I2C 0x09, StrainGauge.hpp)
     // before trusting it in flight.
     motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
     i2c_drv_init();        // start I2CD2 at 400 kHz
-    strain_gauge_init();   // register I2C 0x09/0x10 strain gauge array nodes
+    strain_gauge_init();   // register I2C 0x09 strain gauge array node
     // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
     encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud

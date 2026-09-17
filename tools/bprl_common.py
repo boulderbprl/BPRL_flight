@@ -310,6 +310,53 @@ def parse_pos_line(line: str, state: PosVelState) -> bool:
         return False
 
 
+# ── Strain gauge array (single I2C node, 9 real channels, uneven 5+4 split) ──
+# Bench-confirmed 2026-09: this device exposes exactly 9 real channels, once
+# (the sensor's chunk index doesn't select distinct data) — see
+# src/sensors/StrainGauge.hpp for how that was determined. A physical touch
+# test found the arm boundary mid-array: data[0:5] = ARM1, data[5:9] = ARM2.
+
+STRAIN_ARM_SIZES = [5, 4]
+
+@dataclass
+class StrainState:
+    time_ms:        float = 0.0
+    valid:          bool  = False
+    last_update_ms: int   = 0
+    hz:             int   = 0
+    arms:           list  = field(default_factory=lambda: [[0] * n for n in STRAIN_ARM_SIZES])
+    received_any:   bool  = False
+    usb_rx_any:     bool  = False
+    last_rx:        float = field(default_factory=time.monotonic)
+    lines_rx:       int   = 0
+
+
+def parse_strain_line(line: str, state: StrainState) -> bool:
+    """Parse a $STRAIN CSV line into state. Returns True on success."""
+    if not line.startswith("$STRAIN,"):
+        return False
+    try:
+        parts = line[8:].split(",")
+        # <ms>,<valid>,<last_update_ms>,<hz>, then per arm: (ARMn,<n values>)
+        if len(parts) < 4 + sum(1 + n for n in STRAIN_ARM_SIZES):
+            return False
+        state.time_ms        = float(parts[0])
+        state.valid          = bool(int(parts[1]))
+        state.last_update_ms = int(parts[2])
+        state.hz             = int(parts[3])
+        idx = 4
+        for arm, n in enumerate(STRAIN_ARM_SIZES):
+            idx += 1  # skip "ARMn" label
+            state.arms[arm] = [int(v) for v in parts[idx:idx + n]]
+            idx += n
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+    except (ValueError, IndexError):
+        return False
+
+
 def parse_ekfl_line(line: str, state: EkfLaneState) -> bool:
     """Parse a $EKFL line into state. Returns True on success."""
     if not line.startswith("$EKFL,"):

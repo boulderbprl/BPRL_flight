@@ -126,7 +126,7 @@ const DroneConfig kDroneConfig = {
     // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
     { false, false },
 
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[12] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -141,10 +141,6 @@ const DroneConfig kDroneConfig = {
           true, // indi
           true, // baro
           true, // ctun
-          true, // mocp
-          true, // enc0
-          true, // enc1
-          true, // enc2
-          true }, // enc3
+          true }, // mocp
     },
 };

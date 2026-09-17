@@ -9,8 +9,7 @@ static inline float clampf(float v, float lo, float hi)
 
 float Unmixer::motor_force_N(const UnmixerConfig &cfg, float rpm)
 {
-    const float omega = rpm * RPM_TO_RADS;   // mechanical RPM → rad/s
-    const float rn = (omega - cfg.rpm_norm_center) / cfg.rpm_norm_scale;
+    const float rn = (rpm - cfg.rpm_norm_center) / cfg.rpm_norm_scale;
     const float f_n = ((cfg.motor_c3 * rn + cfg.motor_c2) * rn + cfg.motor_c1) * rn + cfg.motor_c0;
     return clampf(f_n, 0.0f, cfg.max_thrust_n);   // guard small negative thrust, clamp to bench max
 }
