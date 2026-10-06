@@ -31,7 +31,7 @@ const bool LPF_ENABLED = true;  // set false to bypass the Butterworth LPF
 #define PRINT_INTERVAL_US  25000  // 40 Hz serial print rate
 #define CAN_DIAG_INTERVAL_US 500000 // 2 Hz CAN tx ok/fail diagnostic print (temporary)
 
-#define FILTER_FC_HZ  20.0
+#define FILTER_FC_HZ  30.0
 #define FILTER_FS_HZ  10000.0  // must track SAMPLE_INTERVAL_US -- biquad coefficients are
                                  // computed for this rate in setup()
 
