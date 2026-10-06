@@ -16,12 +16,8 @@
  * since compute() is only ever called from ControlThread's fixed 400 Hz
  * period (see main.cpp's kRates.control) — no self-timing needed.
  *
- * Motor model (bench thrust fit, normalised angular velocity cubic → thrust in N).
- * The bench fit was done against motor angular velocity in rad/s, not RPM, so
- * incoming (filtered) mechanical RPM is converted first:
- *   omega    = rpm * (pi / 30)                       // RPM → rad/s
- *   rpm_norm = (omega - RPM_NORM_CENTER) / RPM_NORM_SCALE
- *   F_N      = C3*rpm_norm³ + C2*rpm_norm² + C1*rpm_norm + C0
+ * Motor model (bench thrust fit, mechanical RPM cubic → thrust in N):
+ *   F_N      = C3*rpm³ + C2*rpm² + C1*rpm + C0
  *   F_N      = max(F_N, 0)   // guard small negative thrust near zero RPM
  *
  * X-frame geometry (matches MotorMixer numbering, NED body frame X-fwd Y-right):
@@ -62,8 +58,6 @@ public:
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
 
-    // RPM → rad/s (fixed unit conversion, not per-drone).
-    static constexpr float RPM_TO_RADS = 3.14159265f / 30.0f;
     // compute() is only ever called from ControlThread's fixed 400 Hz period
     // (see main.cpp's kRates.control) — a system/thread-rate constant, not
     // per-drone tuning, so this stays fixed rather than moving into

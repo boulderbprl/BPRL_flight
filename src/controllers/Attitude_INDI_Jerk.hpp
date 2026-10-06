@@ -153,13 +153,14 @@ private:
     float _jerk_cmd_roll   = 0.0f;  // most recent update()'s jerk target, post-JERK_CMD_FILT_HZ filter (and TEMP notch, see below) — see jerk_cmd_roll()
     Biquad2pState _jerk_cmd_filt_state;  // 2nd-order Butterworth state for _jerk_cmd_roll, see update()
 
-    // ── TEMP: 6.2-8.2 Hz notch on jerk_cmd_roll ──────────────────────────────
-    // Kills a parasitic ~7.2 Hz oscillation found in flight testing
-    // (2026-08-12) that the P/Butterworth filters above don't touch (both
-    // their cutoffs sit above 7.2 Hz). Stopgap pending a structural fix —
-    // delete this whole block (both constants, both members, and the single
+    // ── TEMP: 10.5-12.5 Hz notch on jerk_cmd_roll ────────────────────────────
+    // Kills a parasitic oscillation (originally ~7.2 Hz, found in flight
+    // testing 2026-08-12, center since moved to 11.5 Hz) that the
+    // P/Butterworth filters above don't touch (both their cutoffs sit above
+    // the old 7.2 Hz center). Stopgap pending a structural fix — delete this
+    // whole block (both constants, both members, and the single
     // notch_apply() call in update()) once that lands.
-    static constexpr float JERK_CMD_NOTCH_CENTER_HZ = 7.2f;
+    static constexpr float JERK_CMD_NOTCH_CENTER_HZ = 11.5f;
     static constexpr float JERK_CMD_NOTCH_BW_HZ     = 2.0f;
     NotchCoeffs   _jerk_cmd_notch_coeffs;  // precomputed once at construction — center/bandwidth are fixed, not RPM-tracked like StateManager's notch
     Biquad2pState _jerk_cmd_notch_state;
@@ -183,7 +184,7 @@ private:
     static constexpr float NLMS_DT_S = 0.0025f;   // 400 Hz ControlThread
     static constexpr int   NLMS_DECIMATION = 8;   // see AttitudeINDI's identical constant
 
-    static constexpr float JERK_CMD_FILT_HZ = 5.0f;  // 2nd-order Butterworth cutoff applied to jerk_cmd_roll in update()
+    static constexpr float JERK_CMD_FILT_HZ = 30.0f;  // 2nd-order Butterworth cutoff applied to jerk_cmd_roll in update()
 
     static constexpr float NLMS_EPS               = 1.0e-6f;
     static constexpr float NLMS_EXCITATION_MIN_NM  = 0.02f;

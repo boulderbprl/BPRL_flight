@@ -368,12 +368,10 @@ D axis: altitude position is latched once both N and E axes have settled to HOLD
 
 Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders) — supplied per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`) rather than hardcoded `static constexpr` members; `Unmixer`'s constructor takes the config by reference and stores it.
 
-**Motor force model** — cubic fit against *normalized angular velocity*, not raw RPM directly:
+**Motor force model** — cubic fit directly against mechanical RPM:
 ```
-omega    = rpm × (π / 30)                       // RPM → rad/s
-rpm_norm = (omega − rpm_norm_center) / rpm_norm_scale      // rpm_norm_center=2005, rpm_norm_scale=880.8 rad/s
-F_N      = C3·rpm_norm³ + C2·rpm_norm² + C1·rpm_norm + C0  // motor_c3=0.0134, motor_c2=0.5607, motor_c1=2.2831, motor_c0=2.4540
-F_N      = max(F_N, 0)                          // guard small negative thrust near zero RPM
+F_N = C3·rpm³ + C2·rpm² + C1·rpm + C0   // Drone1: motor_c3=5.8387e-14, motor_c2=7.5398e-9, motor_c1=-4.5422e-6, motor_c0=0.005144
+F_N = max(F_N, 0)                       // guard small negative thrust near zero RPM
 ```
 
 **X-frame geometry** (arm length `arm_length_m = 0.1275 m`, NED body frame):

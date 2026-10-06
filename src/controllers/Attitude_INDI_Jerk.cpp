@@ -69,7 +69,7 @@ void AttitudeINDIJerk::update(const float euler[3], const float state_full[],
     // TEMP: see JERK_CMD_NOTCH_CENTER_HZ in the header — delete this one
     // line (plus its two members/two constants) once the 7.2 Hz parasitic
     // oscillation is fixed structurally.
-    _jerk_cmd_roll = notch_apply(_jerk_cmd_roll, _jerk_cmd_notch_state, _jerk_cmd_notch_coeffs);
+    // _jerk_cmd_roll = notch_apply(_jerk_cmd_roll, _jerk_cmd_notch_state, _jerk_cmd_notch_coeffs);
     const float delta_torque_roll_p = (accel_cmd_roll  - p_dot_meas)       * _kappa_roll  * _g1_roll;
     const float delta_torque_roll_d = (_jerk_cmd_roll   - _roll_jerk_input) * _kappa2_roll * _g2_roll;
     const float delta_torque_roll   = delta_torque_roll_p + delta_torque_roll_d;

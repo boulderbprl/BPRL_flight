@@ -105,12 +105,14 @@ const DroneConfig kDroneConfig = {
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
     
-    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, rpm_norm_center, rpm_norm_scale, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // motor_c0..c3 re-expressed in raw RPM (was normalised-omega cubic C0=2.4540 C1=2.2831 C2=0.5607 C3=0.0134,
+    // center=2005.0 scale=880.8); values below reproduce that same fit exactly, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0
     {
-        0.1275f,                                  // arm_length_m
-        2.4540f, 2.2831f, 0.5607f, 0.0134f,        // motor_c0, motor_c1, motor_c2, motor_c3
-        2005.0f, 880.8f, 7.04f,                    // rpm_norm_center, rpm_norm_scale, max_thrust_n
-        20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz
+        0.1275f,                                          // arm_length_m
+        0.004223f, -7.2859e-6f, 6.6321e-9f, 2.2519e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
+        7.04f,                                              // max_thrust_n
+        20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
     },
     
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }

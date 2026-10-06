@@ -49,8 +49,8 @@ inline JerkEstimate estimate_jerk(const StrainRateRaw &strain, const float strai
     //     {  -0.70644f ,    0.0f}, // p
     // };
     constexpr float JKFT_MATRIX[5][2] = {
-        {  0.06f,      0.2f}, // sr
-        {  0.06f,     -0.2f}, // sl
+        {  0.06f,      0.11249f}, // sr
+        {  0.06f,     -0.11042f}, // sl
     };
 
     // const float inputs[5] = { (float)strain.val[0] - strain_bias[0],

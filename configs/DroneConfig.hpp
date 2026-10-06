@@ -144,8 +144,8 @@ struct MotorMixerConfig {
 // from arm_length_m/max_thrust_n so the two numbers can't drift apart.
 struct UnmixerConfig {
     float arm_length_m;
-    float motor_c0, motor_c1, motor_c2, motor_c3;   // bench thrust fit
-    float rpm_norm_center, rpm_norm_scale, max_thrust_n;
+    float motor_c0, motor_c1, motor_c2, motor_c3;   // bench thrust fit: F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0
+    float max_thrust_n;
     float rpm_filt_hz, rpm_filt_extra_hz;
 };
 

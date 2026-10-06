@@ -62,15 +62,15 @@ const DroneConfig kDroneConfig = {
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 8.20f,  0.2f,  0.25f, 5.0f, 10.0f, 10.0f, 5.0f },    // (P was 34.2) roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; first-cut P-only, needs bench ID
-        0.0075f,  // g1_seed_roll — "P" term seed, see above
+        { 8.00f,  2.0f,  0.0f, 5.0f, 31.25f, 31.35f, 31.25f },    // (P was 34.2) roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; first-cut P-only, needs bench ID
+        0.006f,  // g1_seed_roll — "P" term seed, see above
         0.0065f, // g1_seed_pitch
-        0.0045f,  // g2_seed_roll — "D" term seed, bootstrapped from g1_seed_roll (same rigid-body 1/I argument), needs independent bench ID
+        0.001f,  // g2_seed_roll — "D" term seed, bootstrapped from g1_seed_roll (same rigid-body 1/I argument), needs independent bench ID
         0.9f,    // indi_output_gain_roll (kappa) — "P" term
         1.0f,    // indi_output_gain_pitch (kappa)
         0.1f,    // jerk_output_gain_roll (kappa2) — "D" term, deliberately low authority pending characterization
-        0.05f,   // nlms_mu_pid
-        0.005f,  // nlms_mu_indi
+        0.0f,   // nlms_mu_pid
+        0.0f,  // nlms_mu_indi
         3.0f,    // yaw_gain
     },
 
@@ -114,12 +114,13 @@ const DroneConfig kDroneConfig = {
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
     
-    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, rpm_norm_center, rpm_norm_scale, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // motor_c0..c3: bench thrust fit, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0
     {
-        0.1275f,                                  // arm_length_m
-        2.4540f, 2.2831f, 0.5607f, 0.0134f,        // motor_c0, motor_c1, motor_c2, motor_c3
-        2005.0f, 880.8f, 7.04f,                    // rpm_norm_center, rpm_norm_scale, max_thrust_n
-        20.0f, 15.0f,                              // rpm_filt_hz, rpm_filt_extra_hz
+        0.1275f,                                          // arm_length_m
+        0.005144f, -4.5422e-6f, 7.5398e-9f, 5.8387e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
+        7.04f,                                              // max_thrust_n
+        20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
     },
    
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
@@ -131,7 +132,7 @@ const DroneConfig kDroneConfig = {
    
     // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
     {
-        70.0f, // log_rate_hz
+        100.0f, // log_rate_hz
         { true, // att
           true, // lin
           true, // rcin

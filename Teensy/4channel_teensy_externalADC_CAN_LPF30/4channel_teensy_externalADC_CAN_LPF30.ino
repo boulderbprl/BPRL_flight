@@ -3,6 +3,11 @@
 #include <math.h>
 #include <string.h>
 
+// 2nd-order LPF instead of a fixed-frequency notch: the structural mode the
+// notch (4channel_teensy_externalADC_CAN_Notch) targeted at ~37.5 Hz drifts
+// as onboard equipment changes, so a fixed notch center goes stale. A plain
+// 30 Hz lowpass has no center to chase -- it just rolls off everything above
+// the passband regardless of where the resonance currently sits.
 const bool LPF_ENABLED = true;  // set false to bypass the Butterworth LPF
 
 #define CAN_BAUD_RATE  1000000
@@ -18,7 +23,7 @@ const bool LPF_ENABLED = true;  // set false to bypass the Butterworth LPF
 #define SPI_CLOCK_HZ  10000000
 #define SPI_MODE_SEL  SPI_MODE2
 
-#define SAMPLE_INTERVAL_US  100    // 20 kHz sampling (filter design rate) -- was 4 kHz under
+#define SAMPLE_INTERVAL_US  100    // 10 kHz sampling (filter design rate) -- was 4 kHz under
                                     // bit-banged SPI; hardware SPI's ~6.4us 4-channel read
                                     // (vs ~128us bit-banged) is what buys this. Comfortable
                                     // margin above the ~15-20us hard floor (SPI read + CONVST
@@ -55,15 +60,15 @@ elapsedMicros diagTimer;
 static uint32_t s_can_tx_ok = 0;
 static uint32_t s_can_tx_fail = 0;
 
-// 4th-order Butterworth LPF, implemented as two cascaded biquads
-// (Direct Form II Transposed) per channel.
+// 2nd-order Butterworth LPF, implemented as a single biquad
+// (Direct Form II Transposed) per channel -- same order as the notch
+// filter it replaces.
 struct Biquad {
   double b0, b1, b2, a1, a2;
   double z1, z2;
 };
 
 Biquad stage1[4];
-Biquad stage2[4];
 
 double biquadProcess(Biquad &f, double x) {
   double y = f.b0 * x + f.z1;
@@ -127,13 +132,11 @@ void setup() {
   can2.begin();
   can2.setBaudRate(CAN_BAUD_RATE);
 
-  // 4th-order Butterworth = two biquad sections with the standard
-  // Butterworth pole-pair Q values: Q_k = 1 / (2*cos((2k-1)*pi/8))
-  double Q1 = 1.0 / (2.0 * cos(PI / 8.0));       // 0.541196
-  double Q2 = 1.0 / (2.0 * cos(3.0 * PI / 8.0)); // 1.306563
+  // 2nd-order Butterworth = one biquad section at the standard single-pole-pair Q:
+  // Q_k = 1 / (2*cos((2k-1)*pi/4)), k=1
+  double Q1 = 1.0 / (2.0 * cos(PI / 4.0));  // 0.707107
   for (int i = 0; i < 4; i++) {
     setBiquadLowpass(stage1[i], FILTER_FC_HZ, FILTER_FS_HZ, Q1);
-    setBiquadLowpass(stage2[i], FILTER_FC_HZ, FILTER_FS_HZ, Q2);
   }
 }
 
@@ -165,12 +168,11 @@ void loop() {
     digitalWrite(PIN_CS, HIGH);
     SPI.endTransaction();
 
-    // Filter each channel: 4th-order Butterworth LPF, FILTER_FC_HZ / FILTER_FS_HZ above
+    // Filter each channel: 2nd-order Butterworth LPF, FILTER_FC_HZ / FILTER_FS_HZ above
     int16_t filtered[4];
     for (int i = 0; i < 4; i++) {
       if (LPF_ENABLED) {
         double y = biquadProcess(stage1[i], (double)tmp[i]);
-        y = biquadProcess(stage2[i], y);
         if (y > 32767.0) y = 32767.0;
         if (y < -32768.0) y = -32768.0;
         filtered[i] = (int16_t)lround(y);
