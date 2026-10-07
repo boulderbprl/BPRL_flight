@@ -34,20 +34,20 @@
 const DroneConfig kDroneConfig = {
     // .pid — AttitudePidGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, yaw_stick_gain }
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
-        { 0.08f, 0.05f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
-        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
-        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
-        { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 7.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
+        { 7.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
+        { 0.07f, 0.04f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
+        { 0.08f, 0.05f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
+        { 0.18f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.70f, 0.05f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         3.0f,  // yaw_stick_gain
     },
 
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
     // Unused while .controllers.indi_enabled=false below; copied from Drone1 only to keep the struct valid.
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 6.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
@@ -75,18 +75,18 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
 
-    // .alt — AltControlGains { climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate }
     {
+        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
     },
 
-    // .pos — PosControlGains { pos_N, pos_E, pos_D, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 2.0f, 0.70f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 2.0f, 0.70f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
 
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
@@ -134,12 +134,12 @@ const DroneConfig kDroneConfig = {
           true, // rcin
           true, // outp
           true, // rpms
-          true, // strn
+          false, // strn
           true, // imu1
           true, // imu2
           false, // imu3
-          true, // indi
-          true, // baro
+          false, // indi
+          false, // baro
           true, // ctun
           true }, // mocp
     },

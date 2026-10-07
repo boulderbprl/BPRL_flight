@@ -19,6 +19,8 @@ static constexpr int iBgx=13, iBgy=14, iBgz=15;
 StateManager::StateManager()
     : _primary(0), _initialized(false),
       _yaw_zero_captured(false), _yaw_offset_q{1.0f, 0.0f, 0.0f, 0.0f},
+      _mocap_yaw_pending(false), _mocap_yaw_aligned(false),
+      _mocap_yaw_rad(0.0f), _yaw_reset_rad(0.0f),
       _blended_p(0.0f), _blended_q(0.0f), _blended_r(0.0f),
       _blended_x(0.0f), _blended_y(0.0f), _blended_z(0.0f),
       _blended_u(0.0f), _blended_v(0.0f), _blended_w(0.0f),
@@ -37,8 +39,13 @@ void StateManager::init()
         _lanes[i].init(i);
 
     _primary           = 0;
+    for (int i = 0; i < NUM_LANES; ++i) _lane_active[i] = false;
     _yaw_zero_captured = false;
     _yaw_offset_q      = { 1.0f, 0.0f, 0.0f, 0.0f };
+    _mocap_yaw_pending = false;
+    _mocap_yaw_aligned = false;
+    _mocap_yaw_rad     = 0.0f;
+    _yaw_reset_rad     = 0.0f;
     _blended_p    = _blended_q    = _blended_r    = 0.0f;
     _blended_x    = _blended_y    = _blended_z    = 0.0f;
     _blended_u    = _blended_v    = _blended_w    = 0.0f;
@@ -87,6 +94,15 @@ void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw
     _yaw_offset_q = { cosf(delta * 0.5f), 0.0f, 0.0f, sinf(delta * 0.5f) };
 }
 
+void StateManager::_align_lanes_to_mocap(float mocap_yaw_rad)
+{
+    const float yaw_before = yaw();
+    for (int i = 0; i < NUM_LANES; ++i)
+        _lanes[i].reset_yaw(mocap_yaw_rad);
+    _yaw_reset_rad    += wrap_pi(yaw() - yaw_before);
+    _mocap_yaw_aligned = true;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * Main update — called at 400 Hz from ControlThread
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -99,6 +115,12 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     for (int i = 0; i < NUM_LANES; ++i) {
         if (imu[i].valid)
             _lanes[i].predict(dt, imu[i].accel, imu[i].gyro);
+        // A lane with no IMU behind it (e.g. imu3 on the two-IMU Orqa board)
+        // is initialised but never predicts, so its state is frozen. It must
+        // get no blend weight and never be picked as primary — otherwise it
+        // drags every blended output toward its stale values (two live lanes
+        // + one dead one scaled position, velocity and rates to 2/3).
+        _lane_active[i] = _lanes[i].is_valid() && imu[i].valid;
     }
 
     // ── 1.5. Gravity-vector attitude + accel-bias update (gated on |a| ≈ g) ─
@@ -149,6 +171,12 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _grav_window_dt = 0.0f;
     }
 
+    // Latch a fresh mocap heading until one of the two paths below uses it.
+    if (mocap.valid && mocap.has_new_yaw) {
+        _mocap_yaw_rad     = mocap.yaw;
+        _mocap_yaw_pending = true;
+    }
+
     // ── 2. IMX5 quaternion update on all lanes (200 Hz, asynchronous) ─────
     // IMX5 quaternion is body→NED (verified: Euler angles match physical attitude).
     // Gated on age rather than fused as if current: a CAN sample older than
@@ -173,9 +201,18 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
         // Re-anchor to mocap's absolute heading whenever a fresh sample
         // arrives, so yaw stays aligned to the mocap frame's North instead
-        // of drifting back to the boot-relative zero above.
-        if (mocap.valid && mocap.has_new_yaw)
-            _reoffset_yaw_from_mocap(mocap.yaw, q_meas);
+        // of drifting back to the boot-relative zero above. The offset
+        // outlives the mocap link: after a dropout it is simply no longer
+        // refreshed. On the very first sample the lanes are snapped across
+        // as well — the offset can move by up to 180° at that moment, and
+        // update_quaternion()'s innovation gate would otherwise reject the
+        // re-anchored quaternion outright.
+        if (_mocap_yaw_pending) {
+            _reoffset_yaw_from_mocap(_mocap_yaw_rad, q_meas);
+            if (!_mocap_yaw_aligned)
+                _align_lanes_to_mocap(_mocap_yaw_rad);
+            _mocap_yaw_pending = false;
+        }
 
         q_meas = quat_norm(quat_mul(_yaw_offset_q, q_meas));
 
@@ -198,6 +235,24 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         }
     }
 
+    // ── 2.5. Mocap heading with no IMX5 (e.g. Drone3) ─────────────────────
+    // Nothing above corrects yaw on these airframes, so mocap heading goes
+    // into the lanes directly, the way EKF3 handles an ExternalNav yaw
+    // source: align once on the first sample (alignYawAngle()), fuse every
+    // sample after that (fuseEulerYaw()). When mocap drops out the lanes
+    // keep the heading they had and coast on the gyros — still in the mocap
+    // frame, never back to the boot-relative zero — and fusion picks up
+    // again when the link returns.
+    if (_mocap_yaw_pending && !can_imu.valid) {
+        if (!_mocap_yaw_aligned) {
+            _align_lanes_to_mocap(_mocap_yaw_rad);
+        } else {
+            for (int i = 0; i < NUM_LANES; ++i)
+                _lanes[i].update_yaw(_mocap_yaw_rad, R_MOCAP_YAW);
+        }
+        _mocap_yaw_pending = false;
+    }
+
     // ── 3. Select primary lane ────────────────────────────────────────────
     _primary = _select_primary();
 
@@ -210,7 +265,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     float w[NUM_LANES] = {}, w_sum = 0.0f;
     const float w_alpha = lowpass_alpha(STATEMGR_LP_BLENDW_HZ, dt);
     for (int i = 0; i < NUM_LANES; ++i) {
-        if (!_lanes[i].is_valid()) { _lane_weight_filt[i] = 0.0f; continue; }
+        if (!_lane_active[i]) { _lane_weight_filt[i] = 0.0f; continue; }
         const float w_raw = 1.0f / (1e-4f + _lanes[i].innovation_norm());
         _lane_weight_filt[i] = lowpass(w_raw, _lane_weight_filt[i], w_alpha);
         w[i] = _lane_weight_filt[i];
@@ -277,9 +332,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     }
 
     // 2nd-order (Butterworth) lowpass filter blended u/v/w
-    _u_filt = lowpass2p(_blended_u, _u_filt_state, STATEMGR_LP_UVW_HZ, dt);
-    _v_filt = lowpass2p(_blended_v, _v_filt_state, STATEMGR_LP_UVW_HZ, dt);
-    _w_filt = lowpass2p(_blended_w, _w_filt_state, STATEMGR_LP_UVW_HZ, dt);
+    _u_filt = lowpass2p(_blended_u, _u_filt_state, STATEMGR_LP_UVW_HZ, CONTROL_DT_S);
+    _v_filt = lowpass2p(_blended_v, _v_filt_state, STATEMGR_LP_UVW_HZ, CONTROL_DT_S);
+    _w_filt = lowpass2p(_blended_w, _w_filt_state, STATEMGR_LP_UVW_HZ, CONTROL_DT_S);
 
     // ── 6. Soft-blend p/q/r: bias-corrected gyros + IMX5 blend ──
     _blended_p = _blended_q = _blended_r = 0.0f;
@@ -342,9 +397,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // 2nd-order (Butterworth) lowpass filter uvw_dot — matches ArduPilot's
     // INS-level LowPassFilter2p on raw accelerometer samples, steeper
     // roll-off than the 1st-order lowpass() used elsewhere in this file.
-    _ud_filt = lowpass2p(_blended_ud, _ud_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
-    _vd_filt = lowpass2p(_blended_vd, _vd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
-    _wd_filt = lowpass2p(_blended_wd, _wd_filt_state, STATEMGR_LP_UVWDOT_HZ, dt);
+    _ud_filt = lowpass2p(_blended_ud, _ud_filt_state, STATEMGR_LP_UVWDOT_HZ, CONTROL_DT_S);
+    _vd_filt = lowpass2p(_blended_vd, _vd_filt_state, STATEMGR_LP_UVWDOT_HZ, CONTROL_DT_S);
+    _wd_filt = lowpass2p(_blended_wd, _wd_filt_state, STATEMGR_LP_UVWDOT_HZ, CONTROL_DT_S);
 
     // ── 8. Notch out motor vibration, then lowpass the blended rates before
     // they reach the rate PID — rejects vibration-band noise that would
@@ -362,9 +417,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     const float q_notched = notch_apply(_blended_q, _q_notch_state, notch_c);
     const float r_notched = notch_apply(_blended_r, _r_notch_state, notch_c);
 
-    _p_filt = lowpass2p(p_notched, _p_filt_state, STATEMGR_LP_PQ_HZ, dt);
-    _q_filt = lowpass2p(q_notched, _q_filt_state, STATEMGR_LP_PQ_HZ, dt);
-    _r_filt = lowpass2p(r_notched, _r_filt_state, STATEMGR_LP_R_HZ, dt);
+    _p_filt = lowpass2p(p_notched, _p_filt_state, STATEMGR_LP_PQ_HZ, CONTROL_DT_S);
+    _q_filt = lowpass2p(q_notched, _q_filt_state, STATEMGR_LP_PQ_HZ, CONTROL_DT_S);
+    _r_filt = lowpass2p(r_notched, _r_filt_state, STATEMGR_LP_R_HZ, CONTROL_DT_S);
 
     // ── 9. Angular acceleration: differentiate notch-filtered p/q (ahead of
     // the STATEMGR_LP_PQ_HZ 2nd-order LPF above, so p_dot/q_dot don't inherit
@@ -373,8 +428,8 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // to 0 to A/B test against the 2nd-order-only filter. r_dot is
     // unchanged — differentiates the fully-filtered r with the original
     // 1st-order lowpass, since yaw has no INDI path consuming it.
-    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
-    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, dt);
+    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, CONTROL_DT_S);
+    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, CONTROL_DT_S);
     const float alpha_pqdot_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, dt);
     _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
     _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
@@ -397,7 +452,7 @@ int StateManager::_select_primary() const
     float best_score = FLT_MAX;
 
     for (int i = 0; i < NUM_LANES; ++i) {
-        if (!_lanes[i].is_valid()) continue;
+        if (!_lane_active[i]) continue;
         float score = _lanes[i].innovation_norm();
         if (score < best_score) {
             best_score = score;

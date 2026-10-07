@@ -65,6 +65,8 @@ public:
                 const float input[], const float current_torque[2],
                 const Unmixer &unmixer, float out_cmds[3]) override;
     void reset_all() override;
+    void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
+    void set_yaw_hold_scale(float scale) override { _yaw_hold_scale = scale; }
 
     // [delta_roll_Nm, delta_pitch_Nm] incremental INDI correction, and
     // [accel_cmd_roll, accel_cmd_pitch] rad/s² rate-PID output fed to the
@@ -123,6 +125,7 @@ private:
 
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
+    float _yaw_hold_scale = 1.0f;  // see AttitudeController::set_yaw_hold_scale()
 
     float _delta_torque[2] = {};  // see get_diag()
     float _accel_cmd[2]    = {};
@@ -150,10 +153,6 @@ private:
     // since they're always evaluated together in the same update() call.
     int _nlms_tick_count = 0;
 
-    // Fixed control-loop period — matches Unmixer::RPM_FILT_DT_S's existing
-    // precedent of a fixed rather than measured dt for this filter chain.
-    static constexpr float NLMS_DT_S = 0.0025f;   // 400 Hz ControlThread
-
     // The tau_f/omegadot_f low-pass filters below still run every tick (they
     // need a continuous 400 Hz feed to hold their designed cutoff), but the
     // NLMS Delta_tau_f/Delta_Omega_dot_f regressor is only formed and stepped
@@ -176,7 +175,7 @@ private:
     static constexpr float NLMS_MAX_STEP_FRAC        = 0.10f;   // max |G1_hat step| per update, as a fraction of the seed — needs bench tuning
     static constexpr float NLMS_MAX_DRIFT_FRAC       = 0.50f;   // max total drift of G1_hat from its seed — needs bench tuning
 
-    static constexpr float YAW_STICK_DEADBAND   = 0.10f;  // normalised stick [-1,1], matches FlightStateMachine::STICK_DEADBAND
+    static constexpr float YAW_STICK_DEADBAND   = 0.10f;  // normalised stick [-1,1], matches PosControl::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE    = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
 
     // One NLMS update step for a single axis. tau_now/omegadot_now are this

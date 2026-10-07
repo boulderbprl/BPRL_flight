@@ -2,6 +2,7 @@
 #include <cstdint>
 #include "src/math/math.hpp"
 #include "configs/DroneConfig.hpp"
+#include "src/threads.hpp"   // CONTROL_DT_S
 
 /*
  * Unmixer — converts per-motor RPM to physical roll/pitch torques (N·m).
@@ -14,7 +15,7 @@
  * helps INDI; <=0 disables it (lowpass_alpha() passthrough), leaving the
  * 2nd-order-only behaviour. dt is a fixed constant rather than measured,
  * since compute() is only ever called from ControlThread's fixed 400 Hz
- * period (see main.cpp's kRates.control) — no self-timing needed.
+ * period (CONTROL_DT_S in src/threads.hpp) — no self-timing needed.
  *
  * Motor model (bench thrust fit, normalised RPM cubic → thrust in N).
  * The bench fit is done directly against mechanical RPM:
@@ -59,12 +60,6 @@ public:
 
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
-
-    // compute() is only ever called from ControlThread's fixed 400 Hz period
-    // (see main.cpp's kRates.control) — a system/thread-rate constant, not
-    // per-drone tuning, so this stays fixed rather than moving into
-    // UnmixerConfig.
-    static constexpr float RPM_FILT_DT_S = 0.0025f;
 
 private:
     static float motor_force_N(const UnmixerConfig &cfg, float rpm);

@@ -66,18 +66,18 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
     
-    // .alt — AltControlGains { climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate }
     {
+        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
     },
     
-    // .pos — PosControlGains { pos_N, pos_E, pos_D, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
     
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }

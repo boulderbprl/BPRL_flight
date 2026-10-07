@@ -52,6 +52,15 @@ public:
     void update_position(const float xyz[3], float R_var);
     void update_ned_vel (const float vel[3], float R_var);
 
+    // Mocap heading, for airframes with no IMX5 quaternion to carry yaw.
+    // Mirrors EKF3's ExternalNav yaw source (AP_NavEKF3_MagFusion.cpp):
+    // reset_yaw() is its alignYawAngle() — snap heading onto the external
+    // frame once — and update_yaw() is its fuseEulerYaw(EXTNAV), a scalar
+    // 321-Euler-yaw measurement fused on every sample after that.
+    // yaw_rad: heading in the mocap NED frame (rad). Roll/pitch untouched.
+    void reset_yaw (float yaw_rad);
+    void update_yaw(float yaw_rad, float R_var);
+
     // Barometric altitude fusion — active when g_baro.valid.
     // alt_up_m: altitude above the driver's boot-time reference, POSITIVE UP
     // (NOT NED — the sign flip to NED-down happens inside this method).
@@ -169,6 +178,14 @@ private:
     // diagonal here (each row observes exactly one state directly), so
     // S_ii is just that state's P diagonal + R — no matrix product needed.
     static constexpr float MOCAP_CHI2_GATE = 5.0f;
+
+    // ── Mocap yaw measurement update parameters ───────────────────────────
+    // Same gate pattern again, on a single scalar innovation.
+    static constexpr float YAW_CHI2_GATE = 5.0f;
+    // update_yaw() is skipped below this value of cos²(pitch) (~80° pitch),
+    // where 321 Euler yaw goes singular. EKF3 switches to a 312 sequence
+    // there instead; this airframe never holds that attitude, so just skip.
+    static constexpr float YAW_MIN_COS2_PITCH = 0.03f;
 
     // ── Barometric altitude measurement update parameters ──────────────────
     // Same joint chi-squared gate pattern as MOCAP_CHI2_GATE; kept as its own

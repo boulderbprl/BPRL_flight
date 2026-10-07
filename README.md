@@ -7,7 +7,6 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 ## TODO
 
 - Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
-- Fix the position hold controller.
 - Add trajectory tracking to the position hold controller.
 - Add more commands over the MAVLink connection.
 
@@ -55,8 +54,10 @@ BPRL_flight/
 │
 ├── src/
 │   ├── FlightState.hpp       Shared index enums: StateIdx, InputIdx
-│   ├── threads.hpp           Shared state (g_state, g_imu, …), ThreadRates struct
+│   ├── threads.hpp           Shared state (g_state, g_imu, …), ThreadRates struct, CONTROL_PERIOD_US / CONTROL_DT_S (control-loop rate + the fixed dt its filters use)
 │   ├── threads.cpp           All thread function bodies + global state definitions
+│   ├── uptime.hpp            bprl_micros()/bprl_millis() — monotonic time since boot (safe with Drone3's 16-bit system tick)
+│   ├── usb_serial.hpp/.cpp   USB CDC serial port (commands + debug streams)
 │   │
 │   ├── coms/                 Peripheral drivers
 │   │   ├── SPI.hpp/.cpp      SPI bus init: on-board IMUs (3× Cube boards, 2× Drone3/Orqa — chip set/count is board-conditional, see below) + MS5611 barometer (Cube boards only; Drone3's barometer is I2C, see Baro/DPS310 below)
@@ -67,6 +68,7 @@ BPRL_flight/
 │   │   ├── PWM.hpp/.cpp      Thin MOTOR_PROTOCOL-select wrapper (DShot vs. standard servo PWM) around motor_output_write() — the actual bidirectional-DShot timer/DMA driver is DShot.hpp/.cpp (see src/coms/README.md)
 │   │   ├── DShot.hpp/.cpp    Bidirectional DShot600 driver — Cube boards share TIM1 (3 motors, CC2 cross-capture rotation) + TIM4 (1 motor); Drone3/Orqa uses TIM4+TIM2, 2 motors time-multiplexed per timer (board has only 2 usable BIDIR timer pairs on its MOT1-4 ESC connector)
 │   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
+│   │   ├── IOMCU.hpp/.cpp    UART link to the Cube carrier's IO co-processor — drives MAIN 1-4 PWM (Drone2, MOTOR_PROTO_IOMCU)
 │   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
 │   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
 │   │       ⚠️ DO NOT switch this to the external Ramtron/FM25 SPI FRAM chip
@@ -97,14 +99,18 @@ BPRL_flight/
 │   │   ├── Attitude_PID.hpp/.cpp     Cascaded P+PID attitude controller
 │   │   ├── Attitude_INDI.hpp/.cpp    Incremental NDI roll/pitch controller
 │   │   ├── Attitude_PID_PI.hpp/.cpp  Outer P + rate-PID ("SLC") + inner PI on measured angular acceleration, ported from the BPRL ArduPilot fork
-│   │   ├── AltControl.hpp/.cpp     Altitude hold cascade (stick→climb rate→accel→thrust)
-│   │   ├── PosControl.hpp/.cpp     Position hold cascade (pos→vel→lean angles)
+│   │   ├── AltControl.hpp/.cpp     Throttle passthrough + altitude hold (stick→altitude target + climb rate→thrust), shared by ALT_HOLD and POS_HOLD
+│   │   ├── PosControl.hpp/.cpp     N/E position hold cascade (pos→vel→lean angles)
 │   │   ├── Unmixer.hpp/.cpp        RPM → physical torque (N·m) for INDI feedback
 │   │   └── MotorMixer.hpp/.cpp     X-frame quadcopter mixer (torque+thrust → motor cmds)
 │   │
 │   ├── state_estimator/      EKF state estimation
 │   │   ├── EKF.hpp/.cpp      16-state Extended Kalman Filter (one lane per IMU)
 │   │   └── StateManager.hpp/.cpp  Assembles 19-state output
+│   │
+│   ├── math/                 math.hpp/.cpp — filters, quaternion and matrix helpers (see Math Utilities)
+│   ├── sensors/              StrainRate, StrainGauge (I2C strain gauge array), EncoderRPM (CAN shaft-encoder nodes)
+│   ├── diagnostics/          ThreadTiming — per-thread timing instrumentation (BPRL_TIMING builds)
 │   │
 │   └── logging/              SD card logging
 │       ├── LogMessages.hpp   Packed log structs + kLogDefs[] descriptor table
@@ -142,12 +148,17 @@ BPRL_flight/
 |---|---|---|---|
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
-| ControlThread | NORMALPRIO+22 | 400 Hz | Full 3-lane EKF (fuse sensors → g_state[]) → FlightStateMachine → MotorMixer → motor output, all in one tick |
-| I2CThread | NORMALPRIO+20 | 200 Hz | Poll I2C devices (strain rate sensor) |
+| ControlThread | NORMALPRIO+22 | 400 Hz (`CONTROL_PERIOD_US` in `src/threads.hpp`) | Full 3-lane EKF (fuse sensors → g_state[]) → FlightStateMachine → MotorMixer → motor output, all in one tick |
+| I2CThread | NORMALPRIO+20 | 200 Hz | Poll I2C devices (strain sensors; DPS310 barometer on Drone3) |
+| IOMCUThread | NORMALPRIO+12 | ~400 Hz | FMU↔IO co-processor PWM writes — only built with `MOTOR_PROTO_IOMCU` (Drone2) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
-| HeartbeatThread | NORMALPRIO-5 | 1 Hz | LED heartbeat |
+| HeartbeatThread | NORMALPRIO-5 | 200 ms tick | LED heartbeat (200 ms flash every 2 s) |
+| MAVLinkThread | NORMALPRIO-8 | 100 Hz | MAVLink on TELEM2 (TX7/RX7 on Orqa) — mocap ingestion |
 | LogThread | NORMALPRIO-15 | 50 Hz (configurable per drone) | Snapshot all state → SD card (13 message types per tick, each individually enable/disable-able per drone) |
-| DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU streams (BPRL_DEBUG only) |
+| DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU/$POS/$STRAIN streams (BPRL_DEBUG only) |
+| USBCmdThread | NORMALPRIO-20 | event-driven | USB command parser (motor test, log download, calibration, diagnostics) |
+
+All thread rates are set in `main.cpp`'s `kRates`, except `ControlThread`'s: its period is `CONTROL_PERIOD_US` in `src/threads.hpp`, and `CONTROL_DT_S` is derived from it so the fixed-`dt` filters that run inside the control loop (`PosControl`, `Unmixer`, `AttitudeINDI`, `StateManager`'s 2nd-order lowpasses) follow the thread rate automatically. Tick-count constants (`FlightStateMachine`'s debounce/blend/spool-up ticks, `CAN_TIMEOUT_TICKS`) and the EKF's per-step process noise do **not** follow it and need adjusting by hand if the rate changes.
 
 State estimation used to run in a separate `StateEstThread` at 625 Hz, free-running independently of `ControlThread`'s 400 Hz timer. That 625:400 ratio isn't an integer ratio, so the number of estimator writes landing between two control-thread reads alternated irregularly — a suspected structural contributor to high-frequency jitter in the control output. The two threads were merged into one: the EKF now runs unconditionally at the top of every `ControlThread` tick, so the mixer always consumes this exact tick's fresh estimate rather than a value handed across a free-running cross-thread boundary. `ControlThread` sits above `I2CThread` deliberately — the flight-critical loop shouldn't be delayed by a slower, less critical sensor poll. See [Timing and Utilization](#timing-and-utilization) below for how this priority ordering and the current rates were chosen/verified.
 
@@ -163,6 +174,9 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000, physical DShot lane order (0=disarm; protocol conversion in `motor_output_write()`) — `MotorMixer` computes these in logical [FR, RL, FL, RR] order and remaps to lane order via `MotorMixerConfig::motor_map` at the last step, see [MotorMixer](#motormixer) below |
 | `g_ctrl[4]` | `state_mtx` | Active controller's torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
 | `g_armed` | `state_mtx` | Arm state |
+| `g_flight_mode` | `state_mtx` | `FlightStateMachine`'s current flight mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD) |
+| `g_indi_diag[10]` | `state_mtx` | INDI shadow diagnostics (unmixed torque, delta torque, command, commanded accel, `G1_hat`; roll/pitch each) — feeds the `INDI` log |
+| `g_ctun_diag[12]` | `state_mtx` | POS_HOLD tuning diagnostics (N/E position and velocity targets/errors, lean-angle targets, climb-rate target/error) — computed in `FlightStateMachine::mode_pos_hold()`, feeds the `CTUN` log; holds its last values outside active POS_HOLD |
 | `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
 | `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default; INDI and/or PID+PI follow, if the drone's config enables them — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)) — for `$TEL`/logging |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
@@ -199,8 +213,8 @@ RC input[6]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
      ▼
 FlightStateMachine
      ├─ STABILIZE   — attitude PID/INDI + expo throttle passthrough
-     ├─ ALT_HOLD    — attitude PID/INDI + altitude hold (stick → climb rate cascade)
-     └─ POS_HOLD    — position hold → lean angles + altitude hold (D-axis rate)
+     ├─ ALT_HOLD    — attitude PID/INDI + altitude hold (stick → altitude target + climb rate)
+     └─ POS_HOLD    — N/E position hold → lean angles + the same altitude hold as ALT_HOLD
      │
      ▼
 MotorMixer  →  DShot600 (4 motors)
@@ -211,8 +225,8 @@ MotorMixer  →  DShot600 (4 motors)
 | `input[4]` value | Mode | Attitude target | Throttle |
 |---|---|---|---|
 | < −0.33 | STABILIZE | Pilot stick [rad] | Expo + tilt boost passthrough |
-| −0.33 to +0.33 | ALT_HOLD | Pilot stick [rad] | Climb rate cascade → thrust |
-| > +0.33 | POS_HOLD | PosControl lean angles [rad] | AltControl D-axis rate |
+| −0.33 to +0.33 | ALT_HOLD | Pilot stick [rad] | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
+| > +0.33 | POS_HOLD | PosControl lean angles [rad] | `AltControl::alt_hold()` — identical to ALT_HOLD |
 
 Mode changes reset all controller integrators.
 
@@ -232,27 +246,33 @@ With all three enabled, the 3-position controller-select switch maps one-to-one 
 
 ### AltControl — altitude hold
 
-`AltControl` owns the throttle output for all modes. In STABILIZE it applies expo shaping and a tilt-boost (`1/min(cos φ, cos θ)`) to the raw stick. In ALT_HOLD and POS_HOLD it runs a two-loop cascade:
+`AltControl` owns the throttle output for all modes. In STABILIZE it applies expo shaping and a tilt-boost (`1/min(cos φ, cos θ)`) to the raw stick. ALT_HOLD and POS_HOLD both call the same `alt_hold()`:
 
 ```
-pilot stick [0,1]  ──►  stick_to_climb_rate  ──►  climb_rate_pid  ──►  accel_pid  ──►  thrust_out
+pilot stick [0,1]  ──►  stick_to_climb_rate  ──┬──►  altitude target += rate·dt  ──►  pos_P  ──┐
+                                               └──────────────── feed-forward ─────────────────┴──►  climb_rate_pid  ──►  thrust_out
 ```
 
-In POS_HOLD the outer stick-to-rate step is skipped; the climb rate target comes directly from `PosControl`.
+Outside the stick's centre deadband the stick commands a climb rate (up to 3 m/s) and moves the altitude target with it; inside the deadband the target stops and the position loop holds that altitude (the same scheme as ArduPilot's `set_pos_target_z_from_climb_rate_cm()`). POS_HOLD differs from ALT_HOLD only in that it also runs the N/E cascade below.
 
 ### PosControl — position hold
 
-`PosControl` runs a two-stage cascade converting a 3-D position target to lean angles:
+`PosControl` turns the roll/pitch sticks into N/E lean angles (the z axis is `AltControl::alt_hold()`, above). It follows ArduPilot's Loiter: the sticks command an acceleration, which is integrated into a velocity target and then a position target, and the usual position-P → velocity-PID cascade tracks those targets with feed-forward:
 
 ```
-pos_error [m]  ──►  pos_P  ──►  vel_target [m/s]  ──►  vel_PID  ──►  accel_target [m/s²]
-                                                                              │
-                                                                    yaw rotation + atan2
-                                                                              │
-                                                                    roll/pitch targets [rad]
+sticks ──► accel_cmd (− drag − brake) ──► attitude-lag model ──► ∫ ──► vel_des ──► ∫ ──► pos_des
+                │                                    │               │
+                │                                    ▼               ▼
+                │                         vel_tgt = vel_des + pos_P(pos_des − pos)
+                ▼                                    │
+   accel_tgt = accel_cmd  +  LPF_10Hz( vel_PID(vel_tgt − vel) )
+                                         │
+                               yaw rotation + atan2
+                                         │
+                               roll/pitch targets [rad]
 ```
 
-The NE axes include a per-axis pilot-blend state machine (PILOT → BRAKE → HOLD → RETURNING) so the drone brakes and holds automatically when the stick is released, and blends smoothly back to manual when the stick is pushed again.
+A held stick settles at a steady speed (up to 5 m/s); releasing it ramps the velocity target down to zero under an explicit brake deceleration, and the position target stops where the velocity target reaches zero — there is no separate "hold point" to latch. By default the sticks act relative to the nose (`PosControl::STICKS_BODY_FRAME`). See [`src/controllers/README.md`](src/controllers/README.md#poscontrol-poscontrolhppcpp) for the stick and brake tuning constants.
 
 ### MotorMixer
 
@@ -274,7 +294,7 @@ All mixer math (the factor tables, the diagram above) is in this logical `[FR, R
 
 ### Architecture
 
-State estimation runs at the top of every `ControlThread` tick, 400 Hz — merged into the same thread as the controller/mixer stage (formerly a separate `StateEstThread` at 625 Hz; see the [Thread priority table](#thread-priority-table) above for why they were merged: two independent free-running timers at a non-integer rate ratio were a suspected source of control-loop jitter). Running the estimator and controller in one thread means the mixer always consumes this exact tick's fresh EKF output, never a value handed across a cross-thread boundary. Compute cost was assessed as well within budget for the full 3-lane EKF at 400 Hz on this MCU (prior profiling at higher rates — see the stale-flagged [Timing and Utilization](#timing-and-utilization) table above — showed real headroom even before the merge; revisit only if a fresh capture on the merged architecture shows pressure). The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently and `StateManager` selects the healthiest one (lowest smoothed innovation norm) as the primary output. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`chVTGetSystemTimeX()`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter.
+State estimation runs at the top of every `ControlThread` tick, 400 Hz — merged into the same thread as the controller/mixer stage (formerly a separate `StateEstThread` at 625 Hz; see the [Thread priority table](#thread-priority-table) above for why they were merged: two independent free-running timers at a non-integer rate ratio were a suspected source of control-loop jitter). Running the estimator and controller in one thread means the mixer always consumes this exact tick's fresh EKF output, never a value handed across a cross-thread boundary. Compute cost was assessed as well within budget for the full 3-lane EKF at 400 Hz on this MCU (prior profiling at higher rates — see the stale-flagged [Timing and Utilization](#timing-and-utilization) table above — showed real headroom even before the merge; revisit only if a fresh capture on the merged architecture shows pressure). The core is a three-lane Extended Kalman Filter: one `EKF` instance per onboard IMU, orchestrated by `StateManager`. Each lane runs independently; `StateManager` takes the quaternion from the healthiest lane (lowest smoothed innovation norm) and soft-blends position, velocity and rates across all valid lanes. All lanes share the same external sensor updates (IMX5 quaternion, mocap). `dt` is measured from actual elapsed time each tick (`bprl_micros()`, `src/uptime.hpp`), not a fixed nominal value, so EKF integration stays correct under scheduler jitter. The exception is `StateManager`'s 2nd-order output lowpasses, which use the fixed `CONTROL_DT_S`: `lowpass2p()` recomputes its coefficients from `dt` every call, and jitter in a measured `dt` turns into noise on the filter output.
 
 Historical note: at the previous 800 Hz (before the 625 Hz step, itself before this 400 Hz merge), the notch-filtered, CAN-staleness-gated 3-lane EKF update genuinely could not fit its budget (average execution time alone exceeded the period on nearly every tick), which left the estimator thread — then the second-highest-priority thread in the system — permanently runnable and starved everything below it, including the IWDG watchdog kick in `main()`'s idle loop, causing a reset every ~30s. Two cheap optimizations (de-duplicating the per-axis notch-filter coefficient computation, building at `-O3` instead of `-O2`) recovered enough budget to make 625 Hz viable, and that same margin carries into the current 400 Hz merged thread.
 
@@ -318,7 +338,7 @@ Updates are applied in order each tick (earlier updates inform later ones):
 
 | Step | Source | Rate | States updated |
 |------|--------|------|----------------|
-| 1.5 | Onboard accel (gravity vector) | 400 Hz, chi-squared gated | Quaternion (roll/pitch), Z accel bias |
+| 1.5 | Onboard accel (gravity vector) | Every 0.2 s — accel is averaged over `STATEMGR_GRAVACC_AVG_S` before each update; chi-squared gated | Quaternion (roll/pitch), Z accel bias |
 | 2 | IMX5 quaternion over CAN | 200 Hz, async, age-gated (skipped if >50ms stale) and forward-propagated by its measured age before fusing | Full quaternion |
 | 5 | Mocap NED position | Async | X, Y, Z |
 | 5 | Mocap NED velocity → body frame | Async | u, v, w |
@@ -336,14 +356,14 @@ The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BA
 
 | Indices | States | Source |
 |---------|--------|--------|
-| 0–2 | X, Y, Z | Primary EKF lane |
-| 3–5 | u, v, w | Primary EKF lane |
-| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 20 Hz lowpass |
+| 0–2 | X, Y, Z | Soft-blend across all valid lanes (same weights as p/q/r) |
+| 3–5 | u, v, w | Soft-blend across all valid lanes, then 15 Hz 2nd-order lowpass |
+| 6–8 | u_dot, v_dot, w_dot | Blended gravity+Coriolis-corrected accel, 20 Hz 2nd-order lowpass |
 | 9–12 | q0, q1, q2, q3 | Primary EKF lane |
 | 13–15 | p, q, r | Soft-blend of bias-corrected gyros across all valid lanes, optional 30% IMX5 mix, motor-vibration notch (RPM-tracked, auto-disables rather than mis-targets once the tracked frequency reaches Nyquist — see the `STATEMGR_NOTCH_BW_HZ` row below), then 20 Hz (roll/pitch) / 5 Hz (yaw) 2nd-order lowpass |
-| 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates, 20 Hz lowpass |
+| 16–18 | p_dot, q_dot, r_dot | Finite-difference of blended rates; p_dot/q_dot: 20 Hz 2nd-order lowpass + optional 15 Hz 1st-order stage; r_dot: 20 Hz 1st-order lowpass |
 
-Quaternion uses hard lane selection (no blending). Angular rates use soft blending weighted by `1/innovation_norm`, itself low-passed at `STATEMGR_LP_BLENDW_HZ` (3 Hz) before renormalizing across lanes — the raw instantaneous weight is derived from a noisy quantity, so blending it in unsmoothed would make the blend ratio itself a fast-changing noise source.
+Quaternion uses hard lane selection (no blending — blending quaternions has an antipodal-sign problem plain vectors don't). Position, velocity and angular rates use soft blending weighted by `1/innovation_norm`, itself low-passed at `STATEMGR_LP_BLENDW_HZ` (3 Hz) before renormalizing across lanes — the raw instantaneous weight is derived from a noisy quantity, so blending it in unsmoothed would make the blend ratio itself a fast-changing noise source.
 
 ### Tuning parameters
 
@@ -359,26 +379,29 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `GRAV_CHI2_GATE` | EKF.hpp | 5.0 | Joint chi-squared gate (σ) for the gravity-vector update. |
 | `MOCAP_CHI2_GATE` | EKF.hpp | 5.0 | Joint chi-squared gate (σ) for mocap position/velocity updates. |
 | `BARO_CHI2_GATE` | EKF.hpp | 5.0 | Chi-squared gate (σ) for the barometric altitude update. |
-| `R_QUAT` | StateManager.hpp | 1e-3 | IMX5 quaternion noise. Lower = trust IMX5 more. |
-| `R_GRAVITY` | StateManager.hpp | 0.5 | Accel gravity-vector noise (m/s²)². Lower = trust accel attitude more. |
+| `R_QUAT` | StateManager.hpp | 5e-2 | IMX5 quaternion noise. Lower = trust IMX5 more. |
+| `R_GRAVITY` | StateManager.hpp | 1.0 | Accel gravity-vector noise (m/s²)². Lower = trust accel attitude more. `R_GRAVITY_FLIGHT_NOAID` (100.0) replaces it in some armed conditions — see the comments in StateManager.hpp. |
 | `R_MOCAP_POS` | StateManager.hpp | 1e-3 | Mocap position noise (m²). |
 | `R_MOCAP_VEL` | StateManager.hpp | 1e-4 | Mocap velocity noise (m/s)². |
 | `R_BARO_POS` | StateManager.hpp | 0.5 | Baro altitude noise (m²) — tune from bench log noise once flashed. |
 | `STATEMGR_IMX5_RATE_WEIGHT` | StateManager.hpp | 0.3 | IMX5 share of blended p/q/r (0 = pure gyro, 1 = pure IMX5). |
+| `STATEMGR_LP_UVW_HZ` | StateManager.hpp | 15 | 2nd-order lowpass cutoff for blended u/v/w fed to the controllers (Hz). |
 | `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
 | `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
 | `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
+| `STATEMGR_LP_PQRDOT_EXTRA_HZ` | StateManager.hpp | 15 | Optional extra 1st-order stage on p_dot/q_dot (Hz); 0 disables it. |
+| `STATEMGR_GRAVACC_AVG_S` | StateManager.hpp | 0.2 | Window the accel is averaged over before each gravity-vector update (s). |
 | `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
 | `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At the current 400 Hz that's ~192 Hz (~11,520 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |
 | `STATEMGR_NOTCH_MAX_SLEW_FRAC` | StateManager.hpp | 0.078125 | Max fractional change in the notch's tracked center frequency per `update()` call. Rescaled from 0.05 for the 625→400 Hz thread merge (×625/400) so the real-world slew rate in Hz/s is unchanged — `update()` now runs at 400 Hz instead of 625 Hz, so the same per-call fraction would otherwise translate to a slower real-time tracking response. |
 | `STATEMGR_CAN_QUAT_STALE_US` / `STATEMGR_CAN_RATES_STALE_US` | StateManager.hpp | 50000 (both) | IMX5 CAN transport-delay staleness gate (µs) — a reading older than this is skipped rather than fused/blended as current. In real microseconds, not ticks, so unaffected by the thread-rate merge. |
-| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.025 | Fixed-rate IIR alpha for the vibration estimate driving adaptive gravity-update noise (~0.1s time constant at `ControlThread`'s 400 Hz, since this is called once per tick with no `dt` parameter — rescaled from 0.016 for the 625→400 Hz thread merge; rescale again if that rate changes, see the comment in EKF.hpp). |
+| `GRAV_VIBE_ALPHA` | EKF.hpp | 0.1 | Fixed-period IIR alpha for the vibration estimate driving adaptive gravity-update noise. The gravity update runs once per `STATEMGR_GRAVACC_AVG_S` window (0.2 s), so this gives a ~2 s time constant; keep it in sync with that window if it changes (see the comment in EKF.hpp). |
 
 ### Sensor loss behaviour
 
 **IMX5 disconnect:** `update_quaternion` calls stop. Gravity vector continues correcting roll/pitch. Yaw drifts at the gyro Z-axis bias rate (probably a few degrees per minute). Rates fall back to 100% onboard gyros. Bias states continue being estimated.
 
-**Mocap disconnect:** `update_position` and `update_ned_vel` calls stop. Position and velocity states are no longer corrected and drift quickly (position drifts quadratically with time). Attitude and rates are unaffected. Barometric altitude fusion into Z automatically resumes the instant mocap goes invalid — see below.
+**Mocap disconnect:** `MAVLinkThread` clears `g_mocap.valid` once 300 ms pass with no `VISION_POSITION_ESTIMATE` (ArduPilot's `AP_VISUALODOM_TIMEOUT_MS`), and sets it again on the next one. `update_position` and `update_ned_vel` calls stop. Yaw stays in the mocap frame: with an IMX5 the mocap-derived `_yaw_offset_q` keeps being applied to its quaternion, and without one (Drone3) the lanes keep the heading they were aligned to and coast on the gyros until mocap returns. Position and velocity states are no longer corrected and drift quickly (position drifts quadratically with time). Attitude and rates are unaffected. Barometric altitude fusion into Z automatically resumes the instant mocap goes invalid — see below.
 
 **Mocap vs. barometer priority:** mocap always wins for absolute position/altitude when connected — `StateManager::update()` gates barometer fusion on `!mocap.valid`, never fusing both simultaneously. This isn't just about mocap being more accurate: the two aren't anchored to the same origin (the barometer zeroes to whatever pressure it read during its own boot-time warm-up; mocap's Z origin is whatever the motion-capture system's world frame defines), so fusing both into the same `Z` state at once would fight between two different "zero points" rather than average two views of the same truth. Barometer fusion is purely a mocap-unavailable fallback.
 
@@ -397,6 +420,8 @@ All math helpers live in `src/math/math.hpp` / `src/math/math.cpp`. The quaterni
 | Function | Signature | Description |
 |----------|-----------|-------------|
 | `constrain_float` | `float constrain_float(float v, float lo, float hi)` | Clamps `v` to `[lo, hi]`. |
+| `degreesToRadians` | `float degreesToRadians(float deg)` | Degrees → radians. |
+| `wrap_pi` | `float wrap_pi(float rad)` | Wraps an angle to `[−π, π]`. |
 
 ### Signal processing
 
@@ -404,13 +429,14 @@ All math helpers live in `src/math/math.hpp` / `src/math/math.cpp`. The quaterni
 |----------|-----------|-------------|
 | `lowpass_alpha` | `float lowpass_alpha(float fc_hz, float dt_s)` | Computes first-order IIR coefficient: `α = dt / (dt + 1/(2π·fc))`. Call once when `fc` or `dt` changes. |
 | `lowpass` | `float lowpass(float input, float prev_out, float alpha)` | Applies one IIR tick: `y_k = α·x_k + (1−α)·y_{k−1}`. Caller owns `prev_out`. |
-| `lowpass2p` | `float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)` | Second-order (2-pole) Butterworth IIR lowpass — ~-40 dB/decade vs. `lowpass`'s ~-20 dB/decade. Coefficients recomputed from `fc_hz`/`dt_s` every call. `fc_hz <= 0` disables filtering (passthrough). Caller owns the `Biquad2pState` (2 delay elements). |
-| `notch` | `float notch(float input, Biquad2pState& state, float center_hz, float bandwidth_hz, float dt_s)` | Second-order notch (RBJ biquad form), reusing `Biquad2pState` for delay memory — same direct-form-II structure as `lowpass2p`. `bandwidth_hz` sets notch width (`Q = center_hz/bandwidth_hz`). Caller drives frequency tracking (and should slew-limit `center_hz` between calls). `center_hz <= 0` or `bandwidth_hz <= 0` disables filtering. |
+| `lowpass2p` | `float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)` | Second-order (2-pole) Butterworth IIR lowpass — ~-40 dB/decade vs. `lowpass`'s ~-20 dB/decade. Coefficients recomputed from `fc_hz`/`dt_s` every call. `fc_hz <= 0` or `dt_s <= 0` disables filtering (passthrough). Caller owns the `Biquad2pState` (2 delay elements). **Pass a fixed `dt_s`** (`CONTROL_DT_S` inside the control loop, as every current caller does), not a measured one: the filter's internal state only matches its coefficients while `dt_s` is constant, so tick-to-tick jitter in a measured `dt_s` appears as noise on the output proportional to the signal level. |
+| `notch_coeffs` | `NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s)` | Computes second-order notch coefficients (RBJ biquad form); `bandwidth_hz` sets notch width (`Q = center_hz/bandwidth_hz`). Returns a disabled set if `center_hz <= 0`, `bandwidth_hz <= 0`, or `center_hz` reaches `NOTCH_NYQUIST_CUTOFF` (0.48) of the sample rate. Split from the apply step so several axes tracking the same frequency compute the trig once per tick. |
+| `notch_apply` | `float notch_apply(float input, Biquad2pState& state, const NotchCoeffs& coeffs)` | Applies one notch tick using precomputed coefficients, reusing `Biquad2pState` for delay memory — same direct-form-II structure as `lowpass2p`. Passthrough when the coefficients are disabled. Caller drives frequency tracking (and should slew-limit `center_hz` between calls). |
 | `derivative` | `float derivative(float current, float prev, float dt_s)` | Backward-difference numerical derivative: `(current − prev) / dt`. Caller owns `prev`. |
 | `integrate` | `float integrate(float value, float dt_s)` | Rectangular (Euler) integration step: `value · dt`. Caller owns the accumulator. |
 | `rpm_gate` | `uint32_t rpm_gate(RpmGateState& state, uint32_t raw_rpm)` | RPM plausibility gate: once a motor has reported >100 RPM, a subsequent reading below that threshold is treated as a missed telemetry frame (motors don't legitimately idle that slowly while armed) and the last good value is held instead. Returns `raw_rpm` unchanged before the first >100 RPM reading. |
 
-`Biquad2pState` (2 delay elements) backs both `lowpass2p` and `notch`; `RpmGateState` (`last_good`, `seen_valid`) backs `rpm_gate` — both are plain structs, matching this file's convention of small per-channel filter state rather than a class.
+`Biquad2pState` (2 delay elements) backs both `lowpass2p` and `notch_apply`; `RpmGateState` (`last_good`, `seen_valid`) backs `rpm_gate` — both are plain structs, matching this file's convention of small per-channel filter state rather than a class.
 
 ### 3-vector helpers
 
@@ -459,7 +485,7 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 
 ### How it works
 
-`LogThread` runs at 50 Hz. Each tick it snapshots all shared state under their respective mutexes, builds eleven packed records, and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
+`LogThread` runs at the drone's `LoggingConfig::log_rate_hz` (50 Hz by default). Each tick it snapshots all shared state under their respective mutexes, builds up to thirteen packed records (each message type can be enabled or disabled per drone in `LoggingConfig::enable`), and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
 
 **Log file location:** `/LOGS/LOG0001.BIN`, `LOG0002.BIN`, … auto-incremented on each boot.
 
@@ -476,8 +502,10 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 | `IMU1`/`IMU2`/`IMU3` | 0x0B/0x0C/0x0D | TimeUS, AccX, AccY, AccZ (m/s²), GyrX, GyrY, GyrZ (rad/s), Valid — one series per on-board IMU |
 | `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel), G1R, G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`, roll/pitch) |
 | `BARO` | 0x0F | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
+| `CTUN` | 0x10 | TimeUS, PNT, PNE, PET, PEE (N/E position target and error, m), VNT, VNE, VET, VEE (N/E velocity target and error, m/s), RolT, PitT (lean-angle targets, rad), ClbT, ClbE (climb-rate target and error, m/s, positive = descending) — POS_HOLD tuning diagnostics; only meaningful while POS_HOLD is active (values hold otherwise). Temporary: compiled in only while `LOG_CTUN_ENABLED` is 1 in `LogMessages.hpp` |
+| `MOCP` | 0x11 | TimeUS, X, Y, Z (m NED), VX, VY, VZ (m/s), Valid — raw mocap estimate before the EKF |
 
-TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the fixed 50 Hz `LogThread` period, so it would only ever record a constant.
+TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the `LogThread` period (50 Hz by default), so it would only ever record a constant.
 
 ### Decoding log files
 
@@ -491,9 +519,9 @@ python3 tools/logs.py logs decode LOG0042.BIN
 python3 tools/logs.py logs download --decode
 ```
 
-Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`.
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
 
-Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all eleven message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
+Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
 
 ### Adding a new log message type
 
@@ -502,7 +530,7 @@ Three files, three steps (example below adds a hypothetical rangefinder):
 **Step 1 — Define the struct in `src/logging/LogMessages.hpp`**
 
 ```cpp
-constexpr uint8_t LOG_MSG_RNGF = 0x10U;   // next unused ID
+constexpr uint8_t LOG_MSG_RNGF = 0x12U;   // next unused ID
 
 struct __attribute__((packed)) LogMsgRNGF {
     uint64_t time_us;    // always first — required by UAV Log Viewer
@@ -544,11 +572,11 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ```
 `length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate:** 50 Hz × ~375 B/tick ≈ 18.8 KB/s (sum of all 11 records' body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
+**Write rate:** 50 Hz × ~480 B/tick ≈ 24 KB/s with all 13 records enabled (sum of body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
 
 **File pre-allocation:** `Logger::init()` calls `f_expand()` right after creating the file (10 MB, `PRE_ALLOC_SIZE` in `Logger.hpp`) — a one-time contiguous cluster-chain reservation while a stall is harmless (motors aren't spinning yet), instead of letting `f_write()` grow the FAT chain incrementally during flight. That incremental growth (plus `f_sync()`'s directory/FAT write) was causing `LogThread` periodic multi-ms-to-hundreds-of-ms stalls on the SD card's internal metadata writes — profiling with `BPRL_TIMING` (see [Timing and Utilization](#timing-and-utilization)) is what surfaced this. `Logger::close()` calls `f_truncate()` to trim the file back to the actual bytes written before the final `f_sync()`. Pre-allocation is best-effort: `expand_err()` (surfaced via `LOG,status`'s `expand_err=` field) reports the FatFS `FRESULT` — `0` means it succeeded, nonzero means the card couldn't offer a contiguous 10 MB run and logging fell back to normal incremental growth. Even with pre-allocation confirmed working, some residual stall rate remains — SD cards don't have a bounded worst-case write latency (internal wear-leveling/GC), so this is a mitigated-not-eliminated I/O-latency tail rather than a fixable software bug; see [Timing and Utilization](#timing-and-utilization).
 
-**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section (SRAM3, 0x30040000). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
+**D-cache coherency:** FatFS structures (`s_fs`, `s_file`) and the flush staging buffer (`s_flush_buf`) live in the `.nocache` linker section — the last 16 KB of AXI SRAM (`0x2407C000`), not SRAM3, which SDMMC1's IDMA can't reliably reach (see `src/logging/README.md`). `STM32_NOCACHE_ENABLE TRUE` in `cfg/mcuconf.h` marks that region non-cacheable at boot, so the SDMMC IDMA always sees coherent data.
 
 **SD card retry:** If no card is present at boot, `logger.init()` retries every 5 seconds. The rest of the firmware is unaffected.
 
@@ -629,13 +657,15 @@ Requires OpenOCD with `interface/stlink.cfg` and `target/stm32h7x.cfg`.
 
 ### Debug USB
 
-With `-DBPRL_DEBUG`, `DebugThread` emits three CSV streams at 10 Hz over the **USB CDC** port (`/dev/ttyACM0`):
+With `-DBPRL_DEBUG`, `DebugThread` emits five CSV streams at 10 Hz over the **USB CDC** port (`/dev/ttyACM0`):
 
 | Prefix | Content |
 |---|---|
 | `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, active_controller (resolved controller-list index, 0=PID default; INDI/PID+PI follow if enabled) |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
+| `$POS` | time_ms, x, y, z (EKF position), u, v, w (EKF body velocity), mocap x, y, z, mocap vx, vy, vz, mocap_valid |
+| `$STRAIN` | time_ms, valid, last_update_ms, update_hz, then the strain gauge array's `ARM1` and `ARM2` channel values |
 
 Without `-DBPRL_DEBUG` the USB port still accepts commands from the ground tools — only the continuous stream is suppressed. Remove `-DBPRL_DEBUG` before flight to eliminate scheduling jitter from the print thread.
 
@@ -653,11 +683,13 @@ IMU chip set and CS pins are board-conditional (`DRONE=Drone1`/CubeOrangePlus, t
 |---|---|---|---|
 | SPI1 | `SPI.hpp/.cpp` | imu1 (ICM-45686, CS=PG1), baro1 (MS5611, CS=PD7) | Working |
 | SPI4 | `SPI.hpp/.cpp` | imu2 (ICM-45686, CS=PC15), imu3 (ICM-45686, CS=PC13) | Working — this board's SPI4 slots are ICM-45686; other CubeOrangePlus revisions populate ICM-42688 there instead (see IMU Drivers below) |
-| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), strain rate sensor (0x69, default interface) | Working |
+| FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), shaft-encoder RPM nodes (0x70–0x73), strain rate sensor (0x69, override interface only — I2C is its default) | Working |
 | TIM1/TIM4 | `DShot.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
 | UART (TELEM1) | `Radio.hpp/.cpp` | CRSF receiver (default; SBUS also compiled, `RADIO_PROTOCOL` selects) | Working |
-| UART (TELEM2) | `MAVLink.hpp/.cpp` | MAVLink — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`) | Working |
-| I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (fallback interface only — CAN is default) | Working |
+| UART (TELEM2; TX7/RX7 on Orqa) | `MAVLink.hpp/.cpp` | MAVLink — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`) | Working |
+| I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (default interface; `STRAIN_RATE_INTERFACE` selects CAN instead) | Working |
+
+`DRONE=Drone2` (CubeBlueH7) differs in two channels: motor output goes through the carrier's IO co-processor on MAIN 1-4 (`IOMCU.hpp/.cpp`, USART6, `MOTOR_PROTO_IOMCU`) instead of DShot on the AUX pins, and I2C2 hosts the strain gauge array (`src/sensors/StrainGauge.hpp`, address 0x09) instead of the strain rate sensor — the two strain sensors are mutually exclusive, see `main.cpp`.
 
 `DRONE=Drone3` (Orqa QuadCore H7) differs in several channels — see [IMU Drivers](#8-imu-drivers) below and [`src/coms/README.md`](src/coms/README.md) for the full breakdown: only 2 on-board IMUs (SPI1 CS=PA4, SPI4 CS=PE11, both ICM-42688, no `imu3`); no SPI barometer (DPS310 on I2C2 instead, address 0x77, polled from `I2CThread` — see `Baro/DPS310.hpp`); DShot uses TIM4+TIM2 rather than TIM1+TIM4 (2 motors time-multiplexed per timer); RC input is USART6 (full-duplex, PC6/PC7) rather than TELEM1.
 
@@ -730,7 +762,7 @@ External INS/AHRS module transmitting fused attitude and body rates over FDCAN1 
 | CAN ID | Content | Encoding | Rate |
 |---|---|---|---|
 | `0x01` | Quaternion NED→Body [W, X, Y, Z] | 4 × int16 ÷ 10000 | 200 Hz |
-| `0x02` | p rate + x accel | 2 × int16; rates ÷ 1000 → rad/s, accel ÷ 1000 → m/s² | 100 Hz |
+| `0x02` | p rate + x accel | 2 × int16; rates ÷ 1000 → rad/s, accel ÷ 100 → m/s² | 100 Hz |
 | `0x03` | q rate + y accel | same encoding | 100 Hz |
 | `0x04` | r rate + z accel | same encoding | 100 Hz |
 

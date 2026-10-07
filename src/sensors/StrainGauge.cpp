@@ -1,3 +1,4 @@
+#include "src/uptime.hpp"
 #include "src/sensors/StrainGauge.hpp"
 #include "src/coms/I2C.hpp"
 #include <cstring>
@@ -139,7 +140,7 @@ void strain_gauge_poll(void *ctx)
     memcpy(g_strain_gauge.data, &raw[kPadPerChunk],
            STRAIN_GAUGE_NUM_CHANNELS * sizeof(int16_t));
     g_strain_gauge.valid          = true;
-    g_strain_gauge.last_update_ms = (uint32_t)TIME_I2MS(chVTGetSystemTime());
+    g_strain_gauge.last_update_ms = bprl_millis();
     g_strain_gauge.update_count++;
     chMtxUnlock(&strainGauge_mtx);
 }

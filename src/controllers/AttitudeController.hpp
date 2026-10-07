@@ -25,6 +25,17 @@ public:
                          const Unmixer &unmixer, float out_cmds[3]) = 0;
     virtual void reset_all() = 0;
 
+    // The estimator's yaw just stepped by delta_rad with no physical
+    // rotation (StateManager::consume_yaw_reset()). Shift the held heading
+    // target by the same amount — ArduPilot's inertial_frame_reset().
+    virtual void yaw_frame_reset(float delta_rad) = 0;
+
+    // Strength of the heading-hold trim on top of the yaw-rate loop, as a
+    // multiple of the configured yaw_hold gains (and of the cap on the
+    // correction rate). 1.0 = the configured gains. FlightStateMachine sets
+    // this every tick from the flight mode — see POS_HOLD_YAW_HOLD_SCALE.
+    virtual void set_yaw_hold_scale(float scale) = 0;
+
 protected:
     // Deliberately non-virtual and protected, not public+virtual: every
     // AttitudeController is a FlightStateMachine member with static storage

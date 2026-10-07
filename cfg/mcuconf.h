@@ -422,7 +422,11 @@
  */
 #define STM32_SERIAL_USE_USART1             FALSE
 #define STM32_SERIAL_USE_USART2             TRUE   /* TELEM1 — CRSF radio (SD2) */
-#define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — future sensor (SD3) */
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_SERIAL_USE_USART3             FALSE  /* T3/R3 pads unused — MAVLink is on UART7 on this board */
+#else
+#define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — MAVLink/mocap radio (SD3), see src/coms/MAVLink.hpp */
+#endif
 #define STM32_SERIAL_USE_UART4              FALSE
 #define STM32_SERIAL_USE_UART5              FALSE
 #if defined(BPRL_BOARD_ORQA)
@@ -432,7 +436,11 @@
 #else
 #define STM32_SERIAL_USE_USART6             FALSE  /* FMU<->IOMCU bridge; not used by firmware */
 #endif
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_SERIAL_USE_UART7              TRUE   /* TX7/RX7 — MAVLink/mocap radio (SD7), see src/coms/MAVLink.hpp */
+#else
 #define STM32_SERIAL_USE_UART7              FALSE
+#endif
 #define STM32_SERIAL_USE_UART8              FALSE
 #define STM32_SERIAL_USE_LPUART1            FALSE
 

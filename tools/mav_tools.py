@@ -30,12 +30,13 @@ def cmd_mav_diag_once(ser) -> bool:
         m = re.match(
             r"MAV,DIAG,bytes_rx=(\d+),frames_ok=(\d+),frames_bad_crc=(\d+),"
             r"heartbeat_rx=(\d+),param_req_rx=(\d+),vision_pos_rx=(\d+),"
-            r"vision_speed_rx=(\d+),unknown_rx=(\d+)", line)
+            r"vision_speed_rx=(\d+),unknown_rx=(\d+)(?:,mocap_timeouts=(\d+))?", line)
         if m:
             (bytes_rx, frames_ok, frames_bad_crc, heartbeat_rx, param_req_rx,
-             vision_pos_rx, vision_speed_rx, unknown_rx) = (int(g) for g in m.groups())
+             vision_pos_rx, vision_speed_rx, unknown_rx) = (int(g) for g in m.groups()[:8])
+            mocap_timeouts = m.group(9)  # None on firmware older than the mocap timeout
 
-            console.print("[bold]MAVLink (SD3/TELEM2) RX counters[/bold]")
+            console.print("[bold]MAVLink (TELEM2 on Cube / TX7-RX7 on Orqa) RX counters[/bold]")
             console.print(f"  bytes_rx        = {bytes_rx}")
             console.print(f"  frames_ok       = {frames_ok}")
             console.print(f"  frames_bad_crc  = {frames_bad_crc}")
@@ -44,9 +45,11 @@ def cmd_mav_diag_once(ser) -> bool:
             console.print(f"  vision_pos_rx   = {vision_pos_rx}")
             console.print(f"  vision_speed_rx = {vision_speed_rx}")
             console.print(f"  unknown_rx      = {unknown_rx}")
+            if mocap_timeouts is not None:
+                console.print(f"  mocap_timeouts  = {mocap_timeouts}")
             console.print()
             if bytes_rx == 0:
-                console.print("[red]bytes_rx stuck at 0 → nothing is reaching SD3 at all. "
+                console.print("[red]bytes_rx stuck at 0 → nothing is reaching the MAVLink UART at all. "
                               "Check the radio link / MAVProxy master port, not this firmware.[/red]")
             elif frames_bad_crc > 0 and frames_ok == 0:
                 console.print("[red]Bytes arriving but every frame fails CRC → dialect/CRC_EXTRA "

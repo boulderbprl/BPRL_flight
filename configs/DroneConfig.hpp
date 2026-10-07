@@ -62,12 +62,12 @@ struct AttitudePidPiGains {
 
 // Gains for AltControl (src/controllers/AltControl.hpp).
 struct AltControlGains {
-    PidGains climb_rate;
+    PidGains pos_D, climb_rate;
 };
 
 // Gains for PosControl (src/controllers/PosControl.hpp).
 struct PosControlGains {
-    PidGains pos_N, pos_E, pos_D, vel_N, vel_E;
+    PidGains pos_N, pos_E, vel_N, vel_E;
 };
 
 // RC channel index assignment (src/coms/Radio.cpp). Both SBUS and CRSF use

@@ -129,6 +129,14 @@ public:
 
     void reset_all();
 
+    // Forward an estimator yaw reset to every controller in the list — the
+    // shadow ones hold their own heading target too.
+    void yaw_frame_reset(float delta_rad)
+    {
+        for (int i = 0; i < _num_controllers; ++i)
+            _controllers[i]->yaw_frame_reset(delta_rad);
+    }
+
 private:
     // ── Mode dispatch helpers ────────────────────────────────────────────────
     void run_attitude(const float euler[], const float state_full[],
@@ -146,27 +154,16 @@ private:
                        const float input[], const uint32_t rpm[],
                        float out_cmds[3], float &thrust_out);
 
-    // ── PosHold pilot-blend state ────────────────────────────────────────────
-    enum class PHAxisMode { PILOT, BRAKE, HOLD, RETURNING };
-    PHAxisMode _ph_N = PHAxisMode::PILOT;
-    PHAxisMode _ph_E = PHAxisMode::PILOT;
-    bool  _hold_pos_valid   = false;
-    float _hold_pos[3]      = {};
-    float _blend_lean_N     = 0.0f;
-    float _blend_lean_E     = 0.0f;
-    uint32_t _blend_ticks_N = 0;
-    uint32_t _blend_ticks_E = 0;
-
-    static constexpr uint32_t BLEND_TICKS    = 200;   // ~0.5 s at 400 Hz
-    static constexpr float    BRAKE_VEL_THR  = 0.20f; // m/s
-    static constexpr float    STICK_DEADBAND = 0.10f; // normalised [-1,1]
-    static constexpr float    MAX_VEL_NE     = 5.0f;  // m/s
-
     // TEMP (CTUN tuning): while true, POS_HOLD flies hands-off like STABILIZE
     // (direct stick → attitude/throttle) and the pos-hold NE cascade runs
     // shadow-only, populating _ctun_diag / get_ctun_diag() for CTUN logging.
     // Flip to false to restore closed-loop pos-hold flight.
-    static constexpr bool CTUN_POSHOLD_SHADOW = true;
+    static constexpr bool CTUN_POSHOLD_SHADOW = false;
+
+    // Heading-hold strength in POS_HOLD, as a multiple of the configured
+    // yaw_hold gains and correction-rate cap. STABILIZE and ALT_HOLD use 1.0
+    // (yaw is mainly rate-controlled there, with a light heading trim).
+    static constexpr float POS_HOLD_YAW_HOLD_SCALE = 2.5f;
 
     // ── Ground-idle state machine ────────────────────────────────────────────
     uint32_t _takeoff_debounce_ticks = 0;
@@ -179,7 +176,7 @@ private:
     // climb-rate command centered on a hold-altitude deadband, so intent-to-fly
     // means crossing past that center.
     static constexpr float    TAKEOFF_THR_THRESHOLD_STABILIZE = 0.10f;
-    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.10f;  // ALT_HOLD / POS_HOLD — TEMP: change back to 0.5 before re-enabling closed-loop POS_HOLD (see CTUN_POSHOLD_SHADOW)
+    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.50f;  // ALT_HOLD / POS_HOLD — drop to 0.10 if CTUN_POSHOLD_SHADOW is set back to true (POS_HOLD then flies as STABILIZE)
     static constexpr uint32_t TAKEOFF_DEBOUNCE_TICKS = 100;   // 0.25 s @ 400 Hz sustained push
     static constexpr float    LANDED_THR_THRESHOLD   = 0.15f; // commanded thrust considered "at rest"
     static constexpr float    LANDED_VEL_THRESHOLD   = 0.2f;  // m/s, vertical speed considered "at rest"

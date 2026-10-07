@@ -125,7 +125,7 @@ int main(void)
     const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
         /* .i2c     = */ TIME_US2I(5000),  // 200 Hz
-        /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
+        /* .control = */ TIME_US2I(CONTROL_PERIOD_US),  // 400 Hz — set in src/threads.hpp, shared with CONTROL_DT_S
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),

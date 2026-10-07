@@ -9,6 +9,7 @@
  * exported via threads.hpp for use by Coms drivers (e.g. CAN.cpp).
  */
 
+#include "src/uptime.hpp"
 #include "src/threads.hpp"
 #include "src/FlightState.hpp"
 #include "src/coms/SPI.hpp"
@@ -146,6 +147,58 @@ static int   s_primary_lane = 0;
  * SPIThread — 1 kHz  NORMALPRIO+30
  * Reads raw accel+gyro from all three on-board IMUs.
  * ══════════════════════════════════════════════════════════════════════════ */
+/* ── IMU read health (SPIThread only) ─────────────────────────────────────
+ * Returns true if this read produced a sample worth publishing. Once an IMU
+ * that has been valid produces IMU_FAIL_LIMIT consecutive bad reads, its
+ * g_imu[idx].valid is cleared so StateManager drops that lane from the blend
+ * and from primary selection, and it stays dropped until reboot — a lane
+ * that stopped predicting has a stale state, and letting it rejoin mid-flight
+ * would step the estimate.
+ *
+ * A read is bad if the driver reports failure, or if all six values are
+ * identical to the previous read. The second test is what catches a dead
+ * chip on most boards: only ICM45686::read() can actually return false once
+ * initialised (empty FIFO / bad packet header) — the other drivers return
+ * true unconditionally, and a chip that has stopped responding just reads
+ * back a constant bus value. A live sensor's noise makes 100 identical
+ * six-axis samples in a row implausible. */
+static constexpr uint32_t IMU_FAIL_LIMIT = 100;   // consecutive bad reads (~0.1 s at SPIThread's 1 kHz)
+
+static bool imu_sample_good(int idx, bool read_ok, const float a[3], const float g[3])
+{
+    static float    s_last[3][6];
+    static bool     s_have_last[3];
+    static uint32_t s_fail_count[3];
+    static bool     s_failed[3];
+
+    if (s_failed[idx]) return false;
+
+    bool good = read_ok;
+    if (read_ok) {
+        const float cur[6] = { a[0], a[1], a[2], g[0], g[1], g[2] };
+        if (s_have_last[idx] && memcmp(cur, s_last[idx], sizeof(cur)) == 0) good = false;
+        memcpy(s_last[idx], cur, sizeof(cur));
+        s_have_last[idx] = true;
+    }
+
+    if (good) {
+        s_fail_count[idx] = 0;
+        return true;
+    }
+
+    if (++s_fail_count[idx] >= IMU_FAIL_LIMIT) {
+        chMtxLock(&imu_mtx);
+        const bool was_valid = g_imu[idx].valid;
+        g_imu[idx].valid = false;
+        chMtxUnlock(&imu_mtx);
+        // Only latch an IMU that had been working; one that never came up
+        // (absent, or failed init) just keeps counting and stays invalid.
+        if (was_valid) s_failed[idx] = true;
+        s_fail_count[idx] = 0;
+    }
+    return false;
+}
+
 static THD_FUNCTION(SPIThread, arg)
 {
     chRegSetThreadName("spi");
@@ -187,7 +240,7 @@ static THD_FUNCTION(SPIThread, arg)
         // right-wing-down -> +roll, nose-right -> +yaw; tools/telemetry.py)
         // before trusting it for flight — this fixes the specific symptom
         // reported, not a from-scratch re-derivation of the physical mount.
-        if (imu1.read(a, g)) {
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
             // ROTATION_ROLL_180 → NED z-down: [x, -y, -z]
             const float ra[3] = { a[0], -a[1], -a[2] };
             const float rg[3] = { g[0], -g[1], -g[2] };
@@ -199,7 +252,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
             // ROTATION_YAW_90 → NED z-down: [-y, x, z]
             const float ra[3] = { -a[1], a[0], a[2] };
             const float rg[3] = { -g[1], g[0], g[2] };
@@ -211,7 +264,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu3.read(a, g)) {
+        if (imu_sample_good(2, imu3.read(a, g), a, g)) {
             // ROTATION_YAW_180 → NED z-down: [-x, -y, z]
             const float ra[3] = { -a[0], -a[1], a[2] };
             const float rg[3] = { -g[0], -g[1], g[2] };
@@ -225,8 +278,8 @@ static THD_FUNCTION(SPIThread, arg)
         }
 #elif defined(BPRL_BOARD_ORQA)
         // Only two physical IMUs on this board — g_imu[2] is never written
-        // and stays valid=false; StateManager already treats an invalid
-        // lane as absent. Rotations are transcribed from ArduPilot's
+        // and stays valid=false, so StateManager never activates lane 2
+        // (see _lane_active). Rotations are transcribed from ArduPilot's
         // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
         // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and
         // verified byte-for-byte 2026-08-12 against ArduPilot's own
@@ -243,7 +296,7 @@ static THD_FUNCTION(SPIThread, arg)
         // question that prompted it is still open and needs a different
         // explanation — not this rotation matrix, which is now confirmed
         // correct against upstream ArduPilot source.
-        if (imu1.read(a, g)) {
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
             // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
             const float ra[3] = { -a[1], -a[0], -a[2] };
             const float rg[3] = { -g[1], -g[0], -g[2] };
@@ -255,7 +308,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
             // ROTATION_PITCH_180 → NED z-down: [-x, y, -z]
             const float ra[3] = { -a[0], a[1], -a[2] };
             const float rg[3] = { -g[0], g[1], -g[2] };
@@ -268,7 +321,7 @@ static THD_FUNCTION(SPIThread, arg)
             chMtxUnlock(&imu_mtx);
         }
 #else
-        if (imu1.read(a, g)) {
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
             // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
             static constexpr float RS = 0.70710678f;
             const float ra[3] = { RS*(a[1]-a[0]), RS*(a[1]+a[0]), -a[2] };
@@ -281,7 +334,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
             // Instance 0 (CS=PC15): ROTATION_YAW_90 → NED z-down: [-y,+x,+z]
             const float ra[3] = {-a[1], +a[0], +a[2]};
             const float rg[3] = {-g[1], +g[0], +g[2]};
@@ -293,7 +346,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu3.read(a, g)) {
+        if (imu_sample_good(2, imu3.read(a, g), a, g)) {
             // Instance 1 (CS=PC13): ROTATION_PITCH_180_YAW_90 → NED z-down: [-y,-x,-z]
             const float ra[3] = {-a[1], -a[0], -a[2]};
             const float rg[3] = {-g[1], -g[0], -g[2]};
@@ -417,7 +470,7 @@ static THD_FUNCTION(ControlThread, arg)
     const int tid = TIMING_REGISTER("ctrl", period);
 
     systime_t next = chVTGetSystemTime();
-    uint32_t last_tick_us = TIME_I2US(chVTGetSystemTimeX());
+    uint32_t last_tick_us = bprl_micros();
     while (true) {
         TIMING_TICK_BEGIN(tid);
 
@@ -430,7 +483,7 @@ static THD_FUNCTION(ControlThread, arg)
         // dt — keeps EKF integration correct under scheduler jitter (same
         // approach PID::update() already uses). Clamped to +/-2x nominal so
         // a single missed-deadline outlier can't corrupt the integration.
-        const uint32_t now_us = TIME_I2US(chVTGetSystemTimeX());
+        const uint32_t now_us = bprl_micros();
         float dt = static_cast<float>(now_us - last_tick_us) * 1.0e-6f;
         last_tick_us = now_us;
         dt = constrain_float(dt, dt_nominal * 0.5f, dt_nominal * 2.0f);
@@ -525,6 +578,13 @@ static THD_FUNCTION(ControlThread, arg)
 
         // Run all EKF lanes and derive outputs.
         state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
+
+        // If the estimator just snapped yaw onto the mocap frame, move the
+        // attitude controllers' held heading by the same amount so the
+        // vehicle doesn't physically rotate to chase the old number.
+        const float yaw_reset_rad = state_mgr.consume_yaw_reset();
+        if (yaw_reset_rad != 0.0f)
+            flight_sm.yaw_frame_reset(yaw_reset_rad);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
@@ -1164,10 +1224,11 @@ static void usb_cmd_dispatch(const char *line)
         chprintf((BaseSequentialStream *)&SDU1,
                  "MAV,DIAG,bytes_rx=%lu,frames_ok=%lu,frames_bad_crc=%lu,"
                  "heartbeat_rx=%lu,param_req_rx=%lu,vision_pos_rx=%lu,"
-                 "vision_speed_rx=%lu,unknown_rx=%lu\r\n",
+                 "vision_speed_rx=%lu,unknown_rx=%lu,mocap_timeouts=%lu\r\n",
                  (uint32_t)d.bytes_rx, (uint32_t)d.frames_ok, (uint32_t)d.frames_bad_crc,
                  (uint32_t)d.heartbeat_rx, (uint32_t)d.param_req_rx, (uint32_t)d.vision_pos_rx,
-                 (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx);
+                 (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx,
+                 (uint32_t)d.mocap_timeouts);
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,scan,start") == 0) {
         can_scan_start();
@@ -1478,7 +1539,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
                 "%d,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
                 (double)(yaw   * 57.2958f),
@@ -1517,7 +1578,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()), primary_lane,
+                bprl_millis(), primary_lane,
                 (double)(lane_roll[0]*57.2958f), (double)(lane_pitch[0]*57.2958f),
                 (double)(lane_yaw[0]*57.2958f),
                 (double)lane_p[0], (double)lane_q[0], (double)lane_r[0],
@@ -1550,7 +1611,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
                 "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
                 "%.5f,%.5f,%.5f,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)imu_ax[0], (double)imu_ay[0], (double)imu_az[0],
                 (double)imu_gx[0], (double)imu_gy[0], (double)imu_gz[0], (int)imu_v[0],
                 (double)imu_ax[1], (double)imu_ay[1], (double)imu_az[1],
@@ -1583,7 +1644,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.4f,%.4f,%.4f,"
                 "%.4f,%.4f,%.4f,"
                 "%.4f,%.4f,%.4f,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)pos_x, (double)pos_y, (double)pos_z,
                 (double)vel_u, (double)vel_v, (double)vel_w,
                 (double)mocap_x, (double)mocap_y, (double)mocap_z,
@@ -1622,7 +1683,7 @@ static THD_FUNCTION(DebugThread, arg)
             MemoryStream strain_ms;
             msObjectInit(&strain_ms, (uint8_t *)strain_buf, sizeof(strain_buf) - 1, 0);
             chprintf((BaseSequentialStream *)&strain_ms, "$STRAIN,%lu,%d,%lu,%lu",
-                     (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                     bprl_millis(),
                      (int)s_valid, (unsigned long)s_last_ms,
                      (unsigned long)strain_hz);
             chprintf((BaseSequentialStream *)&strain_ms, ",ARM1");
@@ -1658,7 +1719,8 @@ static THD_FUNCTION(DebugThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * MAVLinkThread — 100 Hz, NORMALPRIO-8
- * Slimmed-down MAVLink on TELEM2 (USART3, 115200 baud).
+ * Slimmed-down MAVLink at 115200 baud on TELEM2/USART3 (Cube boards) or
+ * TX7/RX7/UART7 (BPRL_BOARD_ORQA) — see BPRL_MAVLINK_SD in MAVLink.hpp.
  * Sends heartbeat at 1 Hz; receives VISION_POSITION_ESTIMATE and
  * VISION_SPEED_ESTIMATE and writes them into g_mocap for the EKF.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1720,9 +1782,9 @@ static THD_FUNCTION(LogThread, arg)
     systime_t next = chVTGetSystemTime();
 
     while (true) {
-        TIMING_TICK_BEGIN(tid);
+        /* Timestamp in microseconds since boot (monotonic — see src/uptime.hpp). */
         /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
-        const uint64_t t_us = (uint64_t)TIME_I2MS(chVTGetSystemTime()) * 1000ULL;
+        const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
         float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12];
@@ -1957,7 +2019,7 @@ void threads_start(const ThreadRates &rates)
     //   IOMCUThread     +12  ~400 Hz FMU<->IOMCU (MOTOR_PROTO_IOMCU only)
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
-    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
+    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 / Orqa TX7-RX7 (vision position)
     //   DebugThread     -10  10 Hz $TEL/$EKFL USB stream
     //   LogThread       -15  50 Hz SD card logging
     //   USBCmdThread    -20  event-driven USB commands

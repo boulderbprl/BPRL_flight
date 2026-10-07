@@ -39,7 +39,7 @@ struct MocapRaw {
     bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
     bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by ControlThread
     bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
-    bool  valid;       // mocap link connected and receiving
+    bool  valid;       // mocap link connected and receiving — cleared by MAVLinkThread after 300 ms without a position message
 };
 
 struct BaroRaw {
@@ -96,7 +96,17 @@ extern bool      g_motor_test_active;
 extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
 
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
- * All rates live in main.cpp.  Change them there to retune loop timing.    */
+ * All rates live in main.cpp.  Change them there to retune loop timing —
+ * except ControlThread's, which is set here so the fixed-dt filters that
+ * run inside it (PosControl, Unmixer, AttitudeINDI) track it automatically. */
+
+// ControlThread period. main.cpp's kRates.control is derived from this, and
+// CONTROL_DT_S is the fixed dt for every filter that runs once per control
+// tick. Fixed rather than measured: lowpass2p() recomputes its coefficients
+// from dt every call, and tick-to-tick jitter in a measured dt shows up as
+// multiplicative noise on the filter output.
+static constexpr uint32_t CONTROL_PERIOD_US = 2500;   // 400 Hz — matches ArduPilot default
+static constexpr float    CONTROL_DT_S      = CONTROL_PERIOD_US * 1.0e-6f;
 
 struct LogRates {
     sysinterval_t period;  // derived from the drone's DroneConfig::logging.log_rate_hz (default 50 Hz) — see main.cpp

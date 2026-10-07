@@ -14,10 +14,10 @@ pip install pyserial rich
 
 | Script | Subcommands | DEBUG build? |
 |---|---|---|
-| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel` | Required |
+| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel`, `strain` | Required |
 | `hw_status.py` | `hw-status` (default) | No |
 | `motor_test.py` | `motor-test` | No |
-| `calibrate.py` | `calibrate` | Required |
+| `calibrate.py` | `calibrate`, `clear` | Required |
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
 | `strain_rate.py` | `strain-rate` | No |
@@ -27,6 +27,7 @@ pip install pyserial rich
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
 | *(raw serial, see [Timing](#timing--schedulability-bprl_timing-build) below)* | `TIM,status`, `TIM,reset` | Requires `-DBPRL_TIMING` |
+| *(raw serial, no wrapper script)* | `IOMCU,status`, `PWM,status`, `STRAIN_GAUGE,zero`, `STRAIN_GAUGE,reset` | No |
 
 `dshot_decode_test.py` is a standalone dev/test script (no argparse subcommands) — not part of the main CLI family above.
 
@@ -38,7 +39,7 @@ All scripts accept `--port /dev/ttyACMx` and `--baud N` global options.
 
 > Requires `-DBPRL_DEBUG` firmware build.
 
-Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
+Parses the `$TEL`, `$EKFL`, `$IMU`, `$POS` and `$STRAIN` 10 Hz streams emitted by `DebugThread`.
 
 | Subcommand | Description |
 |---|---|
@@ -46,12 +47,14 @@ Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
 | `ekf-status` | Per-lane EKF roll/pitch/yaw/p/q/r table (all three onboard lanes + IMX5) |
 | `imu-compare` | Side-by-side raw accel and gyro from all three onboard IMUs |
 | `pos-vel` | Live XYZ position/velocity vs. mocap ground truth |
+| `strain` | Strain gauge array values (I2C 0x09 array, Drone2) |
 
 ```bash
 python3 tools/telemetry.py telemetry
 python3 tools/telemetry.py ekf-status
 python3 tools/telemetry.py imu-compare
 python3 tools/telemetry.py pos-vel
+python3 tools/telemetry.py strain
 ```
 
 ---
@@ -111,6 +114,8 @@ python3 tools/calibrate.py calibrate [--duration 30]
 
 Place the drone level on a flat surface before running. The script collects `--duration` seconds of `$IMU` samples (default 30 s), prints the computed biases, and asks for confirmation before writing to flash via `CAL,set` and `CAL,commit`.
 
+`python3 tools/calibrate.py clear` clears the stored calibration (zero bias) without recalibrating.
+
 ---
 
 ## can_tools.py
@@ -141,7 +146,7 @@ python3 tools/can_tools.py can-scan --duration 2
 
 | Subcommand | Description |
 |---|---|
-| `mav-diag [--watch] [--interval N]` | Read MAVLinkThread's SD3/TELEM2 RX counters (bytes, frames parsed OK/bad-CRC, per-message-type counts) |
+| `mav-diag [--watch] [--interval N]` | Read MAVLinkThread's RX counters (SD3/TELEM2 on the Cube boards, SD7 on Orqa) (bytes, frames parsed OK/bad-CRC, per-message-type counts) |
 
 ```bash
 python3 tools/mav_tools.py mav-diag
@@ -170,13 +175,13 @@ python3 tools/i2c_tools.py i2c-scan
 
 > Works on any firmware build. In development.
 
-Live display of the strain-rate sensor (CAN ID 0x69): 4 signed int16 values representing strain rate on each arm.
+Live display of the strain-rate sensor (I2C by default; CAN ID 0x69 if built with `STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`): 4 signed int16 values representing strain rate on each arm.
 
 ```bash
 python3 tools/strain_rate.py strain-rate
 ```
 
-Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively sending CAN frames.
+Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively reporting.
 
 ---
 
@@ -184,7 +189,7 @@ Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag refle
 
 > Works on any firmware build.
 
-Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70/0x71, one per Feather M4 + AS5047P board — see `Strain_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
+Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70–0x73, up to four, one per Feather M4 + AS5047P board — see `Strain_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
 
 ```bash
 python3 tools/encoder_rpm.py encoder-rpm
@@ -240,12 +245,13 @@ python3 tools/logs.py log-status
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
-| `<stem>_enc0.csv` / `_enc1.csv` | TimeUS, RPM (float, signed mechanical RPM), Angle (uint16 raw, 0-16383/rev), ErrFlag (AS5047P EF bit), Valid — one per encoder node |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
+| `<stem>_ctun.csv` | TimeUS, PNT/PNE/PET/PEE (N/E position target and error, m), VNT/VNE/VET/VEE (N/E velocity target and error, m/s), RolT/PitT (lean-angle targets, rad), ClbT/ClbE (climb-rate target and error, m/s) — POS_HOLD tuning diagnostics |
+| `<stem>_mocp.csv` | TimeUS, X/Y/Z (m NED), VX/VY/VZ (m/s), Valid — raw mocap estimate, pre-EKF |
 
-All 11 message types log at the fixed 50 Hz `LogThread` period — there's no per-record rate field.
+Every enabled message type logs at the `LogThread` period (50 Hz by default, set per drone) — there's no per-record rate field. A message a drone's config disables has no data rows.
 
 The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 

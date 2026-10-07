@@ -8,8 +8,7 @@
  * BPRL_BOARD_ORQA: USART6, PC6 TX6 / PC7 RX6, AF7, full-duplex (see
  * boards/OrqaH7QuadCore/board.h) — not this board's hwdef-default RC pad
  * (that's half-duplex USART3/T3, default protocol GHST); moved to TX6/RX6
- * for simpler two-wire wiring and to leave USART3 free for MAVLink
- * (src/coms/MAVLink.cpp is unconditionally SD3 on every board). Note the
+ * for simpler two-wire wiring. Note the
  * receiver must actually be set to CRSF output — this parser doesn't speak
  * GHST, which is a different framing despite similar wiring.
  *

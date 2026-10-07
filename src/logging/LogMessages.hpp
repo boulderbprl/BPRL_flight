@@ -169,7 +169,7 @@ struct __attribute__((packed)) LogMsgCTUN {
     float    vel_e_err;   // m/s  inner loop E error
     float    roll_tgt;    // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
     float    pitch_tgt;   // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
-    float    climb_rate_tgt; // m/s  alt-hold climb rate target (positive = descend), D-axis output of NED_update
+    float    climb_rate_tgt; // m/s  alt-hold climb rate target (positive = descend), AltControl::climb_rate_tgt()
     float    climb_rate_err; // m/s  climb rate error, target - measured (state[W])
 };
 // Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B

@@ -1,3 +1,4 @@
+#include "src/uptime.hpp"
 #include "hal.h"
 #include "src/coms/MAVLink.hpp"
 #include "src/threads.hpp"
@@ -6,12 +7,13 @@
  * MAVLink C library configuration — must come before the headers.
  * MAVLINK_USE_CONVENIENCE_FUNCTIONS enables the _send() helpers (heartbeat, etc.)
  * MAVLINK_SEND_UART_BYTES is the callback those helpers use to write bytes.
- * We use one channel (MAVLINK_COMM_0) mapped directly to SD3 (TELEM2).
+ * We use one channel (MAVLINK_COMM_0) mapped directly to BPRL_MAVLINK_SD
+ * (per-board, see MAVLink.hpp).
  */
 #define MAVLINK_USE_CONVENIENCE_FUNCTIONS
 #define MAVLINK_COMM_NUM_BUFFERS 1
 #define MAVLINK_SEND_UART_BYTES(chan, buf, len) \
-    chnWrite(&SD3, (const uint8_t *)(buf), (size_t)(len))
+    chnWrite(&BPRL_MAVLINK_SD, (const uint8_t *)(buf), (size_t)(len))
 
 /*
  * mavlink_system must be defined BEFORE common/mavlink.h is included because
@@ -33,7 +35,7 @@ static const SerialConfig telem2_cfg = {
 
 void mavlink_comms_init()
 {
-    sdStart(&SD3, &telem2_cfg);
+    sdStart(&BPRL_MAVLINK_SD, &telem2_cfg);
 }
 
 /* ── Diagnostics ──────────────────────────────────────────────────────────── */
@@ -50,14 +52,34 @@ void mavlink_get_diag(MavlinkDiag &out)
     out.vision_pos_rx    = s_diag.vision_pos_rx;
     out.vision_speed_rx  = s_diag.vision_speed_rx;
     out.unknown_rx       = s_diag.unknown_rx;
+    out.mocap_timeouts   = s_diag.mocap_timeouts;
 }
 
 /* ── Incoming message handlers ───────────────────────────────────────────── */
+
+/*
+ * Mocap link timeout — same rule and value as ArduPilot's
+ * AP_VisualOdom_Backend::healthy() (AP_VISUALODOM_TIMEOUT_MS = 300, see
+ * libraries/AP_VisualOdom/AP_VisualOdom.h): the link is healthy only while a
+ * position message has arrived within the last 300 ms. Keyed off
+ * VISION_POSITION_ESTIMATE alone, since that is the message that sets
+ * g_mocap.valid in the first place.
+ *
+ * Held as a systime_t and compared with chVTTimeElapsedSinceX() rather than
+ * as a TIME_I2MS() millisecond count: Drone3 builds with
+ * CH_CFG_ST_RESOLUTION=16, where the tick counter wraps every ~6.5 s, and
+ * only systime_t arithmetic is wrap-safe across that. Only ever touched from
+ * MAVLinkThread (handler + mavlink_comms_update()), so it needs no lock.
+ */
+#define MOCAP_TIMEOUT_MS 300U
+static systime_t s_last_vision_pos_time = 0;
 
 static void handle_vision_position(const mavlink_message_t *msg)
 {
     mavlink_vision_position_estimate_t m;
     mavlink_msg_vision_position_estimate_decode(msg, &m);
+
+    s_last_vision_pos_time = chVTGetSystemTimeX();
 
     chMtxLock(&mocap_mtx);
     g_mocap.x           = m.x;
@@ -121,12 +143,12 @@ static void handle_message(const mavlink_message_t *msg)
 
 void mavlink_comms_update()
 {
-    /* Drain all available bytes from TELEM2 and parse them into MAVLink frames */
+    /* Drain all available bytes from the MAVLink UART and parse them into MAVLink frames */
     uint8_t c;
     mavlink_message_t msg;
     mavlink_status_t  status;
 
-    while (chnReadTimeout(&SD3, &c, 1, TIME_IMMEDIATE) == 1) {
+    while (chnReadTimeout(&BPRL_MAVLINK_SD, &c, 1, TIME_IMMEDIATE) == 1) {
         s_diag.bytes_rx++;
         const uint8_t framing = mavlink_frame_char(MAVLINK_COMM_0, c, &msg, &status);
         if (framing == MAVLINK_FRAMING_OK) {
@@ -137,7 +159,22 @@ void mavlink_comms_update()
         }
     }
 
-    const uint32_t now_ms = (uint32_t)TIME_I2MS(chVTGetSystemTime());
+    /* Mocap timeout: drop g_mocap.valid once position messages stop (see
+     * MOCAP_TIMEOUT_MS). Clearing the has_new_* flags too keeps a sample
+     * that landed just before the dropout from being fused as fresh on the
+     * far side of it. The next VISION_POSITION_ESTIMATE sets valid again. */
+    chMtxLock(&mocap_mtx);
+    if (g_mocap.valid &&
+        chVTTimeElapsedSinceX(s_last_vision_pos_time) > TIME_MS2I(MOCAP_TIMEOUT_MS)) {
+        g_mocap.valid       = false;
+        g_mocap.has_new_pos = false;
+        g_mocap.has_new_vel = false;
+        g_mocap.has_new_yaw = false;
+        s_diag.mocap_timeouts++;
+    }
+    chMtxUnlock(&mocap_mtx);
+
+    const uint32_t now_ms = bprl_millis();
 
     /* Send heartbeat at 1 Hz so MAVProxy can find the vehicle */
     static uint32_t last_hb_ms = 0;

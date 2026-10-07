@@ -78,6 +78,8 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g1_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
+| 0x10 | CTUN | time_us, pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err — POS_HOLD tuning diagnostics; temporary, compiled in only while `LOG_CTUN_ENABLED` is 1 |
+| 0x11 | MOCP | time_us, x, y, z, vx, vy, vz, valid — raw mocap estimate, pre-EKF |
 
 No message carries a rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
 

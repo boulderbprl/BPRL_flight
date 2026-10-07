@@ -33,6 +33,7 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
+| `0x70`–`0x73` | Shaft-encoder RPM nodes | One Feather M4 + AS5047P per node (`src/sensors/EncoderRPM.*`): mechanical RPM, shaft angle, error flag | per node |
 | `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 100 Hz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
 
 `imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).
@@ -173,7 +174,7 @@ SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-d
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
-Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`). No magnetometer is present. On the Cube boards the barometer (MS5611) is on SPI, not I2C — see the SPI section above. On `DRONE=Drone3` (Orqa QuadCore H7) it's the opposite: the DPS310 barometer (`src/coms/Baro/DPS310.hpp/.cpp`, I2C2 address 0x77) is this board's only barometer, registered via `bprl_i2c_register()` the same way the strain-rate sensor is and polled by `I2CThread` at the same 200 Hz — see the root README's [DPS310 Barometer](../../README.md#8-imu-drivers) section.
+Current use: strain rate sensor's I2C interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_I2C`, the **default** — CAN is the override; see `src/sensors/StrainRate.*`) on Drone1/Drone3, or the strain gauge array (`src/sensors/StrainGauge.*`, address 0x09) on Drone2/CubeBlueH7 — the two are mutually exclusive and `main.cpp` registers one or the other per board. No magnetometer is present. On the Cube boards the barometer (MS5611) is on SPI, not I2C — see the SPI section above. On `DRONE=Drone3` (Orqa QuadCore H7) it's the opposite: the DPS310 barometer (`src/coms/Baro/DPS310.hpp/.cpp`, I2C2 address 0x77) is this board's only barometer, registered via `bprl_i2c_register()` the same way the strain-rate sensor is and polled by `I2CThread` at the same 200 Hz — see the root README's [DPS310 Barometer](../../README.md#8-imu-drivers) section.
 
 ### Adding a device
 
@@ -188,22 +189,26 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 `radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`); channel indices come from `DroneConfig::rc_map` (see `configs/DroneConfig.hpp`) rather than being hardcoded. `radio_armed()` reads the dedicated arm-switch channel (threshold at center). `radio_switch_position()` buckets `radio_indi()` into 0/1/2 (low/mid/high) — a thresholded int built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection; `FlightStateMachine::set_active_controller()` maps that to a controller-list index.
 
-Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF).
+Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF). CRSF reads TELEM1 (USART2) on the Cube boards and USART6 (PC6/PC7, full-duplex) on the Orqa QuadCore H7.
 
-`motor_output_write()` selects DShot 600 or standard servo PWM (1000–2000 µs) based on the `MOTOR_PROTOCOL` define in `PWM.hpp`. The MotorMixer and ControlThread always produce 0–1000 normalized commands and are unaffected by this choice.
+`motor_output_write()` selects DShot 600, standard servo PWM (1000–2000 µs) or the IOMCU path (see above) based on the `MOTOR_PROTOCOL` define in `PWM.hpp`. The MotorMixer and ControlThread always produce 0–1000 normalized commands and are unaffected by this choice.
 
 ---
 
 ## MAVLink — TELEM2 (`MAVLink.hpp/.cpp`)
 
-Parses MAVLink on the TELEM2 UART. Currently used solely to ingest motion-capture position/velocity into `g_mocap`:
+Parses MAVLink at 115200 baud on TELEM2 (USART3) on the Cube boards and on the TX7/RX7 pads (UART7, PE8 TX / PE7 RX) on the Orqa QuadCore H7 — selected by `BPRL_MAVLINK_SD` in `MAVLink.hpp`. Its main job is ingesting motion-capture position/velocity into `g_mocap`:
 
 | Message | Writes | Flag set |
 |---|---|---|
-| `VISION_POSITION_ESTIMATE` | `g_mocap.{x,y,z}` | `has_new_pos` |
+| `VISION_POSITION_ESTIMATE` | `g_mocap.{x,y,z,yaw}`, `valid` | `has_new_pos`, `has_new_yaw` |
 | `VISION_SPEED_ESTIMATE` | `g_mocap.{vx,vy,vz}` | `has_new_vel` |
 
 The two are handled independently (separate MAVLink messages, not guaranteed to arrive together or at the same rate) — see `StateManager::update()`'s comment on why position and velocity mocap fusion are gated separately rather than combined into one call.
+
+Beyond mocap ingestion it does just enough for a ground station or companion bridge to see the vehicle: it sends `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz (some vision bridges wait for a time sync before sending anything), echoes the received mocap data back as `LOCAL_POSITION_NED` at 10 Hz while it is valid, and answers `PARAM_REQUEST_LIST` with a single empty `PARAM_VALUE` so MAVProxy stops retrying. Every other incoming message is counted and ignored.
+
+`g_mocap.valid` is cleared after 300 ms without a `VISION_POSITION_ESTIMATE` (same rule and value as ArduPilot's `AP_VisualOdom_Backend::healthy()`); `MAV,diag` reports the count as `mocap_timeouts`.
 
 ---
 

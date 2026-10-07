@@ -99,8 +99,9 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
         _yaw_target_valid = true;
     }
     const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
-    const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
-                                                 -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
+    const float yaw_hold_rate = _yaw_hold_scale *
+                                constrain_float(_yaw_hold.update(0.0f, yaw_err),
+                                                -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
 
     out_cmds[2] = _yaw_rate.update(_yaw_gain * input[3] + yaw_hold_rate, r);
 }
@@ -143,8 +144,8 @@ void AttitudeINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &g
     // input, independent of current_torque's own use,
     // unfiltered, as the increment-law baseline above. Runs every tick
     // regardless of do_step so it keeps its designed 400 Hz-sampled cutoff.
-    const float stage2p = lowpass2p(tau_now, filt_state, STATEMGR_LP_PQRDOT_HZ, NLMS_DT_S);
-    const float alpha_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, NLMS_DT_S);
+    const float stage2p = lowpass2p(tau_now, filt_state, STATEMGR_LP_PQRDOT_HZ, CONTROL_DT_S);
+    const float alpha_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, CONTROL_DT_S);
     extra_filt = lowpass(stage2p, extra_filt, alpha_extra);
     const float tau_f = extra_filt;
 

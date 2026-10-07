@@ -2,6 +2,7 @@
 #include "ff.h"
 #include <cstdint>
 #include <cstddef>
+#include <cstring>
 
 /*
  * Logger — ring-buffered binary SD card logger.
@@ -37,13 +38,22 @@ public:
     // pattern the pre-allocation exists to avoid. 0xFF = f_expand not called
     // yet (init() hasn't reached that point, e.g. mount/open itself failed).
 
+    // Builds the full [sync1][sync2][msg_id][body] record locally and hands
+    // it to ring_write() as a single call — ring_write() only ever commits
+    // a record if the whole thing fits, so this can't leave a header
+    // committed with no body behind it (which used to desync every record
+    // written afterward, until the host parser got lucky and resynced on
+    // a stray 0xA3 0x95 byte pair further down the stream).
     template<typename T>
     bool write(uint8_t msg_id, const T &msg)
     {
         if (!_open) return false;
-        const uint8_t hdr[3] = { 0xA3U, 0x95U, msg_id };
-        if (!ring_write(hdr, 3)) return false;
-        return ring_write(&msg, sizeof(T));
+        uint8_t rec[3 + sizeof(T)];
+        rec[0] = 0xA3U;
+        rec[1] = 0x95U;
+        rec[2] = msg_id;
+        std::memcpy(rec + 3, &msg, sizeof(T));
+        return ring_write(rec, sizeof(rec));
     }
 
     void flush();

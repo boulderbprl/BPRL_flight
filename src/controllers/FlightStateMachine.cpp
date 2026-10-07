@@ -35,12 +35,6 @@ void FlightStateMachine::reset_all()
     _pid_pi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
-    _ph_N = PHAxisMode::PILOT;
-    _ph_E = PHAxisMode::PILOT;
-    memset(_hold_pos, 0, sizeof(_hold_pos));
-    _hold_pos_valid = false;
-    _blend_lean_N = _blend_lean_E = 0.0f;
-    _blend_ticks_N = _blend_ticks_E = 0;
 }
 
 // ── Attitude dispatcher ──────────────────────────────────────────────────────
@@ -113,6 +107,15 @@ void FlightStateMachine::mode_stabilize(const float euler[],
 
 // ── Mode: ALT_HOLD ──────────────────────────────────────────────────────────
 
+// D component of the body→NED velocity rotation (positive = descending).
+static float ned_vel_D(const float euler[], const float state_full[])
+{
+    const float rol = euler[0], pit = euler[1];
+    return -state_full[StateIdx::U]*sinf(pit)
+         +  state_full[StateIdx::V]*sinf(rol)*cosf(pit)
+         +  state_full[StateIdx::W]*cosf(rol)*cosf(pit);
+}
+
 void FlightStateMachine::mode_alt_hold(const float euler[],
                                        const float state_full[],
                                        const float input[],
@@ -121,14 +124,15 @@ void FlightStateMachine::mode_alt_hold(const float euler[],
 {
     run_attitude(euler, state_full, input, rpm, out_cmds);
 
-    const float vD     = state_full[StateIdx::W];
-    thrust_out = _alt.alt_hold_from_stick(input[InputIdx::THRUST], vD);
+    thrust_out = _alt.alt_hold(input[InputIdx::THRUST], state_full[StateIdx::Z_POS],
+                               ned_vel_D(euler, state_full));
 }
 
 // ── Mode: POS_HOLD ──────────────────────────────────────────────────────────
 //
-// Per-axis pilot-blend state machine (PILOT→BRAKE→HOLD→RETURNING).
-// N and E axes run independently.  D axis always runs AltControl cascade.
+// N/E: PosControl::update() (sticks → accel → velocity → position targets,
+// see PosControl.hpp). D axis is AltControl::alt_hold(), exactly as in
+// ALT_HOLD.
 
 void FlightStateMachine::mode_pos_hold(const float euler[],
                                        const float state_full[],
@@ -148,7 +152,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     const float vE = U*cosf(pit)*sinf(yaw)
                    + V*(sinf(rol)*sinf(pit)*sinf(yaw) + cosf(rol)*cosf(yaw))
                    + W*(cosf(rol)*sinf(pit)*sinf(yaw) - sinf(rol)*cosf(yaw));
-    const float vD = -U*sinf(pit) + V*sinf(rol)*cosf(pit) + W*cosf(rol)*cosf(pit);
+    const float vD = ned_vel_D(euler, state_full);
 
     const float pos_state9[9] = {
         state_full[StateIdx::X],
@@ -162,129 +166,14 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     const float cur_E = pos_state9[1];
     const float cur_D = pos_state9[2];
 
-    // ── Stick mapping for NE pilot override ──────────────────────────────────
-    const float stick_N = -input[InputIdx::PITCH_TGT] * MAX_VEL_NE;
-    const float stick_E =  input[InputIdx::ROLL_TGT]  * MAX_VEL_NE;
-    const bool  sN_act  = fabsf(input[InputIdx::PITCH_TGT]) > STICK_DEADBAND;
-    const bool  sE_act  = fabsf(input[InputIdx::ROLL_TGT])  > STICK_DEADBAND;
-
-    // ── Per-axis N state machine ─────────────────────────────────────────────
-    float vel_N_tgt   = 0.0f;
-    bool  hold_N_pos  = false;   // true → use _hold_pos[0] in NED_update
-
-    switch (_ph_N) {
-        case PHAxisMode::PILOT:
-            vel_N_tgt = stick_N;
-            if (!sN_act) _ph_N = PHAxisMode::BRAKE;
-            break;
-
-        case PHAxisMode::BRAKE:
-            vel_N_tgt = 0.0f;
-            if (sN_act) {
-                _ph_N = PHAxisMode::PILOT;
-            } else if (fabsf(vN) < BRAKE_VEL_THR) {
-                _hold_pos[0] = cur_N;
-                _ph_N = PHAxisMode::HOLD;
-            }
-            break;
-
-        case PHAxisMode::HOLD:
-            hold_N_pos = true;
-            if (sN_act) {
-                _ph_N = PHAxisMode::RETURNING;
-                _blend_ticks_N = BLEND_TICKS;
-                // _blend_lean_N will be set after NED_update runs below
-            }
-            break;
-
-        case PHAxisMode::RETURNING:
-            if (_blend_ticks_N > 0) {
-                const float t = static_cast<float>(_blend_ticks_N) / BLEND_TICKS;
-                vel_N_tgt = t * _blend_lean_N + (1.0f - t) * stick_N;
-                --_blend_ticks_N;
-            } else {
-                _ph_N = PHAxisMode::PILOT;
-                vel_N_tgt = stick_N;
-            }
-            break;
-    }
-
-    // ── Per-axis E state machine ─────────────────────────────────────────────
-    float vel_E_tgt  = 0.0f;
-    bool  hold_E_pos = false;
-
-    switch (_ph_E) {
-        case PHAxisMode::PILOT:
-            vel_E_tgt = stick_E;
-            if (!sE_act) _ph_E = PHAxisMode::BRAKE;
-            break;
-
-        case PHAxisMode::BRAKE:
-            vel_E_tgt = 0.0f;
-            if (sE_act) {
-                _ph_E = PHAxisMode::PILOT;
-            } else if (fabsf(vE) < BRAKE_VEL_THR) {
-                _hold_pos[1] = cur_E;
-                _ph_E = PHAxisMode::HOLD;
-            }
-            break;
-
-        case PHAxisMode::HOLD:
-            hold_E_pos = true;
-            if (sE_act) {
-                _ph_E = PHAxisMode::RETURNING;
-                _blend_ticks_E = BLEND_TICKS;
-            }
-            break;
-
-        case PHAxisMode::RETURNING:
-            if (_blend_ticks_E > 0) {
-                const float t = static_cast<float>(_blend_ticks_E) / BLEND_TICKS;
-                vel_E_tgt = t * _blend_lean_E + (1.0f - t) * stick_E;
-                --_blend_ticks_E;
-            } else {
-                _ph_E = PHAxisMode::PILOT;
-                vel_E_tgt = stick_E;
-            }
-            break;
-    }
-
-    // ── D hold: latch position on first full hold, then keep ─────────────────
-    if (!_hold_pos_valid) {
-        _hold_pos[2] = cur_D;
-        // Only commit once both horizontal axes have settled to HOLD
-        if (_ph_N == PHAxisMode::HOLD && _ph_E == PHAxisMode::HOLD) {
-            _hold_pos_valid = true;
-        }
-    }
-
-    // ── Single NED_update call with appropriate position targets ─────────────
-    const float pos_tgt[3] = {
-        hold_N_pos ? _hold_pos[0] : cur_N,   // PILOT/BRAKE/RETURNING → error = 0
-        hold_E_pos ? _hold_pos[1] : cur_E,
-        _hold_pos[2]
-    };
-    float vel_tgt[3];
-    _pos.NED_update(pos_state9, pos_tgt, vel_tgt);
-
-    // Override N and E with state-machine velocities for non-HOLD axes.
-    // HOLD axes use NED_update output.  After NED_update snapshot for blend.
-    // Snapshot controller velocity on the tick we first enter RETURNING
-    // (hold_N/E_pos still true that tick, so NED_update ran with hold target).
-    if (_ph_N == PHAxisMode::RETURNING && _blend_ticks_N == BLEND_TICKS) {
-        _blend_lean_N = vel_tgt[0];
-    }
-    if (_ph_E == PHAxisMode::RETURNING && _blend_ticks_E == BLEND_TICKS) {
-        _blend_lean_E = vel_tgt[1];
-    }
-
-    if (!hold_N_pos) vel_tgt[0] = vel_N_tgt;
-    if (!hold_E_pos) vel_tgt[1] = vel_E_tgt;
-
-    // ── NE lean angle commands ────────────────────────────────────────────────
-    const float vel_NE[2] = { vel_tgt[0], vel_tgt[1] };
+    // ── N/E: sticks (forward/right) → lean angle commands ────────────────────
     float att_cmds[2];
-    _pos.NE_rate_update(pos_state9, vel_NE, att_cmds);
+    _pos.update(pos_state9, -input[InputIdx::PITCH_TGT], input[InputIdx::ROLL_TGT], att_cmds);
+    const float pos_tgt[2] = { _pos.pos_tgt(0), _pos.pos_tgt(1) };
+    const float vel_tgt[2] = { _pos.vel_tgt(0), _pos.vel_tgt(1) };
+
+    // ── Altitude: same controller as ALT_HOLD ─────────────────────────────────
+    const float alt_thrust = _alt.alt_hold(input[InputIdx::THRUST], cur_D, vD);
 
     // ── CTUN shadow diagnostics: outer pos-loop + inner vel-loop targets/errors
     // and the lean angle pos-hold would have sent to the attitude controller.
@@ -299,8 +188,8 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     _ctun_diag[7] = vel_tgt[1] - vE;     // vel_e_err
     _ctun_diag[8]  = att_cmds[0];        // roll_tgt  (shadow)
     _ctun_diag[9]  = att_cmds[1];        // pitch_tgt (shadow)
-    _ctun_diag[10] = vel_tgt[2];         // climb_rate_tgt (D-axis output of NED_update; shadow — alt-hold cascade isn't driving flight while CTUN_POSHOLD_SHADOW is set)
-    _ctun_diag[11] = vel_tgt[2] - vD;    // climb_rate_err
+    _ctun_diag[10] = _alt.climb_rate_tgt();       // climb_rate_tgt (shadow while CTUN_POSHOLD_SHADOW is set)
+    _ctun_diag[11] = _alt.climb_rate_tgt() - vD;  // climb_rate_err
 
     if (CTUN_POSHOLD_SHADOW) {
         // TEMP (CTUN tuning): fly hands-off STABILIZE — direct stick to
@@ -318,8 +207,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     pos_input[InputIdx::PITCH_TGT] = att_cmds[1];
     run_attitude(euler, state_full, pos_input, rpm, out_cmds);
 
-    // ── Altitude: inner loop only (climb rate from NED_update D) ──────────────
-    thrust_out = _alt.alt_hold_from_rate(vel_tgt[2], vD);
+    thrust_out = alt_thrust;
 }
 
 // ── Main update ──────────────────────────────────────────────────────────────
@@ -381,6 +269,15 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
         return;
+    }
+
+    // ── Heading-hold strength: light trim in the stick-flown modes, a firm
+    // hold in POS_HOLD (where nothing else is steering the heading).
+    {
+        const bool pos_hold_flying = (_mode == FlightMode::POS_HOLD) && !CTUN_POSHOLD_SHADOW;
+        const float yaw_hold_scale = pos_hold_flying ? POS_HOLD_YAW_HOLD_SCALE : 1.0f;
+        for (int i = 0; i < _num_controllers; ++i)
+            _controllers[i]->set_yaw_hold_scale(yaw_hold_scale);
     }
 
     // ── Dispatch ─────────────────────────────────────────────────────────────

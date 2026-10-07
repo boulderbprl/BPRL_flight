@@ -56,8 +56,9 @@ void AttitudePIDPI::update(const float euler[3], const float state_full[], const
         _yaw_target_valid = true;
     }
     const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
-    const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
-                                                 -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
+    const float yaw_hold_rate = _yaw_hold_scale *
+                                constrain_float(_yaw_hold.update(0.0f, yaw_err),
+                                                -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
 
     out_cmds[2] = constrain_float(_yaw_rate.update(_yaw_stick_gain * input[3] + yaw_hold_rate, state6[5]), -1.0f, 1.0f);
 }
