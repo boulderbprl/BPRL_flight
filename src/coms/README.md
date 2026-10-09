@@ -206,7 +206,25 @@ Parses MAVLink at 115200 baud on TELEM2 (USART3) on the Cube boards and on the T
 
 The two are handled independently (separate MAVLink messages, not guaranteed to arrive together or at the same rate) — see `StateManager::update()`'s comment on why position and velocity mocap fusion are gated separately rather than combined into one call.
 
-Beyond mocap ingestion it does just enough for a ground station or companion bridge to see the vehicle: it sends `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz (some vision bridges wait for a time sync before sending anything), echoes the received mocap data back as `LOCAL_POSITION_NED` at 10 Hz while it is valid, and answers `PARAM_REQUEST_LIST` with a single empty `PARAM_VALUE` so MAVProxy stops retrying. Every other incoming message is counted and ignored.
+Beyond mocap ingestion it does just enough for a ground station or companion bridge to see the vehicle: it sends `HEARTBEAT` and `SYSTEM_TIME` at 1 Hz (some vision bridges wait for a time sync before sending anything), echoes the received mocap data back as `LOCAL_POSITION_NED` at 2 Hz while it is valid, and answers `PARAM_REQUEST_LIST` with a single empty `PARAM_VALUE` so MAVProxy stops retrying. Every other incoming message is counted and ignored.
+
+It also receives the trajectory commands as `COMMAND_LONG` and answers each with a `COMMAND_ACK`. The command is only decoded here; it is passed to ControlThread through `g_traj_mailbox` (`src/threads.hpp`), `FlightStateMachine::traj_command()` decides, and the verdict comes back the same way. Positions are NED offsets in metres from the origin; **a parameter that is not given must be sent as NaN** (zero is a value — a D of 0 means the origin's height).
+
+| Command | Meaning | p1 | p2 | p3 | p4 | p5 | p6 | p7 |
+|---|---|---|---|---|---|---|---|---|
+| 31010 (`MAV_CMD_USER_1`) | Set origin | – | – | – | – | – | – | – |
+| 31011 (`MAV_CMD_USER_2`) | Point | N | E | D | – | – | – | – |
+| 31012 (`MAV_CMD_USER_3`) | Circle | radius | N | E | D | focus distance | direction | speed |
+| 31013 (`MAV_CMD_USER_4`) | Stop | – | – | – | – | – | – | – |
+
+| `COMMAND_ACK` result | Meaning |
+|---|---|
+| `ACCEPTED` | Done / started |
+| `TEMPORARILY_REJECTED` | Origin not set, not flying in POS_HOLD, no valid position, set-origin during a trajectory, or the previous command is still unanswered |
+| `DENIED` | Bad parameters, including an altitude below the take-off floor |
+| `FAILED` | ControlThread did not pick the command up within 200 ms (e.g. motor test running) |
+
+`tools/traj_cmd.py` sends these; from MAVProxy use `long 31012 1.0 nan nan nan nan nan nan` (MAVProxy fills omitted parameters with 0, so spell out the NaNs). `MAV,diag` reports `traj_cmd_rx` / `traj_cmd_rejected`. See `src/controllers/README.md` for what each command does.
 
 `g_mocap.valid` is cleared after 300 ms without a `VISION_POSITION_ESTIMATE` (same rule and value as ArduPilot's `AP_VisualOdom_Backend::healthy()`); `MAV,diag` reports the count as `mocap_timeouts`.
 

@@ -7,6 +7,8 @@
 #include "AttitudeController.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
+#include "HeadingControl.hpp"
+#include "TrajectoryTracker.hpp"
 #include "Unmixer.hpp"
 #include "configs/DroneConfig.hpp"
 
@@ -33,6 +35,18 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *   < -0.33  → STABILIZE  (attitude + throttle passthrough)
  *   -0.33..0.33 → ALT_HOLD (attitude + altitude hold cascade)
  *   > +0.33  → POS_HOLD   (position hold + attitude + altitude hold)
+ *
+ * POS_HOLD has two sources for what its position, altitude and heading
+ * controllers track: the pilot's sticks (the default), or — after a
+ * trajectory command, see traj_command() and TrajectoryTracker.hpp — a
+ * trajectory. There is no separate trajectory flight mode: moving the roll,
+ * pitch or yaw stick, leaving POS_HOLD, landing, disarming or losing the
+ * position estimate all drop back to the sticks.
+ *
+ * Heading in POS_HOLD is held by HeadingControl, which feeds the active
+ * attitude controller's yaw-rate loop directly (the yaw stick turns the
+ * heading target). STABILIZE and ALT_HOLD leave yaw to each attitude
+ * controller's own rate loop + heading-lock trim.
  *
  * TEMP (CTUN tuning, see CTUN_POSHOLD_SHADOW): while true, POS_HOLD actually
  * flies hands-off STABILIZE — the pos-hold NE cascade still runs every tick
@@ -64,11 +78,13 @@ public:
     // euler[3]:       [roll, pitch, yaw] rad
     // input[5]:       [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
     // armed:          arm switch state from radio
+    // pos_valid:      the N/E/D position in state_full is backed by a live
+    //                 external position source (mocap link healthy)
     // rpm[4]:         per-motor mechanical RPM [FR, RL, FL, RR] (for INDI unmixer)
     // out_cmds[3]:    normalised torque [roll, pitch, yaw] → MotorMixer
     // thrust_out:     throttle [0, 1] → MotorMixer
     void update(const float state_full[], const float euler[3],
-                const float input[], bool armed,
+                const float input[], bool armed, bool pos_valid,
                 const uint32_t rpm[4],
                 float out_cmds[3], float &thrust_out);
 
@@ -127,6 +143,19 @@ public:
     // every tick that mode is POS_HOLD, regardless of CTUN_POSHOLD_SHADOW.
     void get_ctun_diag(float diag[12]) const { memcpy(diag, _ctun_diag, sizeof(_ctun_diag)); }
 
+    // Trajectory command (set origin / point / circle / stop — see
+    // TrajectoryTracker.hpp). Call from ControlThread after update(), with
+    // the same state; a started trajectory takes effect on the next tick.
+    // Point and circle are only accepted while flying in POS_HOLD with a
+    // valid position.
+    TrajResult traj_command(const TrajCommand &cmd, const float state_full[], const float euler[3]);
+
+    // diag[8] = [traj_state (TrajState), ref_n, ref_e, ref_d, yaw_tgt,
+    // yaw_rate_cmd, height_offset, path_speed]. The reference and path
+    // fields are zero while no trajectory is active; yaw_tgt/yaw_rate_cmd
+    // are HeadingControl's and are live whenever POS_HOLD is flying.
+    void get_traj_diag(float diag[8]) const { memcpy(diag, _traj_diag, sizeof(_traj_diag)); }
+
     void reset_all();
 
     // Forward an estimator yaw reset to every controller in the list — the
@@ -135,6 +164,7 @@ public:
     {
         for (int i = 0; i < _num_controllers; ++i)
             _controllers[i]->yaw_frame_reset(delta_rad);
+        _heading.yaw_frame_reset(delta_rad);
     }
 
 private:
@@ -160,10 +190,9 @@ private:
     // Flip to false to restore closed-loop pos-hold flight.
     static constexpr bool CTUN_POSHOLD_SHADOW = false;
 
-    // Heading-hold strength in POS_HOLD, as a multiple of the configured
-    // yaw_hold gains and correction-rate cap. STABILIZE and ALT_HOLD use 1.0
-    // (yaw is mainly rate-controlled there, with a light heading trim).
-    static constexpr float POS_HOLD_YAW_HOLD_SCALE = 2.5f;
+    // Yaw stick [-1, 1] → turn rate for HeadingControl [rad/s]; zero inside
+    // the deadband, rescaled outside it so there is no step at its edge.
+    float yaw_stick_to_rate(float stick) const;
 
     // ── Ground-idle state machine ────────────────────────────────────────────
     uint32_t _takeoff_debounce_ticks = 0;
@@ -193,12 +222,20 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
+    // See get_traj_diag()
+    float _traj_diag[8] = {};
+
+    bool _pos_valid = false;   // last update()'s pos_valid, for traj_command()
+
     AttitudePID   _pid;      // always present, always list index 0 (the default)
     AttitudeINDI  _indi;     // storage always exists (no heap allocation); only
     AttitudePIDPI _pid_pi;   // reachable via _controllers[] if the drone's
                              // config enables it (see constructor)
     AltControl   _alt;
     PosControl   _pos;
+    HeadingControl    _heading;   // POS_HOLD only
+    TrajectoryTracker _traj;      // POS_HOLD only
+    float        _yaw_stick_rate; // from DroneConfig::heading.stick_rate
     Unmixer      _unmixer;
 
     // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────

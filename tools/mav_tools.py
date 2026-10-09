@@ -30,7 +30,8 @@ def cmd_mav_diag_once(ser) -> bool:
         m = re.match(
             r"MAV,DIAG,bytes_rx=(\d+),frames_ok=(\d+),frames_bad_crc=(\d+),"
             r"heartbeat_rx=(\d+),param_req_rx=(\d+),vision_pos_rx=(\d+),"
-            r"vision_speed_rx=(\d+),unknown_rx=(\d+)(?:,mocap_timeouts=(\d+))?", line)
+            r"vision_speed_rx=(\d+),unknown_rx=(\d+)(?:,mocap_timeouts=(\d+))?"
+            r"(?:,traj_cmd_rx=(\d+),traj_cmd_rejected=(\d+))?", line)
         if m:
             (bytes_rx, frames_ok, frames_bad_crc, heartbeat_rx, param_req_rx,
              vision_pos_rx, vision_speed_rx, unknown_rx) = (int(g) for g in m.groups()[:8])
@@ -47,6 +48,8 @@ def cmd_mav_diag_once(ser) -> bool:
             console.print(f"  unknown_rx      = {unknown_rx}")
             if mocap_timeouts is not None:
                 console.print(f"  mocap_timeouts  = {mocap_timeouts}")
+            if m.group(10) is not None:  # None on firmware older than the trajectory commands
+                console.print(f"  traj_cmd_rx     = {m.group(10)}  (rejected: {m.group(11)})")
             console.print()
             if bytes_rx == 0:
                 console.print("[red]bytes_rx stuck at 0 → nothing is reaching the MAVLink UART at all. "

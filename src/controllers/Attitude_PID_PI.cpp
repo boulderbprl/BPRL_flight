@@ -51,16 +51,24 @@ void AttitudePIDPI::update(const float euler[3], const float state_full[], const
 
     // ── Yaw: rate PID + heading-lock trim (no inner accel loop) ────────────
     const float yaw_now = state6[2];
-    if (fabsf(input[3]) > YAW_STICK_DEADBAND || !_yaw_target_valid) {
+    float yaw_rate_tgt;
+    if (_ext_yaw_rate_enabled) {
+        // POS_HOLD: HeadingControl owns the heading — see set_external_yaw_rate().
         _yaw_target       = yaw_now;
         _yaw_target_valid = true;
+        yaw_rate_tgt      = _ext_yaw_rate;
+    } else {
+        if (fabsf(input[3]) > YAW_STICK_DEADBAND || !_yaw_target_valid) {
+            _yaw_target       = yaw_now;
+            _yaw_target_valid = true;
+        }
+        const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
+        const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
+                                                    -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
+        yaw_rate_tgt = _yaw_stick_gain * input[3] + yaw_hold_rate;
     }
-    const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
-    const float yaw_hold_rate = _yaw_hold_scale *
-                                constrain_float(_yaw_hold.update(0.0f, yaw_err),
-                                                -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
 
-    out_cmds[2] = constrain_float(_yaw_rate.update(_yaw_stick_gain * input[3] + yaw_hold_rate, state6[5]), -1.0f, 1.0f);
+    out_cmds[2] = constrain_float(_yaw_rate.update(yaw_rate_tgt, state6[5]), -1.0f, 1.0f);
 }
 
 void AttitudePIDPI::reset_all()

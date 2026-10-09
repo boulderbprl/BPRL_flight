@@ -20,6 +20,8 @@ pip install pyserial rich
 | `calibrate.py` | `calibrate`, `clear` | Required |
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
+| `traj_cmd.py` | `origin`, `point`, `circle`, `stop` *(over MAVLink, not USB)* | No |
+| `sim/run.sh` | *(host flight simulation — see [sim/README.md](sim/README.md))* | — |
 | `strain_rate.py` | `strain-rate` | No |
 | `encoder_rpm.py` | `encoder-rpm` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
@@ -154,6 +156,24 @@ python3 tools/mav_tools.py mav-diag --watch --interval 1
 ```
 
 Diagnoses the RX side of the MAVLink/TELEM2 link independent of the radio and any ground-side bridge — tells you whether bytes are reaching SD3 at all, whether frames are failing CRC (dialect mismatch), and whether `VISION_POSITION_ESTIMATE`/`VISION_SPEED_ESTIMATE` specifically are showing up.
+
+---
+
+## traj_cmd.py
+
+> Speaks MAVLink to the FC's telemetry UART (not the USB port). Needs `pip install pymavlink`.
+
+Sends a trajectory command and prints the FC's `COMMAND_ACK`. Positions are NED offsets in metres from the origin; anything left out is sent as NaN and takes the firmware default (N/E 0, D = current altitude, plain circle, clockwise seen from above, default speed).
+
+```bash
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 origin
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --e 0.5
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 stop
+```
+
+`--master` is any pymavlink connection string — a MAVProxy `--out` port, or the serial adapter (`/dev/ttyUSB0,115200`). Point and circle are only accepted while flying in POS_HOLD with a valid mocap position and an origin set. See `src/controllers/README.md` (TrajectoryTracker).
 
 ---
 

@@ -75,19 +75,40 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
 
-    // .alt — AltControlGains { pos_D, climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
+        0.27f,  // hover_thr (measured 0.26, trojTrack_test1 2026-10-08)
     },
 
     // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
+    // Retuned from flight log trojTrack_test1 (2026-10-08): was vel P 2.0 /
+    // I 0.7, which held to 3.6 cm RMS with a slow 5-13 s wander.
+    //
+    // How far these can go is set by the mocap latency, not the airframe:
+    // that log shows the position/velocity the controller sees running
+    // 60-100 ms behind the vehicle. With that delay in the loop
+    // (tools/sim's degraded_link scenario), vel P 2.5 with pos P left at 1.0
+    // is the best-damped of the sets tried; pos P 1.5 / vel P 3.0 rings for
+    // several cycles and pos P 2.0 / vel P 4.0 is unstable. Don't raise
+    // these further without first cutting that latency (or compensating for
+    // it in the estimator) — re-run degraded_link before trying.
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 2.0f, 0.70f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.0f, 0.70f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
+
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // Starting point, not flight-tuned: kp matches the heading-lock trim
+    // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
+    { 1.75f,   // kp
+      3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
+      1.0f,    // max_rate
+      4.0f,    // max_accel
+      0.16f },  // lag_s (measured, trojTrack_test1 2026-10-08)
 
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
     { 0,  // thr
@@ -126,7 +147,7 @@ const DroneConfig kDroneConfig = {
     // Both disabled: plain PID only, conservative starting point pending flight testing on this airframe.
     { false, false },
 
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[15] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -141,6 +162,8 @@ const DroneConfig kDroneConfig = {
           false, // indi
           false, // baro
           true, // ctun
-          true }, // mocp
+          true, // mocp
+          true, // traj
+          true }, // mavl
     },
 };

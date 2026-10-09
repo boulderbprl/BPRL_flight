@@ -12,6 +12,7 @@ AltControl::AltControl(const AltControlGains &g)
                g.pos_D.filt_target_hz, g.pos_D.filt_error_hz, g.pos_D.filt_d_hz)
     , _climb_rate_pid(g.climb_rate.kp, g.climb_rate.ki, g.climb_rate.kd, g.climb_rate.imax,
                        g.climb_rate.filt_target_hz, g.climb_rate.filt_error_hz, g.climb_rate.filt_d_hz)
+    , _hover_thr(g.hover_thr)
 {}
 
 float AltControl::compute_throttle(float roll, float pitch, float thr_in) const
@@ -23,7 +24,7 @@ float AltControl::compute_throttle(float roll, float pitch, float thr_in) const
     return constrain_float(thr_exp * boost, 0.0f, 1.0f);
 }
 
-float AltControl::stick_to_climb_rate(float pilot_thr) const
+float AltControl::stick_to_climb_rate(float pilot_thr)
 {
     const float centered = pilot_thr - 0.5f;  // [-0.5, +0.5]
     const float half     = 0.5f - DEADBAND;
@@ -50,12 +51,20 @@ float AltControl::alt_hold(float pilot_thr, float cur_D, float vD)
     // (on the ground, thrust-saturated), which would wind up the position error.
     _alt_tgt_D = constrain_float(_alt_tgt_D, cur_D - ALT_LEASH_M, cur_D + ALT_LEASH_M);
 
-    _rate_tgt = constrain_float(climb_stick + _pos_pid.update(_alt_tgt_D, cur_D),
+    return track(_alt_tgt_D, climb_stick, cur_D, vD);
+}
+
+float AltControl::track(float alt_tgt_D, float climb_rate_ff, float cur_D, float vD)
+{
+    _alt_tgt_D     = alt_tgt_D;
+    _alt_tgt_valid = true;
+
+    _rate_tgt = constrain_float(climb_rate_ff + _pos_pid.update(_alt_tgt_D, cur_D),
                                 -MAX_CLIMB_RATE, MAX_CLIMB_RATE);
 
     // Positive delta_thr = want to accelerate downward → reduce throttle
     const float delta_thr = _climb_rate_pid.update(_rate_tgt, vD);
-    return constrain_float(THR_MID - delta_thr, 0.0f, 1.0f);
+    return constrain_float(_hover_thr - delta_thr, 0.0f, 1.0f);
 }
 
 void AltControl::reset_all()

@@ -13,6 +13,8 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _pid_pi(cfg.pid_pi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
+    , _heading(cfg.heading)
+    , _yaw_stick_rate(cfg.heading.stick_rate)
     , _unmixer(cfg.unmixer)
     , _num_controllers(0)
     , _active_index(0)
@@ -35,6 +37,8 @@ void FlightStateMachine::reset_all()
     _pid_pi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
+    _heading.reset();
+    _traj.cancel();   // the origin and floor are kept
 }
 
 // ── Attitude dispatcher ──────────────────────────────────────────────────────
@@ -130,9 +134,23 @@ void FlightStateMachine::mode_alt_hold(const float euler[],
 
 // ── Mode: POS_HOLD ──────────────────────────────────────────────────────────
 //
-// N/E: PosControl::update() (sticks → accel → velocity → position targets,
-// see PosControl.hpp). D axis is AltControl::alt_hold(), exactly as in
-// ALT_HOLD.
+// Sticks (default): N/E is PosControl::update() (sticks → accel → velocity →
+// position targets, see PosControl.hpp), D is AltControl::alt_hold() exactly
+// as in ALT_HOLD, and the yaw stick turns HeadingControl's heading target.
+//
+// Trajectory (TrajectoryTracker active): the same three controllers track
+// the tracker's reference instead, through their track()/update_heading()
+// entry points. Because they are the same controllers, with the same
+// integrators and targets, going back to the sticks is seamless.
+
+float FlightStateMachine::yaw_stick_to_rate(float stick) const
+{
+    const float deadband = PosControl::STICK_DEADBAND;
+    const float mag      = fabsf(stick);
+    if (mag <= deadband) return 0.0f;
+    const float rate = _yaw_stick_rate * constrain_float((mag - deadband) / (1.0f - deadband), 0.0f, 1.0f);
+    return stick < 0.0f ? -rate : rate;
+}
 
 void FlightStateMachine::mode_pos_hold(const float euler[],
                                        const float state_full[],
@@ -166,14 +184,42 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     const float cur_E = pos_state9[1];
     const float cur_D = pos_state9[2];
 
-    // ── N/E: sticks (forward/right) → lean angle commands ────────────────────
+    // ── Trajectory reference, if one is running ──────────────────────────────
+    TrajRef ref;
+    const bool traj_active = !CTUN_POSHOLD_SHADOW &&
+        _traj.update(&pos_state9[0], &pos_state9[6], yaw,
+                     input[InputIdx::ROLL_TGT], input[InputIdx::PITCH_TGT],
+                     input[InputIdx::YAW_RATE], input[InputIdx::THRUST], ref);
+
+    // ── N/E → lean angle commands, D → throttle, heading → yaw rate ──────────
     float att_cmds[2];
-    _pos.update(pos_state9, -input[InputIdx::PITCH_TGT], input[InputIdx::ROLL_TGT], att_cmds);
+    float alt_thrust;
+    float yaw_rate_cmd;
+    if (traj_active) {
+        _pos.track(pos_state9, ref.pos, ref.vel, ref.acc, att_cmds);
+        alt_thrust   = _alt.track(ref.pos[2], ref.vel[2], cur_D, vD);
+        yaw_rate_cmd = _heading.update_heading(yaw, ref.yaw, ref.yaw_rate);
+    } else {
+        // Sticks: forward/right → N/E, throttle → climb rate (same
+        // controller as ALT_HOLD), yaw → turn rate.
+        _pos.update(pos_state9, -input[InputIdx::PITCH_TGT], input[InputIdx::ROLL_TGT], att_cmds);
+        alt_thrust = _alt.alt_hold(input[InputIdx::THRUST], cur_D, vD);
+        // Skipped while POS_HOLD is flying as STABILIZE, so the heading
+        // target doesn't integrate against a vehicle that isn't following it.
+        yaw_rate_cmd = CTUN_POSHOLD_SHADOW ? 0.0f
+                     : _heading.update_rate(yaw, yaw_stick_to_rate(input[InputIdx::YAW_RATE]));
+    }
     const float pos_tgt[2] = { _pos.pos_tgt(0), _pos.pos_tgt(1) };
     const float vel_tgt[2] = { _pos.vel_tgt(0), _pos.vel_tgt(1) };
 
-    // ── Altitude: same controller as ALT_HOLD ─────────────────────────────────
-    const float alt_thrust = _alt.alt_hold(input[InputIdx::THRUST], cur_D, vD);
+    _traj_diag[0] = (float)_traj.state();
+    _traj_diag[1] = traj_active ? ref.pos[0] : 0.0f;
+    _traj_diag[2] = traj_active ? ref.pos[1] : 0.0f;
+    _traj_diag[3] = traj_active ? ref.pos[2] : 0.0f;
+    _traj_diag[4] = _heading.target();
+    _traj_diag[5] = yaw_rate_cmd;
+    _traj_diag[6] = traj_active ? _traj.height_offset() : 0.0f;
+    _traj_diag[7] = traj_active ? _traj.path_speed()    : 0.0f;
 
     // ── CTUN shadow diagnostics: outer pos-loop + inner vel-loop targets/errors
     // and the lean angle pos-hold would have sent to the attitude controller.
@@ -200,11 +246,14 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
         return;
     }
 
-    // ── Attitude controller with position-derived lean targets ────────────────
+    // ── Attitude controller with position-derived lean targets and the
+    // heading controller's yaw rate ────────────────────────────────────────
     float pos_input[InputIdx::N_INPUTS];
     memcpy(pos_input, input, sizeof(pos_input));
     pos_input[InputIdx::ROLL_TGT]  = att_cmds[0];
     pos_input[InputIdx::PITCH_TGT] = att_cmds[1];
+    for (int i = 0; i < _num_controllers; ++i)
+        _controllers[i]->set_external_yaw_rate(true, yaw_rate_cmd);
     run_attitude(euler, state_full, pos_input, rpm, out_cmds);
 
     thrust_out = alt_thrust;
@@ -213,10 +262,13 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
 // ── Main update ──────────────────────────────────────────────────────────────
 
 void FlightStateMachine::update(const float state_full[], const float euler[3],
-                                const float input[], bool armed,
+                                const float input[], bool armed, bool pos_valid,
                                 const uint32_t rpm[4],
                                 float out_cmds[3], float &thrust_out)
 {
+    _pos_valid = pos_valid;
+    memset(_traj_diag, 0, sizeof(_traj_diag));   // refilled by mode_pos_hold() when it runs
+
     // ── Flight mode selection ────────────────────────────────────────────────
     const float fm = input[InputIdx::FLIGHT_MODE];
     FlightMode new_mode;
@@ -258,6 +310,10 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
             if (++_takeoff_debounce_ticks >= TAKEOFF_DEBOUNCE_TICKS) {
                 _phase = FlightPhase::ACTIVE;
                 _spool_ticks = 0;
+                // Where the vehicle is sitting now is the floor no
+                // trajectory may go below (see TrajectoryTracker.hpp).
+                if (pos_valid) _traj.set_floor(state_full[StateIdx::Z_POS]);
+                else           _traj.clear_floor();
             }
         } else {
             _takeoff_debounce_ticks = 0;
@@ -271,14 +327,15 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
         return;
     }
 
-    // ── Heading-hold strength: light trim in the stick-flown modes, a firm
-    // hold in POS_HOLD (where nothing else is steering the heading).
-    {
-        const bool pos_hold_flying = (_mode == FlightMode::POS_HOLD) && !CTUN_POSHOLD_SHADOW;
-        const float yaw_hold_scale = pos_hold_flying ? POS_HOLD_YAW_HOLD_SCALE : 1.0f;
-        for (int i = 0; i < _num_controllers; ++i)
-            _controllers[i]->set_yaw_hold_scale(yaw_hold_scale);
-    }
+    // ── A trajectory only runs in POS_HOLD on a live position. (Disarming,
+    // ground idle and a mode change have already cancelled it through
+    // reset_all().)
+    if (!pos_valid) _traj.cancel();
+
+    // ── Yaw: each attitude controller's own rate loop + heading-lock trim,
+    // unless mode_pos_hold() hands them HeadingControl's rate below.
+    for (int i = 0; i < _num_controllers; ++i)
+        _controllers[i]->set_external_yaw_rate(false, 0.0f);
 
     // ── Dispatch ─────────────────────────────────────────────────────────────
     switch (_mode) {
@@ -317,4 +374,36 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
     } else {
         _landed_debounce_ticks = 0;
     }
+}
+
+// ── Trajectory commands ──────────────────────────────────────────────────────
+
+TrajResult FlightStateMachine::traj_command(const TrajCommand &cmd, const float state_full[],
+                                            const float euler[3])
+{
+    const float pos[3] = { state_full[StateIdx::X], state_full[StateIdx::Y], state_full[StateIdx::Z_POS] };
+
+    switch (cmd.type) {
+        case TrajCmdType::STOP:
+            _traj.cancel();
+            return TrajResult::ACCEPTED;
+
+        case TrajCmdType::SET_ORIGIN:
+            if (!_pos_valid) return TrajResult::NOT_READY;
+            return _traj.set_origin(pos);
+
+        case TrajCmdType::POINT:
+        case TrajCmdType::CIRCLE: {
+            const bool flying_pos_hold = (_mode == FlightMode::POS_HOLD) && !CTUN_POSHOLD_SHADOW &&
+                                         (_phase == FlightPhase::ACTIVE) && _pos_valid;
+            if (!_traj.origin_set()) return TrajResult::NO_ORIGIN;
+            if (!flying_pos_hold)    return TrajResult::NOT_READY;
+            // Start from what POS_HOLD is holding right now (its targets,
+            // not the measured position), so taking over moves nothing.
+            const float hold[3] = { _pos.pos_tgt(0), _pos.pos_tgt(1), _alt.alt_tgt() };
+            return (cmd.type == TrajCmdType::POINT) ? _traj.start_point(cmd.p, hold, euler[2])
+                                                    : _traj.start_circle(cmd.p, hold, euler[2]);
+        }
+    }
+    return TrajResult::BAD_PARAM;
 }

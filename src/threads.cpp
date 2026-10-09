@@ -50,6 +50,7 @@ int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
+float   g_traj_diag[8]       = {};   // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed]
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
@@ -69,6 +70,9 @@ EncoderRPMRaw g_encoder_rpm[ENCODER_RPM_NUM_NODES] = {};
 
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
+
+MUTEX_DECL(traj_mtx);
+TrajMailbox g_traj_mailbox = {};
 
 MUTEX_DECL(baro_mtx);
 BaroRaw   g_baro    = {};
@@ -658,13 +662,38 @@ static THD_FUNCTION(ControlThread, arg)
 
         float torque_cmds[3];
         float thrust;
-        flight_sm.update(ctrl_full, euler, input, armed, rpm, torque_cmds, thrust);
+        flight_sm.update(ctrl_full, euler, input, armed, mocap_snap.valid, rpm, torque_cmds, thrust);
+
+        // Trajectory command from MAVLink, if one is waiting. Handled after
+        // update() so it is judged against this tick's mode and phase; a
+        // started trajectory takes effect on the next tick.
+        {
+            TrajCommand traj_cmd;
+            bool        have_traj_cmd = false;
+            chMtxLock(&traj_mtx);
+            if (g_traj_mailbox.cmd_pending) {
+                traj_cmd      = g_traj_mailbox.cmd;
+                have_traj_cmd = true;
+            }
+            chMtxUnlock(&traj_mtx);
+            if (have_traj_cmd) {
+                const TrajResult traj_result = flight_sm.traj_command(traj_cmd, ctrl_full, euler);
+                chMtxLock(&traj_mtx);
+                g_traj_mailbox.cmd_pending    = false;
+                g_traj_mailbox.result         = traj_result;
+                g_traj_mailbox.result_pending = true;
+                chMtxUnlock(&traj_mtx);
+            }
+        }
 
         float indi_diag[10];
         flight_sm.get_indi_diag(indi_diag);
 
         float ctun_diag[12];
         flight_sm.get_ctun_diag(ctun_diag);
+
+        float traj_diag[8];
+        flight_sm.get_traj_diag(traj_diag);
 
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
@@ -681,6 +710,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
+        memcpy(g_traj_diag, traj_diag, sizeof(g_traj_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
         g_active_controller = flight_sm.active_index();
@@ -1224,11 +1254,13 @@ static void usb_cmd_dispatch(const char *line)
         chprintf((BaseSequentialStream *)&SDU1,
                  "MAV,DIAG,bytes_rx=%lu,frames_ok=%lu,frames_bad_crc=%lu,"
                  "heartbeat_rx=%lu,param_req_rx=%lu,vision_pos_rx=%lu,"
-                 "vision_speed_rx=%lu,unknown_rx=%lu,mocap_timeouts=%lu\r\n",
+                 "vision_speed_rx=%lu,unknown_rx=%lu,mocap_timeouts=%lu,"
+                 "traj_cmd_rx=%lu,traj_cmd_rejected=%lu\r\n",
                  (uint32_t)d.bytes_rx, (uint32_t)d.frames_ok, (uint32_t)d.frames_bad_crc,
                  (uint32_t)d.heartbeat_rx, (uint32_t)d.param_req_rx, (uint32_t)d.vision_pos_rx,
                  (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx,
-                 (uint32_t)d.mocap_timeouts);
+                 (uint32_t)d.mocap_timeouts,
+                 (uint32_t)d.traj_cmd_rx, (uint32_t)d.traj_cmd_rejected);
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,scan,start") == 0) {
         can_scan_start();
@@ -1782,12 +1814,14 @@ static THD_FUNCTION(LogThread, arg)
     systime_t next = chVTGetSystemTime();
 
     while (true) {
+        TIMING_TICK_BEGIN(tid);
+
         /* Timestamp in microseconds since boot (monotonic — see src/uptime.hpp). */
         /* Timestamp in microseconds (millisecond precision via TIME_I2MS). */
         const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], traj_diag[8];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,     g_euler,     sizeof(euler));
@@ -1796,6 +1830,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(ctrl,      g_ctrl,      sizeof(ctrl));
         memcpy(indi_diag, g_indi_diag, sizeof(indi_diag));
         memcpy(ctun_diag, g_ctun_diag, sizeof(ctun_diag));
+        memcpy(traj_diag, g_traj_diag, sizeof(traj_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -1991,6 +2026,48 @@ static THD_FUNCTION(LogThread, arg)
             msg.vz      = mocap_snap_log.vz;
             msg.valid   = (uint8_t)mocap_snap_log.valid;
             logger.write(LOG_MSG_MOCP, msg);
+        }
+
+        /* ── TRAJ — trajectory tracker reference + POS_HOLD heading loop ─ */
+        if (log_en.traj) {
+            LogMsgTRAJ msg = {};
+            msg.time_us      = t_us;
+            msg.state        = (uint8_t)traj_diag[0];
+            msg.ref_n        = traj_diag[1];
+            msg.ref_e        = traj_diag[2];
+            msg.ref_d        = traj_diag[3];
+            msg.yaw_tgt      = traj_diag[4];
+            msg.yaw_rate_cmd = traj_diag[5];
+            msg.height_off   = traj_diag[6];
+            msg.path_speed   = traj_diag[7];
+            logger.write(LOG_MSG_TRAJ, msg);
+        }
+
+        /* ── MAVL — MAVLink receive counters, ~5 Hz ───────────────────── */
+        if (log_en.mavl) {
+            static uint32_t mavl_tick = 0;
+            const uint32_t  mavl_every = (kDroneConfig.logging.log_rate_hz > 5.0f)
+                                       ? (uint32_t)(kDroneConfig.logging.log_rate_hz / 5.0f) : 1U;
+            if (++mavl_tick >= mavl_every) {
+                mavl_tick = 0;
+                MavlinkDiag d = {};
+                mavlink_get_diag(d);
+                LogMsgMAVL msg = {};
+                msg.time_us         = t_us;
+                msg.bytes_rx        = d.bytes_rx;
+                msg.frames_ok       = d.frames_ok;
+                msg.frames_bad_crc  = d.frames_bad_crc;
+                msg.heartbeat_rx    = d.heartbeat_rx;
+                msg.vision_pos_rx   = d.vision_pos_rx;
+                msg.vision_speed_rx = d.vision_speed_rx;
+                msg.unknown_rx      = d.unknown_rx;
+                msg.mocap_timeouts  = d.mocap_timeouts;
+                msg.traj_cmd_rx     = d.traj_cmd_rx;
+                msg.traj_cmd_rej    = d.traj_cmd_rejected;
+                msg.last_cmd        = d.last_traj_cmd;
+                msg.last_result     = d.last_traj_result;
+                logger.write(LOG_MSG_MAVL, msg);
+            }
         }
 
         logger.flush();

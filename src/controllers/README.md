@@ -23,11 +23,14 @@ FlightStateMachine  (400 Hz)
      │      stick → alt target + climb rate → thrust_out                │
      │                                                                    │
      └─ FLIGHT_MODE > +0.33  ───► POS_HOLD                              │
-          PosControl::update()                                           │
-            sticks → accel → velocity target → position target           │
-            pos P + vel PID with feed-forward → lean angles              │
-          AltControl::alt_hold()     (same call as ALT_HOLD)             │
-          Attitude (with lean angles overriding roll/pitch targets)  ─────┤
+          reference source — sticks (default) or TrajectoryTracker:      │
+            sticks:     PosControl::update()   AltControl::alt_hold()    │
+                        HeadingControl::update_rate()                    │
+            trajectory: PosControl::track()    AltControl::track()       │
+                        HeadingControl::update_heading()                 │
+          → lean angles, thrust_out, yaw rate                            │
+          Attitude (lean angles override roll/pitch targets,             │
+                    HeadingControl's rate overrides the yaw target)  ─────┤
                                                                           │
      Attitude block (shared, dispatched by FlightStateMachine's           │
      config-driven controller list — see below):                         │
@@ -74,6 +77,8 @@ Transition to `DISARMED` (from any phase) resets all controller integrators and 
 | > +0.33 | POS_HOLD | PosControl lean angles (rad) | `AltControl::alt_hold()` — identical to ALT_HOLD |
 
 Mode changes reset all controllers.
+
+In POS_HOLD the three outer controllers (`PosControl`, `AltControl`, `HeadingControl`) track either the pilot's sticks or, after a MAVLink trajectory command, the reference from `TrajectoryTracker` — see [TrajectoryTracker](#trajectorytracker-trajectorytrackerhppcpp). There is no separate trajectory flight mode.
 
 ### Attitude controller selection
 
@@ -257,7 +262,10 @@ The boost compensates for reduced vertical thrust when banked.
 ### Altitude hold — `alt_hold()` (ALT_HOLD and POS_HOLD)
 
 One z-axis controller, called identically by both modes. POS_HOLD only adds
-the N/E cascade in `PosControl` on top.
+the N/E cascade in `PosControl` on top. `alt_hold()` is the stick's target
+generator in front of `track(alt_tgt_D, climb_rate_ff, cur_D, vD)`, the
+feedback loop itself, which `TrajectoryTracker` calls directly with a
+commanded altitude.
 
 ```
 pilot_thr [0,1]
@@ -305,7 +313,7 @@ Starting-point gains only — not yet re-tuned in flight since the accel loop wa
 
 ## PosControl (`PosControl.hpp/.cpp`)
 
-N/E position controller producing lean angles for the attitude controller. The z axis is handled entirely by `AltControl::alt_hold()`. One call per tick, `update(state, stick_fwd, stick_right, att_cmds)`.
+N/E position controller producing lean angles for the attitude controller. The z axis is handled entirely by `AltControl`. One call per tick: `update(state, stick_fwd, stick_right, att_cmds)` for the sticks, or `track(state, pos_des, vel_des, accel_ff, att_cmds)` for a reference supplied by `TrajectoryTracker`. `track()` bypasses the target generator below and runs the same feedback; it also leaves the generator's state matching the reference, so the next `update()` carries on without a step.
 
 It follows ArduPilot's Loiter (`AC_Loiter::calc_desired_velocity()`): the sticks command an **acceleration**, which is integrated into a velocity target and then into a position target. The position loop runs on that moving target all the time, so there is no hold point to latch — when the velocity target reaches zero the position target simply stops moving, and that is where the vehicle holds.
 
@@ -397,7 +405,56 @@ Lives per-drone as `PosControlGains` in `configs/<Drone>/drone_config.cpp` (see 
 
 ---
 
+## HeadingControl (`HeadingControl.hpp/.cpp`)
+
+POS_HOLD's heading loop: a heading reference in, a yaw-rate command out, which `FlightStateMachine` hands to every attitude controller through `AttitudeController::set_external_yaw_rate()`. While that is enabled a controller uses the supplied rate as its yaw-rate loop target and bypasses its own stick rate + heading-lock trim. STABILIZE and ALT_HOLD never enable it, so yaw there is unchanged.
+
+```
+shaped heading target:  rate_tgt slews to the demanded rate at max_accel;  target += rate_tgt·dt
+yaw_rate_cmd = rate_tgt + constrain(kp · wrap(target − yaw), ±max_rate)
+```
+
+| Entry point | Used by | Demanded rate |
+|---|---|---|
+| `update_rate(yaw, rate)` | POS_HOLD yaw stick | `stick_rate` × stick (deadband 0.10, rescaled) |
+| `update_heading(yaw, yaw_des, rate_ff)` | TrajectoryTracker | `rate_ff` + approach toward `yaw_des` (≤ `max_rate`, sqrt profile) |
+
+The target is leashed to within 0.6 rad of the vehicle, and shifted by `yaw_frame_reset()` when the estimator's yaw steps. Gains are per-drone (`HeadingGains`): `kp` 1.75 /s, `stick_rate` 3.0 rad/s, `max_rate` 1.0 rad/s, `max_accel` 4.0 rad/s² — starting values, not flight-tuned.
+
+---
+
+## TrajectoryTracker (`TrajectoryTracker.hpp/.cpp`)
+
+The layer above the position, altitude and heading controllers — the role `AC_Circle` and Guided play over `AC_PosControl` in ArduPilot. It turns a commanded point or circle into the moving reference (`TrajRef`: position, velocity, acceleration feed-forward, heading, yaw-rate feed-forward) that those controllers track through their `track()` / `update_heading()` entry points. It contains no feedback loops.
+
+Commands arrive over MAVLink (`COMMAND_LONG`, see `src/coms/README.md`), cross to ControlThread through `g_traj_mailbox`, and are judged by `FlightStateMachine::traj_command()`. Everything is NED, metres; positions are offsets from an origin set by command. A NaN parameter means "not given".
+
+| Command | Parameters | Behaviour |
+|---|---|---|
+| Set origin | — | Origin := current position. Refused while a trajectory is active. Survives disarm. |
+| Point | N, E, D | Straight line at `V_MOVE`, then hold. Defaults: N/E 0, D = current altitude. Heading held. |
+| Circle | radius, N, E, D, focus distance, direction, speed | Fly to the nearest point of the path, turn the nose along it, then follow it nose-first. Only the radius is required. |
+| Stop | — | Back to plain position hold. |
+
+**Ellipse** — focus distance `f` (0 = circle): foci `|f|` from the centre, along North if `f > 0`, East if `f < 0`; `radius` is focus-to-near-end, so semi-major = `r + |f|`, semi-minor = `sqrt(r·(r + 2|f|))`.
+**Direction** — positive (default) is right-handed about D: yaw increasing, clockwise seen from above.
+**Speed** — the commanded speed on the gentle parts, reduced where curvature would exceed `A_LAT_MAX` or `YAW_RATE_MAX`; the tracker looks ahead and brakes at `A_TAN_MAX` before a tight section.
+
+Rules:
+
+- Point and circle are only accepted while flying (phase ACTIVE) in POS_HOLD with a valid position and an origin set.
+- Roll, pitch or yaw stick outside its deadband cancels the trajectory, and it stays cancelled. So do leaving POS_HOLD, ground idle, disarming and losing the position. The controllers carry on from the last reference, so the hand-back is smooth.
+- The throttle stick moves the whole trajectory up and down (a height offset; the origin does not move). Each new command zeroes it.
+- Floor: the D at take-off is recorded. A point or circle whose altitude is lower than `FLOOR_MARGIN_M` (0.15 m) above it is refused and changes nothing (a running trajectory carries on). The throttle stick cannot lower a running trajectory past that height either. Plain POS_HOLD is not limited, so landing is unaffected.
+- If the vehicle is more than `ERR_SLOW_M` behind the reference, progress along the path slows, stopping at `ERR_PAUSE_M`.
+
+Limits are constants at the top of `TrajectoryTracker.hpp` (starting values, to be flight-tuned). The `TRAJ` log message records the tracker state, reference, heading target and yaw-rate command. `tools/sim/` flies all of this on the PC — see `tools/sim/README.md`.
+
+---
+
 ## POS_HOLD notes
+
+Heading: `HeadingControl` — the yaw stick turns the heading target rather than commanding a raw rate.
 
 D axis: `AltControl::alt_hold()`, exactly as in ALT_HOLD — the throttle stick commands climb rate outside its deadband and the current altitude is held inside it.
 
@@ -482,6 +539,6 @@ The integrator is clamped to `±imax`.
 
 ## Notes
 
-- **Yaw / heading hold** — the yaw stick commands yaw *rate* in every flight mode, POS_HOLD included. Each attitude controller adds a heading-lock trim on top: while the yaw stick is inside its ±0.10 deadband the current heading is latched as the target and a PI on heading error (`yaw_hold` gains) adds a corrective rate, capped at `YAW_HOLD_MAX_RATE` (0.3 rad/s); moving the stick re-latches the target to wherever the nose is. In POS_HOLD the trim's gains and cap are multiplied by `FlightStateMachine::POS_HOLD_YAW_HOLD_SCALE` (3.0) for a firm heading hold; STABILIZE and ALT_HOLD use the configured gains as they are. The heading itself comes from the EKF, which takes it from the IMX5 and/or the mocap yaw (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section) — there is no magnetometer. POS_HOLD has no heading target of its own beyond this.
+- **Yaw / heading hold** — in STABILIZE and ALT_HOLD the yaw stick commands yaw *rate*, and each attitude controller adds a heading-lock trim on top: while the yaw stick is inside its ±0.10 deadband the current heading is latched as the target and a PI on heading error (`yaw_hold` gains) adds a corrective rate, capped at `YAW_HOLD_MAX_RATE` (0.3 rad/s); moving the stick re-latches the target to wherever the nose is. POS_HOLD replaces this with `HeadingControl` (see above), which owns a heading target the stick turns or a trajectory sets. The heading itself comes from the EKF, which takes it from the IMX5 and/or the mocap yaw (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section) — there is no magnetometer.
 
 See the root README's [TODO](../../README.md#todo) list for planned feature work; this file documents the controllers as they exist today.

@@ -134,6 +134,38 @@ void PosControl::update(const float state[], float stick_fwd, float stick_right,
         }
     }
 
+    feedback(state, accel_cmd_ff, att_cmds);
+}
+
+void PosControl::track(const float state[], const float pos_des[2], const float vel_des[2],
+                       const float accel_ff[2], float att_cmds[2])
+{
+    // Take the reference over as the stick generator's own state, so that
+    // when update() next runs (trajectory cancelled, pilot back on the
+    // sticks) it carries on from here: same targets, and a stick/drag
+    // acceleration that reproduces accel_ff, so the feed-forward — and the
+    // lean angle with it — doesn't step. The jerk limit and drag/brake in
+    // update() then take the vehicle from the trajectory's motion to
+    // whatever the sticks ask for.
+    for (int i = 0; i < 2; ++i) {
+        _pos_des[i]     = pos_des[i];
+        _vel_des[i]     = vel_des[i];
+        _accel_pred[i]  = accel_ff[i];
+        _accel_pilot[i] = accel_ff[i] + STICK_ACCEL_MAX * vel_des[i] / MAX_SPEED;   // + drag, which update() subtracts again
+    }
+    _brake_accel   = 0.0f;
+    _brake_delay_s = 0.0f;
+    _tgt_valid     = true;
+
+    feedback(state, accel_ff, att_cmds);
+}
+
+void PosControl::feedback(const float state[], const float accel_ff[2], float att_cmds[2])
+{
+    const float pos[2]  = { state[0], state[1] };
+    const float vel[2]  = { state[6], state[7] };
+    const float yaw_rad = state[5];
+
     // ── Feedback: position P → velocity PID, with feed-forward at each stage ─
     _vel_tgt[0] = _vel_des[0] + constrain_float(_pos_N.update(_pos_des[0], pos[0]), -VEL_CORR_MAX, VEL_CORR_MAX);
     _vel_tgt[1] = _vel_des[1] + constrain_float(_pos_E.update(_pos_des[1], pos[1]), -VEL_CORR_MAX, VEL_CORR_MAX);
@@ -149,8 +181,8 @@ void PosControl::update(const float state[], float stick_fwd, float stick_right,
     const float accel_N_fb = lowpass2p(accel_N_fb_raw, _accel_N_filt, ACCEL_FILT_HZ, CONTROL_DT_S);
     const float accel_E_fb = lowpass2p(accel_E_fb_raw, _accel_E_filt, ACCEL_FILT_HZ, CONTROL_DT_S);
 
-    const float accel_N_tgt = accel_cmd_ff[0] + accel_N_fb;
-    const float accel_E_tgt = accel_cmd_ff[1] + accel_E_fb;
+    const float accel_N_tgt = accel_ff[0] + accel_N_fb;
+    const float accel_E_tgt = accel_ff[1] + accel_E_fb;
 
     float roll_tgt  = 0.0f;
     float pitch_tgt = 0.0f;

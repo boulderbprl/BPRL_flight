@@ -5,8 +5,14 @@
 #include <cstdint>
 
 /*
- * Horizontal position controller (PosControl) — pilot sticks → N/E lean angles.
- * The z axis is handled entirely by AltControl::alt_hold().
+ * Horizontal position controller (PosControl) — N/E reference → lean angles.
+ * The z axis is handled entirely by AltControl.
+ *
+ * One feedback cascade, two sources for the reference it tracks:
+ *
+ *   update()  the pilot's sticks, through the target generator below.
+ *   track()   a position/velocity/acceleration reference supplied by the
+ *             caller (TrajectoryTracker), bypassing the target generator.
  *
  * Same scheme as ArduPilot's AC_Loiter::calc_desired_velocity(): the sticks
  * command an acceleration, which is integrated into a velocity target and
@@ -22,9 +28,9 @@
  *     vel_des += accel_pred·dt
  *     pos_des += vel_des·dt                      (leashed to the vehicle)
  *
- *   Feedback (unchanged cascade) + feed-forward:
+ *   Feedback + feed-forward (both sources):
  *     vel_tgt   = vel_des + pos_P(pos_des − pos)
- *     accel_tgt = accel_cmd + LPF(vel_PID(vel_tgt − vel))
+ *     accel_tgt = accel_ff + LPF(vel_PID(vel_tgt − vel))      accel_ff = accel_cmd for the sticks
  *     accel_tgt → yaw rotation + atan2 → roll/pitch targets
  *
  * Conventions:
@@ -41,9 +47,15 @@ public:
     // One control tick: sticks + state → lean-angle targets.
     void update(const float state[], float stick_fwd, float stick_right, float att_cmds[2]);
 
+    // One control tick: track pos_des/vel_des [N, E] with accel_ff [N, E] as
+    // the lean-angle feed-forward. The caller is responsible for a reference
+    // the vehicle can follow — no leash is applied here.
+    void track(const float state[], const float pos_des[2], const float vel_des[2],
+               const float accel_ff[2], float att_cmds[2]);
+
     void reset_all();
 
-    // Targets the last update() fed to the feedback loops, [N, E] — for logging.
+    // Targets the last update()/track() fed to the feedback loops, [N, E] — for logging.
     float pos_tgt(int axis) const { return _pos_des[axis]; }
     float vel_tgt(int axis) const { return _vel_tgt[axis]; }
 
@@ -53,9 +65,12 @@ public:
     // matches the nose when the vehicle faces north.
     static constexpr bool  STICKS_BODY_FRAME = true;
     static constexpr float STICK_DEADBAND    = 0.10f;   // normalised [-1,1]
+    static constexpr float ATT_LAG_S         = 0.15f;   // s, attitude loop's lean-angle response lag (flight log: roll 0.16 s, pitch 0.12 s) — re-measure if the attitude gains change
 
 private:
     static float stick_to_accel(float stick);
+    // Position P → velocity PID → lean angles, on _pos_des/_vel_des.
+    void feedback(const float state[], const float accel_ff[2], float att_cmds[2]);
     void compute_lean_angles(float yaw_rad, float accel_N_tgt, float accel_E_tgt,
                              float &roll_tgt, float &pitch_tgt);
 
@@ -88,7 +103,6 @@ private:
     static constexpr float MAX_STICK_LEAN_deg = 20.0f;   // lean angle commanded by a full stick
     static constexpr float STICK_ACCEL_MAX    = 3.5693f; // g·tan(MAX_STICK_LEAN_deg) [m/s²]
     static constexpr float STICK_JERK_MAX     = 20.0f;   // m/s³, how fast the stick accel (and so the lean command) may change
-    static constexpr float ATT_LAG_S          = 0.15f;   // s, attitude loop's lean-angle response lag (flight log: roll 0.16 s, pitch 0.12 s) — re-measure if the attitude gains change
     static constexpr float MAX_SPEED          = 5.0f;    // m/s, speed a full stick settles at (ArduPilot LOIT_SPEED)
     static constexpr float BRAKE_DELAY_S      = 0.3f;    // sticks centred this long before braking starts (LOIT_BRK_DELAY, 1 s there)
     static constexpr float BRAKE_GAIN         = 2.0f;    // 1/s, brake decel per m/s of target speed

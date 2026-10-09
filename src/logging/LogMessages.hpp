@@ -41,6 +41,8 @@ constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
+constexpr uint8_t LOG_MSG_TRAJ = 0x12U;  // trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command
+constexpr uint8_t LOG_MSG_MAVL = 0x13U;  // MAVLink receive counters + last trajectory command and its result (5 Hz)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -187,6 +189,53 @@ struct __attribute__((packed)) LogMsgMOCP {
 };
 // Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
 
+struct __attribute__((packed)) LogMsgTRAJ {
+    uint64_t time_us;
+    uint8_t  state;        // TrajState: 0 idle (POS_HOLD on the sticks), 1 moving to a point / to the circle, 2 holding a point, 3 on the circle
+    float    ref_n;        // m      reference position N the controllers are tracking (0 while idle — see CTUN for the stick targets)
+    float    ref_e;        // m
+    float    ref_d;        // m      includes the pilot's height offset
+    float    yaw_tgt;      // rad    HeadingControl's heading target (live whenever POS_HOLD is flying, trajectory or not)
+    float    yaw_rate_cmd; // rad/s  HeadingControl's output to the attitude controller's yaw-rate loop
+    float    height_off;   // m      throttle-stick offset on the trajectory's D (negative = raised)
+    float    path_speed;   // m/s    speed along the path
+};
+// Format: "QBfffffff"   Body: 8+1+7×4 = 37 B   Record: 40 B
+
+// MAVLinkThread's receive counters (MavlinkDiag, src/coms/MAVLink.hpp) —
+// the same numbers "MAV,diag" prints over USB, for when the vehicle is flying
+// and USB isn't connected. All counts are totals since boot: the rate of a
+// message is the difference between two records divided by the time between
+// them. Logged at about 5 Hz, not every log tick.
+//
+// TODO (once the trajectory-command / radio-link debugging is finished): this
+// is the verbose debugging layout. Cut it down to what stays useful:
+//   - log at 1-2 Hz;
+//   - add the mocap link's received rate: the average
+//     VISION_POSITION_ESTIMATE rate [Hz] since the previous MAVL record
+//     (from the change in vision_pos_rx). It belongs here rather than in
+//     MOCP because MOCP is written at 50 Hz, too fast to measure a ~30 Hz
+//     signal — at 1-2 Hz each record averages over 15-30 messages;
+//   - keep mocap_timeouts, traj_cmd_rx and traj_cmd_rej (plus
+//     last_cmd/last_result if still wanted);
+//   - drop the raw byte/frame/heartbeat/unknown/vision counters.
+struct __attribute__((packed)) LogMsgMAVL {
+    uint64_t time_us;
+    uint32_t bytes_rx;        // bytes read off the MAVLink UART
+    uint32_t frames_ok;       // frames parsed with a good CRC
+    uint32_t frames_bad_crc;
+    uint32_t heartbeat_rx;
+    uint32_t vision_pos_rx;   // VISION_POSITION_ESTIMATE
+    uint32_t vision_speed_rx; // VISION_SPEED_ESTIMATE
+    uint32_t unknown_rx;      // good frames this firmware does not handle
+    uint32_t mocap_timeouts;  // times the mocap link went >300 ms without a position
+    uint32_t traj_cmd_rx;     // trajectory COMMAND_LONGs received (retries of one command count once)
+    uint32_t traj_cmd_rej;    // ... answered with anything other than ACCEPTED
+    uint16_t last_cmd;        // MAVLink id of the latest trajectory command: 31010 origin, 31011 point, 31012 circle, 31013 stop; 0 = none yet
+    uint8_t  last_result;     // its MAV_RESULT: 0 accepted, 1 rejected for now, 2 denied, 4 failed; 255 = not answered yet
+};
+// Format: "QIIIIIIIIIIHB"   Body: 8+10×4+2+1 = 51 B   Record: 54 B
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -293,6 +342,18 @@ constexpr LogDef kLogDefs[] = {
       "QffffffB",
       "TimeUS,X,Y,Z,VX,VY,VZ,Valid",
       sizeof(LogMsgMOCP) },
+
+    { LOG_MSG_TRAJ,
+      "TRAJ",
+      "QBfffffff",
+      "TimeUS,State,RefN,RefE,RefD,YawT,YawR,HOff,Spd",
+      sizeof(LogMsgTRAJ) },
+
+    { LOG_MSG_MAVL,
+      "MAVL",
+      "QIIIIIIIIIIHB",
+      "TimeUS,Bytes,Ok,Bad,HB,VisP,VisV,Unk,MocTO,TrjRx,TrjRej,Cmd,Res",
+      sizeof(LogMsgMAVL) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

@@ -208,6 +208,8 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/Attitude_PID_PI.cpp \
          src/controllers/AltControl.cpp \
          src/controllers/PosControl.cpp \
+         src/controllers/HeadingControl.cpp \
+         src/controllers/TrajectoryTracker.cpp \
          src/controllers/Unmixer.cpp \
          src/controllers/FlightStateMachine.cpp \
          src/controllers/MotorMixer.cpp \

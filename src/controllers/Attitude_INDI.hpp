@@ -66,7 +66,6 @@ public:
                 const Unmixer &unmixer, float out_cmds[3]) override;
     void reset_all() override;
     void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
-    void set_yaw_hold_scale(float scale) override { _yaw_hold_scale = scale; }
 
     // [delta_roll_Nm, delta_pitch_Nm] incremental INDI correction, and
     // [accel_cmd_roll, accel_cmd_pitch] rad/s² rate-PID output fed to the
@@ -125,7 +124,6 @@ private:
 
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
-    float _yaw_hold_scale = 1.0f;  // see AttitudeController::set_yaw_hold_scale()
 
     float _delta_torque[2] = {};  // see get_diag()
     float _accel_cmd[2]    = {};

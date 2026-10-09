@@ -66,10 +66,11 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
     
-    // .alt — AltControlGains { pos_D, climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
+        0.40f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
     },
     
     // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
@@ -80,6 +81,15 @@ const DroneConfig kDroneConfig = {
         { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
     
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // Starting point, not flight-tuned: kp matches the heading-lock trim
+    // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
+    { 1.75f,   // kp
+      3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
+      1.0f,    // max_rate
+      4.0f,    // max_accel
+      0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
+
     // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch }
     {
         0,  // thr
@@ -131,7 +141,7 @@ const DroneConfig kDroneConfig = {
         false,  // pid_pi_enabled — off by default, see .pid_pi comment above — not yet bench/flight tuned
     },
     
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[15] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -146,6 +156,8 @@ const DroneConfig kDroneConfig = {
           true, // indi
           false, // baro
           false, // ctun
-          false }, // mocp
+          false, // mocp
+          false, // traj
+          false }, // mavl
     },
 };

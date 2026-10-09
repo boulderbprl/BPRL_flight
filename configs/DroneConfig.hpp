@@ -63,11 +63,22 @@ struct AttitudePidPiGains {
 // Gains for AltControl (src/controllers/AltControl.hpp).
 struct AltControlGains {
     PidGains pos_D, climb_rate;
+    float    hover_thr;   // throttle [0,1] this airframe hovers at — the closed-loop altitude hold's starting point (read OUTP Thr in a steady hover)
 };
 
 // Gains for PosControl (src/controllers/PosControl.hpp).
 struct PosControlGains {
     PidGains pos_N, pos_E, vel_N, vel_E;
+};
+
+// Gains for HeadingControl (src/controllers/HeadingControl.hpp) — POS_HOLD's
+// heading loop, which feeds whichever attitude controller is active.
+struct HeadingGains {
+    float kp;          // 1/s     heading error → yaw-rate trim
+    float stick_rate;  // rad/s   turn rate a full yaw stick commands in POS_HOLD
+    float max_rate;    // rad/s   cap on the heading-error trim, and on the turn rate toward a commanded heading
+    float max_accel;   // rad/s²  how fast the heading target's own rate may change
+    float lag_s;       // s       yaw-rate loop's response lag — measure from a log (delay between TRAJ YawR and ATT R)
 };
 
 // RC channel index assignment (src/coms/Radio.cpp). Both SBUS and CRSF use
@@ -150,7 +161,7 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp;
+    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, traj, mavl;
 };
 
 struct LoggingConfig {
@@ -164,6 +175,7 @@ struct DroneConfig {
     AttitudePidPiGains pid_pi;
     AltControlGains   alt;
     PosControlGains   pos;
+    HeadingGains      heading;
     RcChannelMap      rc_map;
     MotorMixerConfig  mixer;
     UnmixerConfig     unmixer;

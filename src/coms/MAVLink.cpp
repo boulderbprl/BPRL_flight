@@ -1,5 +1,6 @@
 #include "src/uptime.hpp"
 #include "hal.h"
+#include <cstring>
 #include "src/coms/MAVLink.hpp"
 #include "src/threads.hpp"
 
@@ -53,6 +54,10 @@ void mavlink_get_diag(MavlinkDiag &out)
     out.vision_speed_rx  = s_diag.vision_speed_rx;
     out.unknown_rx       = s_diag.unknown_rx;
     out.mocap_timeouts   = s_diag.mocap_timeouts;
+    out.traj_cmd_rx      = s_diag.traj_cmd_rx;
+    out.traj_cmd_rejected = s_diag.traj_cmd_rejected;
+    out.last_traj_cmd     = s_diag.last_traj_cmd;
+    out.last_traj_result  = s_diag.last_traj_result;
 }
 
 /* ── Incoming message handlers ───────────────────────────────────────────── */
@@ -105,6 +110,149 @@ static void handle_vision_speed(const mavlink_message_t *msg)
     chMtxUnlock(&mocap_mtx);
 }
 
+/*
+ * Trajectory commands — see the table in MAVLink.hpp. The command is only
+ * decoded here; FlightStateMachine (on ControlThread) decides whether it is
+ * acceptable, and its verdict comes back through g_traj_mailbox for
+ * mavlink_comms_update() to send as the COMMAND_ACK.
+ *
+ * s_traj_* are only touched from MAVLinkThread, so they need no lock.
+ */
+#define TRAJ_CMD_TIMEOUT_MS 200U
+
+// MAVLink's user-defined command ids (MAV_CMD_USER_1..4 in the spec). Spelled
+// out here because the generated headers in third_party/mavlink predate
+// their addition to the MAV_CMD enum.
+static constexpr uint16_t MAV_CMD_TRAJ_SET_ORIGIN = 31010;   // MAV_CMD_USER_1
+static constexpr uint16_t MAV_CMD_TRAJ_POINT      = 31011;   // MAV_CMD_USER_2
+static constexpr uint16_t MAV_CMD_TRAJ_CIRCLE     = 31012;   // MAV_CMD_USER_3
+static constexpr uint16_t MAV_CMD_TRAJ_STOP       = 31013;   // MAV_CMD_USER_4
+static systime_t s_traj_cmd_time = 0;     // when the command in the mailbox was posted
+static uint8_t   s_traj_ack_sysid  = 0;   // who to address its COMMAND_ACK to
+static uint8_t   s_traj_ack_compid = 0;
+
+/*
+ * Retries. The radio link loses frames, so the sender repeats a command
+ * until it sees the COMMAND_ACK, counting its attempts in
+ * COMMAND_LONG.confirmation (the MAVLink convention). A repeat must not be
+ * executed twice — the first copy may have arrived and only its ACK been
+ * lost, and re-running e.g. a circle command would restart its approach.
+ * So the last command posted is remembered: a repeat of it (confirmation > 0,
+ * same command and parameters, within TRAJ_RETRY_WINDOW_MS) just gets the
+ * same answer again, or nothing if the answer is still being worked out.
+ */
+#define TRAJ_RETRY_WINDOW_MS 5000U
+static bool     s_last_valid    = false;
+static uint16_t s_last_command  = 0;
+static float    s_last_params[7] = {};
+static bool     s_last_answered = false;
+static uint8_t  s_last_result   = 0;
+static uint32_t s_last_ms       = 0;      // bprl_millis() when it was posted
+
+static void send_traj_ack(uint16_t command, uint8_t result, uint8_t sysid, uint8_t compid)
+{
+    if (result != MAV_RESULT_ACCEPTED) s_diag.traj_cmd_rejected++;
+    mavlink_msg_command_ack_send(MAVLINK_COMM_0, command, result, 0, 0, sysid, compid);
+}
+
+// Returns false if the command isn't one of ours.
+static bool handle_command_long(const mavlink_message_t *msg)
+{
+    mavlink_command_long_t m;
+    mavlink_msg_command_long_decode(msg, &m);
+
+    TrajCmdType type;
+    switch (m.command) {
+    case MAV_CMD_TRAJ_SET_ORIGIN: type = TrajCmdType::SET_ORIGIN; break;
+    case MAV_CMD_TRAJ_POINT:      type = TrajCmdType::POINT;      break;
+    case MAV_CMD_TRAJ_CIRCLE:     type = TrajCmdType::CIRCLE;     break;
+    case MAV_CMD_TRAJ_STOP:       type = TrajCmdType::STOP;       break;
+    default: return false;
+    }
+    if (m.target_system != 0 && m.target_system != mavlink_system.sysid) return false;
+
+    s_diag.traj_cmd_rx++;
+
+    const float params[7] = { m.param1, m.param2, m.param3, m.param4, m.param5, m.param6, m.param7 };
+
+    // A repeat of the command we already have? (Bitwise compare: NaN
+    // parameters must match too.)
+    if (m.confirmation > 0 && s_last_valid && m.command == s_last_command &&
+        memcmp(params, s_last_params, sizeof(params)) == 0 &&
+        (bprl_millis() - s_last_ms) < TRAJ_RETRY_WINDOW_MS) {
+        if (s_last_answered) {
+            mavlink_msg_command_ack_send(MAVLINK_COMM_0, m.command, s_last_result, 0, 0,
+                                         msg->sysid, msg->compid);
+        }
+        return true;
+    }
+
+    bool posted = false;
+    chMtxLock(&traj_mtx);
+    if (!g_traj_mailbox.cmd_pending && !g_traj_mailbox.result_pending) {
+        g_traj_mailbox.cmd.type    = type;
+        memcpy(g_traj_mailbox.cmd.p, params, sizeof(params));
+        g_traj_mailbox.mav_command = m.command;
+        g_traj_mailbox.cmd_pending = true;
+        posted = true;
+    }
+    chMtxUnlock(&traj_mtx);
+
+    if (posted) {
+        s_traj_cmd_time   = chVTGetSystemTimeX();
+        s_traj_ack_sysid  = msg->sysid;
+        s_traj_ack_compid = msg->compid;
+
+        s_last_valid    = true;
+        s_last_command  = m.command;
+        memcpy(s_last_params, params, sizeof(params));
+        s_last_answered = false;
+        s_last_ms       = bprl_millis();
+
+        s_diag.last_traj_cmd    = m.command;
+        s_diag.last_traj_result = 255;
+    } else {
+        // The previous command hasn't been answered yet.
+        send_traj_ack(m.command, MAV_RESULT_TEMPORARILY_REJECTED, msg->sysid, msg->compid);
+    }
+    return true;
+}
+
+// Send the COMMAND_ACK for the command in the mailbox once ControlThread has
+// ruled on it — or give up on it if ControlThread never does.
+static void traj_ack_update()
+{
+    bool     send    = false;
+    uint16_t command = 0;
+    uint8_t  result  = MAV_RESULT_FAILED;
+
+    chMtxLock(&traj_mtx);
+    if (g_traj_mailbox.result_pending) {
+        g_traj_mailbox.result_pending = false;
+        command = g_traj_mailbox.mav_command;
+        switch (g_traj_mailbox.result) {
+        case TrajResult::ACCEPTED:  result = MAV_RESULT_ACCEPTED;             break;
+        case TrajResult::BAD_PARAM: result = MAV_RESULT_DENIED;               break;
+        case TrajResult::NOT_READY:
+        case TrajResult::NO_ORIGIN: result = MAV_RESULT_TEMPORARILY_REJECTED; break;
+        }
+        send = true;
+    } else if (g_traj_mailbox.cmd_pending &&
+               chVTTimeElapsedSinceX(s_traj_cmd_time) > TIME_MS2I(TRAJ_CMD_TIMEOUT_MS)) {
+        g_traj_mailbox.cmd_pending = false;
+        command = g_traj_mailbox.mav_command;
+        send    = true;
+    }
+    chMtxUnlock(&traj_mtx);
+
+    if (send) {
+        s_last_answered = true;
+        s_last_result   = result;
+        s_diag.last_traj_result = result;
+        send_traj_ack(command, result, s_traj_ack_sysid, s_traj_ack_compid);
+    }
+}
+
 static void handle_message(const mavlink_message_t *msg)
 {
     switch (msg->msgid) {
@@ -131,6 +279,10 @@ static void handle_message(const mavlink_message_t *msg)
     case MAVLINK_MSG_ID_VISION_SPEED_ESTIMATE:
         s_diag.vision_speed_rx++;
         handle_vision_speed(msg);
+        break;
+
+    case MAVLINK_MSG_ID_COMMAND_LONG:
+        if (!handle_command_long(msg)) s_diag.unknown_rx++;
         break;
 
     default:
@@ -174,6 +326,8 @@ void mavlink_comms_update()
     }
     chMtxUnlock(&mocap_mtx);
 
+    traj_ack_update();
+
     const uint32_t now_ms = bprl_millis();
 
     /* Send heartbeat at 1 Hz so MAVProxy can find the vehicle */
@@ -200,10 +354,11 @@ void mavlink_comms_update()
         mavlink_msg_system_time_send(MAVLINK_COMM_0, 0, now_ms);
     }
 
-    /* Echo received vision data as LOCAL_POSITION_NED at 10 Hz.
+    /* Echo received vision data as LOCAL_POSITION_NED at 2 Hz (was 10 Hz —
+     * cut to leave the half-duplex radio more air time for the uplink).
      * Lets the GCS confirm data is arriving: `watch LOCAL_POSITION_NED` */
     static uint32_t last_pos_ms = 0;
-    if (now_ms - last_pos_ms >= 100U) {
+    if (now_ms - last_pos_ms >= 500U) {
         last_pos_ms = now_ms;
         chMtxLock(&mocap_mtx);
         const MocapRaw snap = g_mocap;

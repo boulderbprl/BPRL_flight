@@ -80,6 +80,8 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
 | 0x10 | CTUN | time_us, pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err — POS_HOLD tuning diagnostics; temporary, compiled in only while `LOG_CTUN_ENABLED` is 1 |
 | 0x11 | MOCP | time_us, x, y, z, vx, vy, vz, valid — raw mocap estimate, pre-EKF |
+| 0x12 | TRAJ | time_us, state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_off, path_speed — trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command |
+| 0x13 | MAVL | time_us, then totals since boot: bytes_rx, frames_ok, frames_bad_crc, heartbeat_rx, vision_pos_rx, vision_speed_rx, unknown_rx, mocap_timeouts, traj_cmd_rx, traj_cmd_rej; last_cmd, last_result — MAVLink receive counters (same as `MAV,diag`) and the latest trajectory command with its answer; ~5 Hz |
 
 No message carries a rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
 
