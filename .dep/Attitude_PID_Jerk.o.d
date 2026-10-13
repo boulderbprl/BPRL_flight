@@ -11,8 +11,7 @@ build/obj/Attitude_PID_Jerk.o: src/controllers/Attitude_PID_Jerk.cpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_newlib_version.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h \
- src/controllers/AttitudeController.hpp src/FlightState.hpp \
- src/math/math.hpp \
+ src/controllers/Unmixer.hpp src/math/math.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_ansi.h \
@@ -29,6 +28,8 @@ build/obj/Attitude_PID_Jerk.o: src/controllers/Attitude_PID_Jerk.cpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_locale.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/strings.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/string.h \
+ configs/DroneConfig.hpp src/controllers/AttitudeController.hpp \
+ src/FlightState.hpp \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cmath \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/bits/cpp_type_traits.h \
  /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/ext/type_traits.h \
@@ -50,8 +51,7 @@ src/controllers/PID.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/_newlib_version.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_intsup.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_stdint.h:
-src/controllers/AttitudeController.hpp:
-src/FlightState.hpp:
+src/controllers/Unmixer.hpp:
 src/math/math.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cstring:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/string.h:
@@ -69,6 +69,9 @@ src/math/math.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/_locale.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/strings.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/sys/string.h:
+configs/DroneConfig.hpp:
+src/controllers/AttitudeController.hpp:
+src/FlightState.hpp:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/cmath:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/bits/cpp_type_traits.h:
 /opt/gcc-arm-none-eabi-10-2020-q4-major/arm-none-eabi/include/c++/10.2.1/ext/type_traits.h:

@@ -79,6 +79,11 @@ void PID::set_gains(float kp, float ki, float kd)
     _kp = kp; _ki = ki; _kd = kd;
 }
 
+void PID::set_integrator(float value)
+{
+    _integrator = constrain_float(value, -_imax, _imax);
+}
+
 uint32_t PID::now_us()
 {
     return (uint32_t)TIME_I2US(chVTGetSystemTimeX());

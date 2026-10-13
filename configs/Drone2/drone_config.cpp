@@ -65,6 +65,28 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
+    // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
+    // Unused while .controllers.jindi_enabled=false below; copied from
+    // .indi_jerk above (this drone's own values) only to keep the struct
+    // valid — see Drone1's .jindi comment for the full rationale.
+    {
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
+        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
+        0.0035f, // g1_seed_roll
+        0.0045f, // g1_seed_pitch
+        1.0f,    // indi_output_gain_pitch (kappa, pitch only)
+        40.0f,   // h_roll — 1000/25
+        1.0f,    // alpha — fully accel-path for now, not yet characterized
+        0.05f,   // nlms_mu_pid
+        0.005f,  // nlms_mu_indi
+        1.5f,    // yaw_gain
+    },
+
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
@@ -118,10 +140,10 @@ const DroneConfig kDroneConfig = {
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
     { true, true, true },
     
-    // .controllers — ControllersConfig { indi_enabled, jerk_enabled }
-    { false, false },  // jerk_enabled: off by default — not yet bench/flight tuned on this airframe
+    // .controllers — ControllersConfig { indi_enabled, jerk_enabled, jindi_enabled, pid_jerk_enabled }
+    { false, false, false, false },  // jerk/jindi/pid_jerk_enabled: off by default — not yet bench/flight tuned on this airframe
     
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -137,6 +159,8 @@ const DroneConfig kDroneConfig = {
           true, // baro
           true, // ctun
           true, // mocp
-          true }, // indij
+          true, // indij
+          true, // jindi
+          true }, // jpid
     },
 };

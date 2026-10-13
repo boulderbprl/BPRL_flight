@@ -74,6 +74,34 @@ const DroneConfig kDroneConfig = {
         3.0f,    // yaw_gain
     },
 
+    // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
+    // roll_att/pitch_att/roll_rate/pitch_rate/yaw_rate/yaw_hold/roll_accel/
+    // g1_seed_*/indi_output_gain_pitch copied from .indi_jerk above (same
+    // airframe, same role — roll's accel->jerk PID stage is unchanged, only
+    // what happens to jerk_cmd afterward differs, see Attitude_JINDI.hpp).
+    // h_roll = 1000/25 = 40.0, given directly. alpha is not yet
+    // characterized — 1.0 reproduces plain accel-path-only behavior (jerk
+    // path computed but zero-weighted), same "reproduces pre-adaptation
+    // behavior" convention as .indi's kappa. nlms_mu_* at 0 for now (G1
+    // adaptation machinery stays wired, just not live yet).
+    {
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 80.00f,  10.0f,  0.0f, 15.0f, 20.0f, 20.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]
+        0.0048f,  //0.006f,  // g1_seed_roll — shared by both of roll's paths, see class comment
+        0.0065f, // g1_seed_pitch
+        1.0f,    // indi_output_gain_pitch (kappa, pitch only)
+        40.0f,   // h_roll — 1000/25
+        0.88f,    // alpha — fully accel-path for now, not yet characterized
+        0.0f,    // nlms_mu_pid
+        0.0f,    // nlms_mu_indi
+        3.0f,    // yaw_gain
+    },
+
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
@@ -126,11 +154,16 @@ const DroneConfig kDroneConfig = {
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
     { true, true, true },
     
-    // .controllers — ControllersConfig { indi_enabled, jerk_enabled }
-    // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, Jerk last if enabled
-    { true, true },
+    // .controllers — ControllersConfig { indi_enabled, jerk_enabled, jindi_enabled, pid_jerk_enabled }
+    // The 3-position control switch maps low/mid/high, PID always 0, then INDI,
+    // Jerk, PIDJerk, JINDI in that order if enabled. INDI and Jerk disabled
+    // here (not just unselected) so the list is exactly {PID, PIDJerk, JINDI}
+    // — low = PID, mid = PIDJerk, high = JINDI, clean 1:1 mapping (see
+    // FlightStateMachine's class comment). INDI/Jerk code is untouched, just
+    // not active here.
+    { false, false, true, true },
    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[13] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
     {
         100.0f, // log_rate_hz
         { true, // att
@@ -142,10 +175,12 @@ const DroneConfig kDroneConfig = {
           true, // imu1
           true, // imu2
           true, // imu3
-          true, // indi
+          false, // indi (INDI not in the controller list — would log zeros)
           false, // baro
           false, // ctun
           false, // mocp
-          true }, // indij
+          false, // indij
+          true, // jindi
+          true }, // jpid
     },
 };

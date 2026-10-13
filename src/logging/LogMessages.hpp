@@ -42,8 +42,10 @@ constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
-constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // AttitudePIDJerk diagnostics — retired, no longer wired into FlightStateMachine (see LOG_MSG_INDIJ), kept only so old logs still decode
+constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // original single-stage AttitudePIDJerk diagnostics — retired, kept only so old logs still decode (rewritten controller logs LOG_MSG_JPID)
 constexpr uint8_t LOG_MSG_INDIJ = 0x14U; // AttitudeINDIJerk diagnostics — INDI with roll_jerk as the roll inner loop, see Attitude_INDI_Jerk.hpp
+constexpr uint8_t LOG_MSG_JINDI = 0x15U; // AttitudeJINDI diagnostics — roll_jerk as an independent convex-combined path, see Attitude_JINDI.hpp
+constexpr uint8_t LOG_MSG_JPID = 0x16U;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -191,6 +193,49 @@ struct __attribute__((packed)) LogMsgINDIJ {
 // the drone's config (ControllersConfig::jerk_enabled), regardless of
 // whether it's the controller actually driving OUTP (see $TEL's active
 // controller index).
+
+struct __attribute__((packed)) LogMsgJINDI {
+    uint64_t time_us;
+    float    unmix_roll;    // N·m  measured roll torque from Unmixer (RPM feedback)
+    float    unmix_pitch;   // N·m  measured pitch torque from Unmixer
+    float    tau_accel_roll; // N·m  accel path's own torque reference, pre-blend (instant-actuation assumption)
+    float    tau_jerk_roll;  // N·m  jerk path's own torque reference, pre-blend (actuator-dynamics assumption, anchored to its own prior command)
+    float    cmd_roll;      // [-1, 1]  normalized roll torque commanded by AttitudeJINDI (the alpha-blended result)
+    float    cmd_pitch;     // [-1, 1]  normalized pitch torque commanded by AttitudeJINDI
+    float    accel_roll;    // rad/s²  roll's rate-PID commanded angular acceleration (also the target fed into the accel→jerk stage)
+    float    accel_pitch;   // rad/s²  pitch's rate-PID commanded angular acceleration
+    float    g1_roll;       // N·m per rad/s²  live NLMS-adapted G1_hat, roll — shared by BOTH of roll's paths (no separate G2, see Attitude_JINDI.hpp)
+    float    g1_pitch;      // N·m per rad/s²  live NLMS-adapted G1_hat, pitch
+    float    jerk_cmd_roll; // rad/s³  reference/target jerk fed into the jerk path (AttitudeJINDI::jerk_cmd_roll()) — compare against JKFT.Pdd, the actual/measured roll_jerk
+    float    alpha_roll;    // convex-combination weight, roll — static per-drone config value (DroneConfig::AttitudeJindiGains::alpha), repeats every tick, logged for reference
+    float    tau_roll;      // N·m  alpha-blended combined torque reference, pre-normalise (AttitudeJINDI::combined_torque_roll()) — tau_accel_roll/tau_jerk_roll blended by alpha_roll, what normalize_torque() turns into cmd_roll
+};
+// Format: "Qfffffffffffff"   Body: 8+13×4 = 60 B   Record: 63 B
+// Gated by DroneConfig::LoggingConfig::enable.jindi, same mechanism as
+// LOG_MSG_INDIJ's log_en.indij — always populated while AttitudeJINDI is in
+// the drone's config (ControllersConfig::jindi_enabled), regardless of
+// whether it's the controller actually driving OUTP (see $TEL's active
+// controller index).
+
+struct __attribute__((packed)) LogMsgJPID {
+    uint64_t time_us;
+    float    rate_tgt;   // rad/s    angle loop output — roll rate target
+    float    accel_tgt;  // rad/s²   rate loop output — roll angular accel target
+    float    jerk_tgt;   // rad/s³   d/dt(accel_tgt), 20 Hz lowpass — diagnostic only (the D term uses jerk_tgt = 0)
+    float    torque_pi;  // N·m      accel stage P+I contribution
+    float    torque_d;   // N·m      jerk D contribution (−Kd · 20 Hz-lowpassed jerk)
+    float    torque_roll; // N·m     total roll torque (torque_pi + torque_d, clamped), pre-normalise
+    float    cmd_roll;   // [-1, 1]  normalised roll torque commanded by AttitudePIDJerk
+    float    cmd_pitch;  // [-1, 1]  normalised pitch torque commanded by AttitudePIDJerk (plain cascade, same as AttitudePID)
+    float    cmd_yaw;    // [-1, 1]  normalised yaw torque commanded by AttitudePIDJerk (same as AttitudePID)
+};
+// Format: "Qfffffffff"   Body: 8+9×4 = 44 B   Record: 47 B
+// Measured roll rate / P_DOT / strain jerk are not repeated here — see
+// ATT.P, ATT.Pdot and JKFT.Pdd.
+// Gated by DroneConfig::LoggingConfig::enable.jpid — always populated while
+// AttitudePIDJerk is in the drone's config (ControllersConfig::
+// pid_jerk_enabled), regardless of whether it's the controller actually
+// driving OUTP (see $TEL's active controller index). Zeroed otherwise.
 
 struct __attribute__((packed)) LogMsgBARO {
     uint64_t time_us;
@@ -358,6 +403,22 @@ constexpr LogDef kLogDefs[] = {
       // limit now that JCmdR/K2R are added — see LogDef's comment on the cap.
       "TimeUS,UnR,UnP,DR,DP,CmdR,CmdP,AccR,AccP,G1R,G2R,JCmdR,K2R",
       sizeof(LogMsgINDIJ) },
+
+    { LOG_MSG_JINDI,
+      "JIND",
+      "Qfffffffffffff",
+      // TAR/TJR = tau_accel_roll/tau_jerk_roll (the two pre-blend path
+      // references); AlR = alpha_roll; TC = tau_roll (the alpha-blended
+      // combination, pre-normalise) — at exactly 63 chars, see LogDef's
+      // comment on the cap; TC is as short as it can be and still fit.
+      "TimeUS,UnR,UnP,TAR,TJR,CmdR,CmdP,AccR,AccP,G1R,G1P,JCmdR,AlR,TC",
+      sizeof(LogMsgJINDI) },
+
+    { LOG_MSG_JPID,
+      "JPID",
+      "Qfffffffff",
+      "TimeUS,RTgt,ATgt,JTgt,TqPI,TqD,TqR,CmdR,CmdP,CmdY",
+      sizeof(LogMsgJPID) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

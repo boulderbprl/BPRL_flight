@@ -58,6 +58,12 @@ public:
     // Clamp and normalise a physical torque (N·m) to [-1, 1] for MotorMixer.
     float normalize_torque(float torque_Nm) const;
 
+    // The same physical torque bound normalize_torque() divides by — for
+    // controllers that need to clamp an internal torque-valued register
+    // against reality directly (e.g. AttitudeJINDI's jerk-path commanded-
+    // torque accumulator, which has no other anchor to physical torque).
+    float max_torque_nm() const { return _t_max_nm; }
+
     // compute() is only ever called from ControlThread's fixed 400 Hz period
     // (see main.cpp's kRates.control) — a system/thread-rate constant, not
     // per-drone tuning, so this stays fixed rather than moving into

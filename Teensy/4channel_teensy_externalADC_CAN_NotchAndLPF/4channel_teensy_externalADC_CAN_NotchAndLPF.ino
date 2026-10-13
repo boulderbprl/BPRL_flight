@@ -22,9 +22,13 @@ const bool FILTER_ENABLED = true;  // false bypasses the whole notch + LPF chain
 // Stage 1: notch on the structural mode.
 // Stage 2: 2nd-order Butterworth LPF for motor noise.
 // Approx DC group delay: notch 1/(Q*w0), LPF 1.414/(2*pi*fc).
-#define NOTCH_FC_HZ   39.5    // structural mode frequency
-#define NOTCH_Q       2.3     // lower Q = wider notch, more delay
-#define LPF_FC_HZ     110.0    // motor-noise lowpass cutoff
+#define NOTCH_FC_HZ   39.5    // structural mode frequency was 39.5
+#define NOTCH_Q       2.3     // lower Q = wider notch, more delay (was 2.0, before that 2.3)
+// Q 1.0 @ 50 Hz: ~-12 dB @ 44 Hz, ~-13 dB @ 56 Hz, ~-24 dB @ 48.5/51.5 Hz; ~3.2 ms
+// delay @ 5 Hz. Widened because PIDJerk limit-cycled at ~41-45 Hz in the log
+// (true 41-45 or 55-59 Hz) where Q 2.0 only gave ~-7 dB (LOG0042).
+#define LPF_FC_HZ     110.0    // motor-noise lowpass cutoff BEST DELAY PERFORMANCE
+// #define LPF_FC_HZ 60.0
 #define LPF_Q         0.7071  // Butterworth, 2nd order
 #define FILTER_FS_HZ  10000.0 // must equal 1e6 / SAMPLE_INTERVAL_US
 

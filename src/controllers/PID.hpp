@@ -26,6 +26,9 @@ public:
     float update(float target, float measurement);
     void  reset();
     void  set_gains(float kp, float ki, float kd);
+    // Overwrite the integrator (clamped to ±imax) — for bumpless handover
+    // into a controller whose integrator wound up while running in shadow.
+    void  set_integrator(float value);
 
 private:
     static constexpr float STALE_TIMEOUT_US = 200000.0f;

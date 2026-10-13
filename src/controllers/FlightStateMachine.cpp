@@ -10,6 +10,7 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _mode(FlightMode::STABILIZE)
     , _pid(cfg.pid)
     , _indi_jerk(cfg.indi_jerk)
+    , _jindi(cfg.jindi)
     , _indi(cfg.indi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
@@ -18,6 +19,8 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _active_index(0)
     , _indi_index(-1)
     , _jerk_index(-1)
+    , _jindi_index(-1)
+    , _pid_jerk_index(-1)
 {
     _controllers[_num_controllers++] = &_pid;   // always present, always index 0
     if (cfg.controllers.indi_enabled) {
@@ -28,12 +31,24 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
         _jerk_index = _num_controllers;
         _controllers[_num_controllers++] = &_indi_jerk;
     }
+    // PIDJerk is listed before JINDI so a {PID, PIDJerk, JINDI} config maps
+    // low/mid/high in that order.
+    if (cfg.controllers.pid_jerk_enabled) {
+        _pid_jerk_index = _num_controllers;
+        _controllers[_num_controllers++] = &_pid_jerk;
+    }
+    if (cfg.controllers.jindi_enabled) {
+        _jindi_index = _num_controllers;
+        _controllers[_num_controllers++] = &_jindi;
+    }
 }
 
 void FlightStateMachine::reset_all()
 {
     _pid.reset_all();
     _indi_jerk.reset_all();
+    _jindi.reset_all();
+    _pid_jerk.reset_all();
     _indi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
@@ -81,6 +96,23 @@ void FlightStateMachine::run_attitude(const float euler[],
         _indi_jerk.set_indi_active(_active_index == _jerk_index);
     }
 
+    // Same reasoning as the Jerk block above — AttitudeJINDI also needs
+    // roll_jerk and its own active/shadow flag before the generic dispatch.
+    if (_jindi_index >= 0) {
+        _jindi.set_roll_jerk(roll_jerk);
+        _jindi.set_indi_active(_active_index == _jindi_index);
+    }
+
+    // AttitudePIDJerk: roll_jerk hand-off, plus the bumpless-handover seed
+    // flagged by set_active_controller() on the switch edge into it.
+    if (_pid_jerk_index >= 0) {
+        _pid_jerk.set_roll_jerk(roll_jerk);
+        if (_pid_jerk_handover_pending) {
+            _pid_jerk.prepare_handover(current_torque[0]);
+            _pid_jerk_handover_pending = false;
+        }
+    }
+
     float cmds[MAX_ATTITUDE_CONTROLLERS][3];
     for (int i = 0; i < _num_controllers; ++i) {
         _controllers[i]->update(euler, state_full, input, current_torque, _unmixer, cmds[i]);
@@ -125,6 +157,41 @@ void FlightStateMachine::run_attitude(const float euler[],
         _indij_diag[11] = _indi_jerk.kappa2_roll();
     } else {
         memset(_indij_diag, 0, sizeof(_indij_diag));
+    }
+
+    if (_jindi_index >= 0) {
+        float tau_paths_roll[2], accel_cmd[2], g1[2];
+        _jindi.get_diag(tau_paths_roll, accel_cmd);
+        _jindi.get_g1(g1);
+        _jindi_diag[0] = current_torque[0];
+        _jindi_diag[1] = current_torque[1];
+        _jindi_diag[2] = tau_paths_roll[0];
+        _jindi_diag[3] = tau_paths_roll[1];
+        _jindi_diag[4] = cmds[_jindi_index][0];
+        _jindi_diag[5] = cmds[_jindi_index][1];
+        _jindi_diag[6] = accel_cmd[0];
+        _jindi_diag[7] = accel_cmd[1];
+        _jindi_diag[8]  = g1[0];
+        _jindi_diag[9]  = g1[1];
+        _jindi_diag[10] = _jindi.jerk_cmd_roll();
+        _jindi_diag[11] = _jindi.alpha_roll();
+        _jindi_diag[12] = _jindi.combined_torque_roll();
+    } else {
+        memset(_jindi_diag, 0, sizeof(_jindi_diag));
+    }
+
+    if (_pid_jerk_index >= 0) {
+        _pidj_diag[0] = _pid_jerk.roll_rate_tgt();
+        _pidj_diag[1] = _pid_jerk.roll_accel_tgt();
+        _pidj_diag[2] = _pid_jerk.roll_jerk_tgt();
+        _pidj_diag[3] = _pid_jerk.roll_torque_pi();
+        _pidj_diag[4] = _pid_jerk.roll_torque_d();
+        _pidj_diag[5] = _pid_jerk.roll_torque_nm();
+        _pidj_diag[6] = cmds[_pid_jerk_index][0];
+        _pidj_diag[7] = cmds[_pid_jerk_index][1];
+        _pidj_diag[8] = cmds[_pid_jerk_index][2];
+    } else {
+        memset(_pidj_diag, 0, sizeof(_pidj_diag));
     }
 
     const float *active = cmds[_active_index];

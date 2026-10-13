@@ -86,6 +86,42 @@ struct AttitudeIndiJerkGains {
     float    yaw_gain;
 };
 
+// Gains for AttitudeJINDI (src/controllers/Attitude_JINDI.hpp) — roll_jerk
+// (src/sensors/JerkFit.hpp) is a second, independent control path for roll,
+// combined with the accel-level path via a convex combination rather than
+// AttitudeIndiJerkGains's P+D kappa/kappa2 sum — see Attitude_JINDI.hpp's
+// class comment for the full derivation. No g2_seed/jerk_output_gain/
+// indi_output_gain_roll here: both of roll's paths share one live-adapted
+// G1_hat (no separate "G2"), and the kappa output gains are replaced
+// entirely by alpha. Pitch/yaw are unchanged from AttitudeIndiJerkGains
+// (no jerk sensor on pitch, so nothing to convex-combine there) and keep
+// their own kappa (indi_output_gain_pitch).
+struct AttitudeJindiGains {
+    PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
+    PidGains roll_accel;   // roll-only: accel error [rad/s^2] -> jerk target [rad/s^3], same stage as AttitudeIndiJerkGains::roll_accel
+    // Accel-level effectiveness seed (N*m per rad/s^2), shared by BOTH of
+    // roll's paths (accel and jerk — see class comment on why there's one G,
+    // not two). Pitch's is independent, same role as AttitudeIndiGains::g1_seed_pitch.
+    float    g1_seed_roll;
+    float    g1_seed_pitch;
+    float    indi_output_gain_pitch;   // kappa, pitch only — roll has no kappa (see class comment)
+    // H: roll's jerk-path actuator-dynamics constant — (G*H)^-1 = g1_roll / h_roll,
+    // the jerk path's increment gain (see class comment's derivation).
+    float    h_roll;
+    // Convex-combination weight, roll: tau_roll = alpha*tau_accel + (1-alpha)*tau_jerk.
+    // 1.0 = fully accel-path (jerk path computed but zero-weighted) — the
+    // same "reproduces pre-adaptation behavior" convention as other
+    // not-yet-characterized gains in this file.
+    float    alpha;
+    // NLMS adaptation rate (mu) for the shared G1 estimator — same
+    // mode-dependent meaning as AttitudeIndiGains::nlms_mu_pid/indi. Set to
+    // 0 for now (not yet characterized) — the machinery stays wired so it
+    // can be turned on later without a code change.
+    float    nlms_mu_pid;
+    float    nlms_mu_indi;
+    float    yaw_gain;
+};
+
 // Gains for AttitudePIDPI (src/controllers/Attitude_PID_PI.hpp) — ported from
 // the BPRL ArduPilot fork's rate-PID + inner angular-acceleration-PI cascade
 // (AC_AttitudeControl_Multi, "switched to PID" commit). roll_accel/pitch_accel
@@ -164,6 +200,8 @@ struct SensorsConfig {
 struct ControllersConfig {
     bool indi_enabled;
     bool jerk_enabled;  // AttitudeINDIJerk (roll_jerk as the INDI inner loop) — see Attitude_INDI_Jerk.hpp
+    bool jindi_enabled; // AttitudeJINDI (roll_jerk as a convex-combined second path) — see Attitude_JINDI.hpp
+    bool pid_jerk_enabled; // AttitudePIDJerk (angle→rate→accel→jerk PID cascade on roll) — see Attitude_PID_Jerk.hpp
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
@@ -171,7 +209,7 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, indij;
+    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, indij, jindi, jpid;
 };
 
 struct LoggingConfig {
@@ -183,6 +221,7 @@ struct DroneConfig {
     AttitudePidGains  pid;
     AttitudeIndiGains indi;
     AttitudeIndiJerkGains indi_jerk;
+    AttitudeJindiGains jindi;
     AttitudePidPiGains pid_pi;
     AltControlGains   alt;
     PosControlGains   pos;

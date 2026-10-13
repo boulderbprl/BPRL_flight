@@ -49,6 +49,8 @@ int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 float   g_indij_diag[12]     = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — AttitudeINDIJerk shadow diagnostics, populated whenever jerk_enabled
+float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever pid_jerk_enabled
+float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever jindi_enabled
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
@@ -615,6 +617,12 @@ static THD_FUNCTION(ControlThread, arg)
         float indij_diag[12];
         flight_sm.get_indij_diag(indij_diag);
 
+        float jindi_diag[13];
+        flight_sm.get_jindi_diag(jindi_diag);
+
+        float pidj_diag[9];
+        flight_sm.get_pidj_diag(pidj_diag);
+
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
@@ -631,6 +639,8 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
         memcpy(g_indij_diag, indij_diag, sizeof(g_indij_diag));
+        memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
+        memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
         g_active_controller = flight_sm.active_index();
@@ -1488,7 +1498,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = (uint64_t)TIME_I2US(chVTGetSystemTime());
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], indij_diag[12];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], indij_diag[12], jindi_diag[13], pidj_diag[9];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -1498,6 +1508,8 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(indi_diag,  g_indi_diag,  sizeof(indi_diag));
         memcpy(ctun_diag,  g_ctun_diag,  sizeof(ctun_diag));
         memcpy(indij_diag, g_indij_diag, sizeof(indij_diag));
+        memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
+        memcpy(pidj_diag,  g_pidj_diag,  sizeof(pidj_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -1628,6 +1640,42 @@ static THD_FUNCTION(LogThread, arg)
             msg.jerk_cmd_roll = indij_diag[10];
             msg.kappa2_roll   = indij_diag[11];
             logger.write(LOG_MSG_INDIJ, msg);
+        }
+
+        /* ── JINDI — shadow AttitudeJINDI diagnostics ────────────────────── */
+        if (log_en.jindi) {
+            LogMsgJINDI msg = {};
+            msg.time_us        = t_us;
+            msg.unmix_roll     = jindi_diag[0];
+            msg.unmix_pitch    = jindi_diag[1];
+            msg.tau_accel_roll = jindi_diag[2];
+            msg.tau_jerk_roll  = jindi_diag[3];
+            msg.cmd_roll       = jindi_diag[4];
+            msg.cmd_pitch      = jindi_diag[5];
+            msg.accel_roll     = jindi_diag[6];
+            msg.accel_pitch    = jindi_diag[7];
+            msg.g1_roll        = jindi_diag[8];
+            msg.g1_pitch       = jindi_diag[9];
+            msg.jerk_cmd_roll  = jindi_diag[10];
+            msg.alpha_roll     = jindi_diag[11];
+            msg.tau_roll       = jindi_diag[12];
+            logger.write(LOG_MSG_JINDI, msg);
+        }
+
+        /* ── JPID — shadow AttitudePIDJerk diagnostics ───────────────────── */
+        if (log_en.jpid) {
+            LogMsgJPID msg = {};
+            msg.time_us     = t_us;
+            msg.rate_tgt    = pidj_diag[0];
+            msg.accel_tgt   = pidj_diag[1];
+            msg.jerk_tgt    = pidj_diag[2];
+            msg.torque_pi   = pidj_diag[3];
+            msg.torque_d    = pidj_diag[4];
+            msg.torque_roll = pidj_diag[5];
+            msg.cmd_roll    = pidj_diag[6];
+            msg.cmd_pitch   = pidj_diag[7];
+            msg.cmd_yaw     = pidj_diag[8];
+            logger.write(LOG_MSG_JPID, msg);
         }
 
 #if LOG_CTUN_ENABLED
