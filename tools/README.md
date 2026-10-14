@@ -14,17 +14,22 @@ pip install pyserial rich
 
 | Script | Subcommands | DEBUG build? |
 |---|---|---|
-| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel` | Required |
+| `telemetry.py` | `telemetry`, `ekf-status`, `imu-compare`, `pos-vel`, `strain` | Required |
+| `hw_status.py` | `hw-status` (default) | No |
 | `motor_test.py` | `motor-test` | No |
-| `calibrate.py` | `calibrate` | Required |
+| `calibrate.py` | `calibrate`, `clear` | Required |
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
+| `traj_cmd.py` | `origin`, `point`, `circle`, `stop` *(over MAVLink, not USB)* | No |
+| `sim/run.sh` | *(host flight simulation — see [sim/README.md](sim/README.md))* | — |
 | `strain_rate.py` | `strain-rate` | No |
+| `encoder_rpm.py` | `encoder-rpm` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
 | `i2c_tools.py` | `i2c-scan` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
 | *(raw serial, see [Timing](#timing--schedulability-bprl_timing-build) below)* | `TIM,status`, `TIM,reset` | Requires `-DBPRL_TIMING` |
+| *(raw serial, no wrapper script)* | `IOMCU,status`, `PWM,status`, `STRAIN_GAUGE,zero`, `STRAIN_GAUGE,reset` | No |
 
 `dshot_decode_test.py` is a standalone dev/test script (no argparse subcommands) — not part of the main CLI family above.
 
@@ -36,7 +41,7 @@ All scripts accept `--port /dev/ttyACMx` and `--baud N` global options.
 
 > Requires `-DBPRL_DEBUG` firmware build.
 
-Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
+Parses the `$TEL`, `$EKFL`, `$IMU`, `$POS` and `$STRAIN` 10 Hz streams emitted by `DebugThread`.
 
 | Subcommand | Description |
 |---|---|
@@ -44,12 +49,35 @@ Parses the `$TEL`, `$EKFL`, and `$IMU` 10 Hz streams emitted by `DebugThread`.
 | `ekf-status` | Per-lane EKF roll/pitch/yaw/p/q/r table (all three onboard lanes + IMX5) |
 | `imu-compare` | Side-by-side raw accel and gyro from all three onboard IMUs |
 | `pos-vel` | Live XYZ position/velocity vs. mocap ground truth |
+| `strain` | Strain gauge array values (I2C 0x09 array, Drone2) |
 
 ```bash
 python3 tools/telemetry.py telemetry
 python3 tools/telemetry.py ekf-status
 python3 tools/telemetry.py imu-compare
 python3 tools/telemetry.py pos-vel
+python3 tools/telemetry.py strain
+```
+
+---
+
+## hw_status.py
+
+> Works on any firmware build.
+
+Live per-subsystem connectivity monitor — polls the `HW,status` USB command (~2 Hz) and renders a panel showing whether each sensor/link is actually reporting valid data right now: all on-board IMUs, the CAN INS (IMX5), barometer, strain rate sensor, both encoder RPM nodes, RC link, and SD card, plus raw FDCAN1 RX/dispatch counters.
+
+```bash
+python3 tools/hw_status.py
+python3 tools/hw_status.py --port /dev/ttyACM0
+```
+
+This is usually the fastest first check during bring-up or after wiring changes — it answers "is X actually connected and working" for every subsystem at once, without needing a `-DBPRL_DEBUG` build. It was how a wrong-IMU-chip assumption on CubeBlueH7's primary IMU slot was caught: `HW,IMU0` reported invalid on every boot, and reading `HW,status`'s raw `whoami=0x%02X` field for that slot (also queryable directly — see below) showed a chip identity (`0xE1`, ICM-20649) that didn't match what the driver expected (ICM-20948, `0xEA`).
+
+If you need the raw response instead of the rendered panel (e.g. to see a diagnostic field the panel doesn't render yet), query `HW,status` directly:
+
+```bash
+python3 -c "import serial,time; s=serial.Serial('/dev/ttyACM0',115200,timeout=1); s.write(b'HW,status\n'); time.sleep(0.3); print(s.read(4096).decode(errors='replace'))"
 ```
 
 ---
@@ -88,6 +116,8 @@ python3 tools/calibrate.py calibrate [--duration 30]
 
 Place the drone level on a flat surface before running. The script collects `--duration` seconds of `$IMU` samples (default 30 s), prints the computed biases, and asks for confirmation before writing to flash via `CAL,set` and `CAL,commit`.
 
+`python3 tools/calibrate.py clear` clears the stored calibration (zero bias) without recalibrating.
+
 ---
 
 ## can_tools.py
@@ -118,7 +148,7 @@ python3 tools/can_tools.py can-scan --duration 2
 
 | Subcommand | Description |
 |---|---|
-| `mav-diag [--watch] [--interval N]` | Read MAVLinkThread's SD3/TELEM2 RX counters (bytes, frames parsed OK/bad-CRC, per-message-type counts) |
+| `mav-diag [--watch] [--interval N]` | Read MAVLinkThread's RX counters (SD3/TELEM2 on the Cube boards, SD7 on Orqa) (bytes, frames parsed OK/bad-CRC, per-message-type counts) |
 
 ```bash
 python3 tools/mav_tools.py mav-diag
@@ -126,6 +156,24 @@ python3 tools/mav_tools.py mav-diag --watch --interval 1
 ```
 
 Diagnoses the RX side of the MAVLink/TELEM2 link independent of the radio and any ground-side bridge — tells you whether bytes are reaching SD3 at all, whether frames are failing CRC (dialect mismatch), and whether `VISION_POSITION_ESTIMATE`/`VISION_SPEED_ESTIMATE` specifically are showing up.
+
+---
+
+## traj_cmd.py
+
+> Speaks MAVLink to the FC's telemetry UART (not the USB port). Needs `pip install pymavlink`.
+
+Sends a trajectory command and prints the FC's `COMMAND_ACK`. Positions are NED offsets in metres from the origin; anything left out is sent as NaN and takes the firmware default (N/E 0, D = current altitude, plain circle, clockwise seen from above, default speed).
+
+```bash
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 origin
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --e 0.5
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 stop
+```
+
+`--master` is any pymavlink connection string — a MAVProxy `--out` port, or the serial adapter (`/dev/ttyUSB0,115200`). Point and circle are only accepted while flying in POS_HOLD with a valid mocap position and an origin set. See `src/controllers/README.md` (TrajectoryTracker).
 
 ---
 
@@ -147,13 +195,27 @@ python3 tools/i2c_tools.py i2c-scan
 
 > Works on any firmware build. In development.
 
-Live display of the strain-rate sensor (CAN ID 0x69): 4 signed int16 values representing strain rate on each arm.
+Live display of the strain-rate sensor (I2C by default; CAN ID 0x69 if built with `STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`): 4 signed int16 values representing strain rate on each arm.
 
 ```bash
 python3 tools/strain_rate.py strain-rate
 ```
 
-Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively sending CAN frames.
+Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively reporting.
+
+---
+
+## encoder_rpm.py
+
+> Works on any firmware build.
+
+Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70–0x73, up to four, one per Feather M4 + AS5047P board — see `Strain_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
+
+```bash
+python3 tools/encoder_rpm.py encoder-rpm
+```
+
+Polls `ENC,read` at ~5 Hz and shows a live panel per node. The `valid` flag reflects whether that node is actively sending CAN frames; a red error count means the AS5047P latched an error bit on its last sample.
 
 ---
 
@@ -202,12 +264,15 @@ python3 tools/logs.py log-status
 | `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see BPRL_flight's `src/controllers/README.md`), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
-| `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_strt.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_str1.csv` … `_str4.csv` | TimeUS, 9 raw int16 strain gauge channels each (0.1 µV/count): `str1` front right (D0–D8), `str2` back right (D9–D17), `str3` back left (D18–D26), `str4` front left (D27–D35). `str1`/`str3` add Hz (measured I2C receive rate of that chunk, not the logging rate) and Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
+| `<stem>_ctun.csv` | TimeUS, PNT/PNE/PET/PEE (N/E position target and error, m), VNT/VNE/VET/VEE (N/E velocity target and error, m/s), RolT/PitT (lean-angle targets, rad), ClbT/ClbE (climb-rate target and error, m/s) — POS_HOLD tuning diagnostics |
+| `<stem>_mocp.csv` | TimeUS, X/Y/Z (m NED), VX/VY/VZ (m/s), Valid — raw mocap estimate, pre-EKF |
 
-All 11 message types log at the fixed 50 Hz `LogThread` period — there's no per-record rate field.
+Every enabled message type logs at the `LogThread` period (50 Hz by default, set per drone) — there's no per-record rate field. A message a drone's config disables has no data rows.
 
 The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 
@@ -219,13 +284,12 @@ The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilo
 
 Per-thread execution-time and CPU-utilization instrumentation, added to check whether the ChibiOS thread set (SPI, CAN, I2C, Control, Radio, Heartbeat, MAVLink, Debug, Log, USBCmd) is actually schedulable at its configured rates and priorities, rather than assuming it. `Control` now includes what used to be a separate `StateEst` thread's EKF work — the two were merged into one 400 Hz thread (see the root README's [Thread priority table](../README.md#thread-priority-table)). See `src/diagnostics/ThreadTiming.hpp` for the implementation and `threads_start()` in `src/threads.cpp` for the current priority ordering.
 
-Build and flash:
+Build and flash — **`UDEFS_EXTRA` must be repeated on the `flash` command too**, since `make` doesn't remember flags between separate invocations and `flash`'s target `.bin` is chosen from whatever `UDEFS_EXTRA` is on that specific command line (build output is segregated per-`DRONE` *and* per-`UDEFS_EXTRA` — `build/Drone1-BPRL_TIMING/` here, not the plain `build/Drone1/`; see the root README's [Build and Upload](../README.md#6-build-and-upload)):
 
 ```bash
-make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_TIMING
-make flash DRONE=Drone1
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_TIMING flash
 # combine with debug telemetry if needed:
-make DRONE=Drone2 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING"
+make DRONE=Drone2 UDEFS_EXTRA="-DBPRL_DEBUG -DBPRL_TIMING" flash
 ```
 
 There's no dedicated `tools/*.py` wrapper yet — query the two commands directly over the USB serial port, e.g. with pyserial's bundled terminal:
@@ -290,9 +354,15 @@ Uploads a compiled `.bin` firmware image over USB using the ChibiOS bootloader p
 make flash DRONE=Drone2
 make flash DRONE=Drone1 PORT=/dev/ttyACM0
 
-# Or directly
-python3 tools/flash_upload.py build/BPRL.bin
-python3 tools/flash_upload.py --port /dev/ttyACM0 build/BPRL.bin
+# If a build used UDEFS_EXTRA (e.g. -DBPRL_DEBUG), repeat it on flash too —
+# otherwise `make flash` resolves to the plain, non-debug build/<DRONE>/
+# directory instead of the one you actually built:
+make flash DRONE=Drone2 UDEFS_EXTRA=-DBPRL_DEBUG PORT=/dev/ttyACM0
+
+# Or directly (path must match the build's actual directory, e.g.
+# build/Drone2/BPRL.bin or build/Drone2-BPRL_DEBUG/BPRL.bin)
+python3 tools/flash_upload.py build/Drone2/BPRL.bin
+python3 tools/flash_upload.py --port /dev/ttyACM0 build/Drone2/BPRL.bin
 ```
 
 If the board is already running firmware, the script sends a reboot-to-bootloader command automatically. Sequence: detect port → reboot if needed → erase → program in 252-byte chunks → CRC-32 verify → reboot.
@@ -305,11 +375,15 @@ If the board is already running firmware, the script sends a reboot-to-bootloade
 # Flash (default drone: DRONE=Drone1)
 make flash DRONE=Drone1
 
-# Debug build + flash
-make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG && make flash DRONE=Drone1
+# Debug build + flash — UDEFS_EXTRA must be on BOTH make and flash (one line
+# avoids forgetting it on the second command; see Timing section above)
+make DRONE=Drone1 UDEFS_EXTRA=-DBPRL_DEBUG flash
 
 # Telemetry (debug build required)
 python3 tools/telemetry.py telemetry
+
+# Hardware status (any build)
+python3 tools/hw_status.py
 
 # Motor test
 python3 tools/motor_test.py motor-test
@@ -326,6 +400,6 @@ python3 tools/can_tools.py can-scan --duration 2
 python3 tools/calibrate.py calibrate
 
 # Timing/schedulability build + query (see Timing section above)
-make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING && make flash DRONE=Drone2
+make DRONE=Drone2 UDEFS_EXTRA=-DBPRL_TIMING flash
 python3 -m serial.tools.miniterm /dev/ttyACM0 115200   # then type: TIM,status
 ```

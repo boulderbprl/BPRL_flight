@@ -30,8 +30,9 @@ float radio_thr(void);          /* throttle       [0, 1]  */
 float radio_roll(void);         /* roll           [-1, 1] */
 float radio_pitch(void);        /* pitch          [-1, 1] */
 float radio_yaw(void);          /* yaw rate       [-1, 1] */
-float radio_flight_mode(void);  /* flight mode sw [-1, 1] from RcChannelMap::flight_mode */
+float radio_flight_mode(void);  /* poshold_switch [-1, 1]: high = POS_HOLD, else STABILIZE (RcChannelMap::poshold_switch) */
 bool  radio_armed(void);
-float radio_indi(void);         /* raw controller-select switch position [-1, 1], RcChannelMap::indi_switch (3-pos) */
+bool  radio_valid(void);        /* true while the RC link is delivering fresh frames */
+float radio_indi(void);         /* raw ctrl_select switch position [-1, 1], RcChannelMap::ctrl_select (3-pos) */
 int   radio_switch_position(void);  /* radio_indi() bucketed to 0/1/2 (low/mid/high) — see FlightStateMachine::set_active_controller() */
 bool  radio_strain_cal(void);   /* momentary strain-bias-cal switch, RcChannelMap::strain_cal_switch — see JerkFit.hpp */

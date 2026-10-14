@@ -162,6 +162,11 @@ public:
     static constexpr float R_GRAVITY_FLIGHT_NOAID = 100.0f;
     static constexpr float R_MOCAP_POS = 1e-3f;   // mocap NED position variance (m²)
     static constexpr float R_MOCAP_VEL = 1e-4f;   // mocap NED velocity variance (m/s)²
+    // Mocap yaw variance (rad²) for EKF::update_yaw(). EKF3 floors an
+    // external-nav yaw error at 0.05 rad (fuseEulerYaw(), yawFusionMethod::
+    // EXTNAV: R_YAW = sq(MAX(yawAngErr, 0.05f))); the bridge sends no yaw
+    // error of its own, so that floor is the value.
+    static constexpr float R_MOCAP_YAW = 2.5e-3f;
     static constexpr float R_BARO_POS  = 0.5f;    // baro altitude variance (m²) — tune from bench log noise
 
     StateManager();
@@ -201,8 +206,15 @@ public:
     void get_lane_pqr  (int lane, float& p,    float& q,    float& r)    const;
     int  primary_lane  () const { return _primary; }
 
+    // Yaw step (rad) applied by the one-time mocap alignment since the last
+    // call, or 0 if there was none — the equivalent of EKF3's
+    // getLastYawResetAngle(). ControlThread hands it to the attitude
+    // controllers so their held heading moves with the frame.
+    float consume_yaw_reset() { const float d = _yaw_reset_rad; _yaw_reset_rad = 0.0f; return d; }
+
 private:
     EKF  _lanes[NUM_LANES];
+    bool _lane_active[NUM_LANES];   // lane initialised AND its IMU valid this tick — only active lanes are blended or selected as primary
     int  _primary;
     bool _initialized;
 
@@ -219,9 +231,27 @@ private:
     // true angle to the mocap frame's North, so update() re-anchors
     // _yaw_offset_q (see _reoffset_yaw_from_mocap()) every time a fresh mocap
     // yaw arrives (MocapRaw::has_new_yaw), overriding the boot-relative zero
-    // once mocap is connected.
+    // once mocap is connected. The offset is never reverted, so it keeps
+    // being applied to IMX5 quaternions after the mocap link drops.
     bool _yaw_zero_captured;
     Quat _yaw_offset_q;
+
+    // Mocap heading handling — see update() step 2.5.
+    //   _mocap_yaw_pending: a mocap yaw sample is waiting to be used. Latched
+    //     here because MocapRaw::has_new_yaw only lives for one tick, and the
+    //     IMX5 path can only consume it on a tick that also has a fresh quat.
+    //   _mocap_yaw_aligned: lane yaw has been snapped onto the mocap frame at
+    //     least once. Never cleared: after a mocap dropout the lanes keep
+    //     that alignment and simply stop being corrected.
+    //   _yaw_reset_rad: see consume_yaw_reset().
+    bool  _mocap_yaw_pending;
+    bool  _mocap_yaw_aligned;
+    float _mocap_yaw_rad;
+    float _yaw_reset_rad;
+
+    // Snap every lane's yaw to mocap_yaw_rad (EKF::reset_yaw()) and record
+    // the step the primary lane took in _yaw_reset_rad.
+    void _align_lanes_to_mocap(float mocap_yaw_rad);
 
     // Recompute _yaw_offset_q so that rotating `raw_q` (the latest raw IMX5
     // quaternion, pre-offset) by it yields a fused yaw equal to

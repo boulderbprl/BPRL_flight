@@ -1,3 +1,4 @@
+#include "src/uptime.hpp"
 #include "PID.hpp"
 #include "src/math/math.hpp"
 #include "ch.h"
@@ -86,5 +87,5 @@ void PID::set_integrator(float value)
 
 uint32_t PID::now_us()
 {
-    return (uint32_t)TIME_I2US(chVTGetSystemTimeX());
+    return bprl_micros();
 }

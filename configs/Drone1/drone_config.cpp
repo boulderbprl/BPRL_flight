@@ -115,22 +115,35 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
     
-    // .alt — AltControlGains { climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
     {
+        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
+        0.40f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
     },
     
-    // .pos — PosControlGains { pos_N, pos_E, pos_D, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
+    // Copied from Drone3's flown set (trojTrack_test1, 2026-10-08) — same
+    // motors/props and similar size. The limit is mocap latency, not the
+    // airframe: see Drone3's .pos comment before raising these.
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
    
-    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch }
-    { 0, 1, 2, 3, 4, 6, 7, 5 },
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // Starting point, not flight-tuned: kp matches the heading-lock trim
+    // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
+    { 1.75f,   // kp
+      3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
+      1.0f,    // max_rate
+      4.0f,    // max_accel
+      0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
+
+    // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
+    RcTransmitter::TX1,  // RC controller 1
    
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     {
@@ -151,19 +164,16 @@ const DroneConfig kDroneConfig = {
         20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
     },
    
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
-    { true, true, true },
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
+    { true, true, true, false, { -1, -1, -1, -1 } },
     
-    // .controllers — ControllersConfig { indi_enabled, jerk_enabled, jindi_enabled, pid_jerk_enabled }
-    // The 3-position control switch maps low/mid/high, PID always 0, then INDI,
-    // Jerk, PIDJerk, JINDI in that order if enabled. INDI and Jerk disabled
-    // here (not just unselected) so the list is exactly {PID, PIDJerk, JINDI}
-    // — low = PID, mid = PIDJerk, high = JINDI, clean 1:1 mapping (see
-    // FlightStateMachine's class comment). INDI/Jerk code is untouched, just
-    // not active here.
-    { false, false, true, true },
+    // .controllers — ControllersConfig { switch_pos[3] }
+    // Controller flown at each ctrl_select switch position [low, mid, high];
+    // poshold_switch high runs POS_HOLD around it, low/mid flies it directly (STABILIZE).
+    { { AttCtrl::PID, AttCtrl::PID_JERK, AttCtrl::JINDI } },  // low = PID, mid = PID_Jerk, high = JINDI (same as before the switch rework)
    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
         100.0f, // log_rate_hz
         { true, // att
@@ -171,14 +181,17 @@ const DroneConfig kDroneConfig = {
           true, // rcin
           true, // outp
           false, // rpms
-          true, // strn
+          true, // strt
           true, // imu1
           true, // imu2
           true, // imu3
-          false, // indi (INDI not in the controller list — would log zeros)
+          false, // indi (INDI not on any switch position — would log zeros)
           false, // baro
-          false, // ctun
-          false, // mocp
+          true, // ctun (POS_HOLD tuning)
+          true, // mocp
+          true, // traj
+          true, // mavl
+          false, // strn (STN1..STN4 — no strain gauge array on this airframe)
           false, // indij
           true, // jindi
           true }, // jpid

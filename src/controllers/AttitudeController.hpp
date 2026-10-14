@@ -25,6 +25,23 @@ public:
                          const Unmixer &unmixer, float out_cmds[3]) = 0;
     virtual void reset_all() = 0;
 
+    // The estimator's yaw just stepped by delta_rad with no physical
+    // rotation (StateManager::consume_yaw_reset()). Shift the held heading
+    // target by the same amount — ArduPilot's inertial_frame_reset().
+    virtual void yaw_frame_reset(float delta_rad) = 0;
+
+    // POS_HOLD's heading controller (HeadingControl) supplies the yaw-rate
+    // target directly. While enabled, a controller uses rate_rad_s as its
+    // yaw-rate loop target in place of its own stick rate + heading-lock
+    // trim, and keeps its held heading on the current one so there is no
+    // stored error when this is switched off again. FlightStateMachine sets
+    // this every tick; STABILIZE and ALT_HOLD always pass enabled = false.
+    void set_external_yaw_rate(bool enabled, float rate_rad_s)
+    {
+        _ext_yaw_rate_enabled = enabled;
+        _ext_yaw_rate         = rate_rad_s;
+    }
+
 protected:
     // Deliberately non-virtual and protected, not public+virtual: every
     // AttitudeController is a FlightStateMachine member with static storage
@@ -36,4 +53,7 @@ protected:
     // delete/__cxa_atexit, both of which a virtual destructor here would
     // pull in.
     ~AttitudeController() = default;
+
+    bool  _ext_yaw_rate_enabled = false;   // see set_external_yaw_rate()
+    float _ext_yaw_rate         = 0.0f;    // rad/s
 };

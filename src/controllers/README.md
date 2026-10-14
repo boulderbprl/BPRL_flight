@@ -19,15 +19,18 @@ FlightStateMachine  (400 Hz)
      │                                                                    │
      ├─ -0.33 ≤ FLIGHT_MODE ≤ +0.33 ─► ALT_HOLD                        │
      │    Attitude                                                        │
-     │    AltControl::alt_hold_from_stick()                              │
-     │      stick → climb_rate_pid → thrust_out                         │
+     │    AltControl::alt_hold()                                         │
+     │      stick → alt target + climb rate → thrust_out                │
      │                                                                    │
      └─ FLIGHT_MODE > +0.33  ───► POS_HOLD                              │
-          PosControl::NED_update()   (pos error → vel targets)           │
-          Per-axis state machine (PILOT/BRAKE/HOLD/RETURNING)            │
-          PosControl::NE_rate_update() (vel error → lean angles)         │
-          AltControl::alt_hold_from_rate() (D vel → thrust_out)          │
-          Attitude (with lean angles overriding roll/pitch targets)  ─────┤
+          reference source — sticks (default) or TrajectoryTracker:      │
+            sticks:     PosControl::update()   AltControl::alt_hold()    │
+                        HeadingControl::update_rate()                    │
+            trajectory: PosControl::track()    AltControl::track()       │
+                        HeadingControl::update_heading()                 │
+          → lean angles, thrust_out, yaw rate                            │
+          Attitude (lean angles override roll/pitch targets,             │
+                    HeadingControl's rate overrides the yaw target)  ─────┤
                                                                           │
      Attitude block (shared, dispatched by FlightStateMachine's           │
      config-driven controller list — see below):                         │
@@ -63,17 +66,19 @@ Once past threshold, it must stay there for `TAKEOFF_DEBOUNCE_TICKS = 100` (0.25
 
 **Landed detection** drops back to `GROUND_IDLE` automatically: once spooled up, if commanded thrust stays below `LANDED_THR_THRESHOLD = 0.15` **and** vertical speed stays below `LANDED_VEL_THRESHOLD = 0.2 m/s` for `LANDED_DEBOUNCE_TICKS = 400` (1.0 s), the phase reverts — this exists so a future cascade bug can't idle-wind-up while sitting on the ground.
 
-Transition to `DISARMED` (from any phase) resets all controller integrators and the position-hold latch.
+Transition to `DISARMED` (from any phase) resets all controller integrators and the position-hold targets.
 
 ### Flight mode (3-position RC switch on `input[InputIdx::FLIGHT_MODE]`)
 
 | `input[4]` value | Mode | Attitude target | Throttle |
 |---|---|---|---|
 | < −0.33 | STABILIZE | Pilot stick (rad) | Expo passthrough with tilt boost |
-| −0.33 to +0.33 | ALT_HOLD | Pilot stick (rad) | AltControl stick → climb rate |
-| > +0.33 | POS_HOLD | PosControl lean angles (rad) | AltControl D-axis rate |
+| −0.33 to +0.33 | ALT_HOLD | Pilot stick (rad) | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
+| > +0.33 | POS_HOLD | PosControl lean angles (rad) | `AltControl::alt_hold()` — identical to ALT_HOLD |
 
 Mode changes reset all controllers.
+
+In POS_HOLD the three outer controllers (`PosControl`, `AltControl`, `HeadingControl`) track either the pilot's sticks or, after a MAVLink trajectory command, the reference from `TrajectoryTracker` — see [TrajectoryTracker](#trajectorytracker-trajectorytrackerhppcpp). There is no separate trajectory flight mode.
 
 ### Attitude controller selection
 
@@ -185,7 +190,7 @@ The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rat
 | Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Roll rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
 | Pitch rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
-| Yaw rate | 0.065–0.18 | 0.018–0.02 | 0 | off | 30 Hz | 0.5 |
+| Yaw rate | 0.065–0.18 | 0.018–0.02 | 0 | off–20 Hz | 5–30 Hz | 0.5 |
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
 `AttitudeIndiGains` fields beyond the PID loops (`configs/DroneConfig.hpp`, values per-drone in `configs/<Drone>/drone_config.cpp`):
@@ -228,8 +233,8 @@ Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`
 | Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Roll rate ("SLC") | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
 | Pitch rate ("SLC") | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
-| Roll accel (inner PI) | 0.80 | 0.30 | 0 | 30 Hz (passthrough) | off | 0.1 |
-| Pitch accel (inner PI) | 0.80 | 0.30 | 0 | 30 Hz (passthrough) | off | 0.1 |
+| Roll accel (inner PI) | 0.70 | 0.80 | 0 | 50 Hz | off | 0.5 |
+| Pitch accel (inner PI) | 0.70 | 0.80 | 0 | 50 Hz | off | 0.5 |
 | Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 5 Hz | 0.5 |
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
@@ -254,31 +259,44 @@ thrust    = constrain(thr_exp × boost, 0, 1)
 
 The boost compensates for reduced vertical thrust when banked.
 
-### ALT_HOLD loop — `alt_hold_from_stick()`
+### Altitude hold — `alt_hold()` (ALT_HOLD and POS_HOLD)
+
+One z-axis controller, called identically by both modes. POS_HOLD only adds
+the N/E cascade in `PosControl` on top. `alt_hold()` is the stick's target
+generator in front of `track(alt_tgt_D, climb_rate_ff, cur_D, vD)`, the
+feedback loop itself, which `TrajectoryTracker` calls directly with a
+commanded altitude.
 
 ```
 pilot_thr [0,1]
     │
     ▼ stick_to_climb_rate()
-    │   centered = pilot_thr − 0.5               [-0.5, +0.5]
-    │   deadband = 0.05 of half-range
-    │   rate_tgt = ±MAX_CLIMB_RATE (3 m/s) outside deadband
+    │   centered    = pilot_thr − 0.5            [-0.5, +0.5]
+    │   deadband    = ±0.05 around centre
+    │   climb_stick = ±MAX_CLIMB_RATE (3 m/s) outside deadband, 0 inside
     │
-    ▼ climb_rate_pid (rate error → delta_thr)
+    ▼ alt_tgt += climb_stick × CONTROL_DT_S      (frozen while stick is in the deadband)
+    │   alt_tgt leashed to cur_D ± ALT_LEASH_M (1 m)
+    │
+    ▼ rate_tgt = climb_stick + pos_pid(alt_tgt − cur_D)     clamp ±3 m/s
+    │
+    ▼ climb_rate_pid (rate_tgt − vD → delta_thr)
     │
     thrust_out = constrain(THR_MID − delta_thr, 0, 1)
 ```
 
-`THR_MID = 0.4`. Stick centred → hold current altitude (rate_tgt = 0).
+`THR_MID = 0.4`. Same scheme as ArduPilot's
+`set_pos_target_z_from_climb_rate_cm()`: the stick moves the altitude target
+and is fed forward as a climb rate, so centring the stick holds the current
+altitude. `cur_D` is the EKF D position and `vD` the NED D velocity (body
+U/V/W rotated by roll/pitch), both positive down. The target is re-seeded
+from the current altitude after every `reset_all()` (mode change, disarm,
+ground idle).
 
 The loop used to cascade through a second, inner acceleration PID fed by
 the differentiated (noisy) body-frame accel estimate. That loop was removed
 because the noise drove throttle changes fast enough to overheat the
 motors — `climb_rate_pid` now commands throttle directly from rate error.
-
-### POS_HOLD — `alt_hold_from_rate()`
-
-Skips the outer stick-to-rate conversion. Called with the D-axis velocity target from `PosControl::NED_update()`.
 
 ### Gains
 
@@ -286,6 +304,7 @@ Lives per-drone as `AltControlGains` in `configs/<Drone>/drone_config.cpp` (see 
 
 | Loop | Kp | Ki | Kd | E-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|
+| Altitude (`pos_D`) | 1.0 | 0 | 0 | off | 20 Hz | 0 |
 | Climb rate | 0.15 | 0.05 | 0 | 5 Hz | 20 Hz | 0.3 |
 
 Starting-point gains only — not yet re-tuned in flight since the accel loop was removed.
@@ -294,34 +313,84 @@ Starting-point gains only — not yet re-tuned in flight since the accel loop wa
 
 ## PosControl (`PosControl.hpp/.cpp`)
 
-Two-stage NED position controller producing lean angles and a climb rate for the attitude and altitude controllers.
+N/E position controller producing lean angles for the attitude controller. The z axis is handled entirely by `AltControl`. One call per tick: `update(state, stick_fwd, stick_right, att_cmds)` for the sticks, or `track(state, pos_des, vel_des, accel_ff, att_cmds)` for a reference supplied by `TrajectoryTracker`. `track()` bypasses the target generator below and runs the same feedback; it also leaves the generator's state matching the reference, so the next `update()` carries on without a step.
 
-### Stage 1 — `NED_update()`: position → velocity targets
+It follows ArduPilot's Loiter (`AC_Loiter::calc_desired_velocity()`): the sticks command an **acceleration**, which is integrated into a velocity target and then into a position target. The position loop runs on that moving target all the time, so there is no hold point to latch — when the velocity target reaches zero the position target simply stops moving, and that is where the vehicle holds.
 
-```
-pos_tgt[N] − state[N]  ──► _pos_N (P) ──► vel_N_tgt
-pos_tgt[E] − state[E]  ──► _pos_E (P) ──► vel_E_tgt
-pos_tgt[D] − state[D]  ──► _pos_D (P) ──► vel_D_tgt
-                                │
-                          clamp: ±5 m/s (NE), ±3 m/s (D)
-```
-
-### Stage 2 — `NE_rate_update()`: velocity errors → lean angles
+### Target generator (open loop)
 
 ```
-vel_N_tgt − vN  ──► _vel_N (PID) ──► accel_N_tgt [m/s²]
-vel_E_tgt − vE  ──► _vel_E (PID) ──► accel_E_tgt [m/s²]
+sticks (fwd/right, deadband 0.10)
+    │  stick → lean angle (MAX_STICK_LEAN_deg = 20° at full stick) → g·tan(angle)
+    │  rotate by yaw into N/E (STICKS_BODY_FRAME)
+    ▼
+accel_pilot [m/s²]     jerk-limited at STICK_JERK_MAX (20 m/s³)
+    │
+    ▼  accel_cmd = accel_pilot − drag − brake      (both along −vel_des)
+    │      drag  = STICK_ACCEL_MAX·|vel_des| / MAX_SPEED   (full stick settles at MAX_SPEED = 5 m/s)
+    │      brake = min(BRAKE_GAIN·|vel_des|, BRAKE_ACCEL_MAX), ramped at BRAKE_JERK_MAX,
+    │              only once the sticks have been centred for BRAKE_DELAY_S (0.3 s)
+    ▼
+accel_pred = accel_cmd through a first-order lag of ATT_LAG_S (0.15 s)
+    │
+    ▼  vel_des += accel_pred·dt
+vel_des [m/s]
+    │
+    ▼  pos_des += vel_des·dt          leashed to within POS_LEASH_M (2 m) of the vehicle
+pos_des [m]
+```
+
+`accel_pred` is the attitude-response predictor (ArduPilot's `_predicted_accel`). The vehicle's lean angle, and so its real acceleration, trails the commanded one by the attitude loop's lag. If the targets were integrated from the command itself they would get ahead of the vehicle by `ATT_LAG_S × (change in acceleration)` in velocity on every stick push and release, and the feedback loops would turn that into an overshoot (about 0.3 m in flight before this was added). Integrating the lagged value makes the targets move the way the vehicle will. `ATT_LAG_S` was measured from a flight log (roll 0.16 s, pitch 0.12 s with angle kp = 6); re-measure it if the attitude gains change.
+
+On the first tick after a reset (mode change, disarm, ground idle) the targets are seeded from the measured position and velocity, so engaging POS_HOLD while moving is a smooth brake to a stop.
+
+### Feedback with feed-forward
+
+```
+vel_tgt   = vel_des + clamp(_pos_N/E (P)(pos_des − pos), ±VEL_CORR_MAX = 2 m/s)
+accel_fb  = _vel_N/E (PID)(vel_tgt − vel)  ──►  2nd-order lowpass @ ACCEL_FILT_HZ (10 Hz), in the N/E frame
+accel_tgt = accel_cmd + accel_fb
                                 │
                     rotate to body frame (yaw):
                       accel_N_body =  cos(ψ)·aN + sin(ψ)·aE
                       accel_E_body = −sin(ψ)·aN + cos(ψ)·aE
                                 │
                     compute lean angles:
-                      roll_tgt  = atan2(−accel_E_body, g)
-                      pitch_tgt = atan2( accel_N_body·cos(roll), g)
+                      pitch_tgt = atan2(−accel_N_body, g)
+                      roll_tgt  = atan2( accel_E_body·cos(pitch_tgt), g)
                                 │
-                          clamp: ±30°
+                          clamp: ±30° (MAX_LEAN_deg, feed-forward + feedback together)
 ```
+
+The stick acceleration goes straight to the lean angle, so the response to the stick is immediate; the PIDs only correct tracking error, which stays small because the targets move no faster than the vehicle can. The feed-forward bypasses the 10 Hz filter so it doesn't pick up the filter's lag.
+
+`vN`/`vE` are NED velocities: `FlightStateMachine::mode_pos_hold()` rotates the
+EKF's body-frame U/V/W into NED before calling `PosControl`, which never sees
+the raw EKF state layout (see the conventions comment in `PosControl.hpp`).
+
+The feedback filter runs at the fixed `CONTROL_DT_S` (`src/threads.hpp`),
+not a measured `dt`. `lowpass2p()` recomputes its coefficients from `dt` every
+call, and tick-to-tick jitter in a measured `dt` shows up as noise on the
+output proportional to the signal — that was the source of a noisy lean-angle
+target with a clean velocity error.
+
+### Stick and brake tuning
+
+`static constexpr` members of `PosControl` (`PosControl.hpp`), not per-drone config:
+
+| Constant | Value | Effect |
+|---|---|---|
+| `STICK_DEADBAND` | 0.10 | Stick travel around centre that commands nothing |
+| `MAX_STICK_LEAN_deg` | 20° | Lean (and so acceleration, 3.57 m/s²) at full stick |
+| `STICK_JERK_MAX` | 20 m/s³ | How fast the stick acceleration (and so the lean command) may change |
+| `ATT_LAG_S` | 0.15 s | Attitude loop's lean-angle response lag used by the predictor |
+| `MAX_SPEED` | 5 m/s | Speed a full stick settles at (ArduPilot `LOIT_SPEED`) |
+| `BRAKE_DELAY_S` | 0.3 s | Sticks centred this long before braking starts (`LOIT_BRK_DELAY`, 1 s there) |
+| `BRAKE_GAIN` | 2.0 1/s | Brake deceleration per m/s of target speed |
+| `BRAKE_ACCEL_MAX` | 2.5 m/s² | Cap on brake deceleration (`LOIT_BRK_ACCEL`) |
+| `BRAKE_JERK_MAX` | 10 m/s³ | How fast the brake deceleration ramps in (`LOIT_BRK_JERK`, 5 there) |
+| `VEL_CORR_MAX` | 2 m/s | Cap on the position loop's velocity correction |
+| `POS_LEASH_M` | 2 m | Max distance the position target may get from the vehicle |
 
 ### Gains
 
@@ -331,36 +400,67 @@ Lives per-drone as `PosControlGains` in `configs/<Drone>/drone_config.cpp` (see 
 |---|---|---|---|---|---|---|
 | Pos N | 1.0 | 0 | 0 | off | 20 Hz | 0 |
 | Pos E | 1.0 | 0 | 0 | off | 20 Hz | 0 |
-| Pos D | 1.0 | 0 | 0 | off | 20 Hz | 0 |
-| Vel N | 2.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
-| Vel E | 2.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
+| Vel N | 3.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
+| Vel E | 3.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
 
 ---
 
-## POS_HOLD per-axis state machine
+## HeadingControl (`HeadingControl.hpp/.cpp`)
 
-N and E axes run the same state machine independently inside `FlightStateMachine::mode_pos_hold()`.
+POS_HOLD's heading loop: a heading reference in, a yaw-rate command out, which `FlightStateMachine` hands to every attitude controller through `AttitudeController::set_external_yaw_rate()`. While that is enabled a controller uses the supplied rate as its yaw-rate loop target and bypasses its own stick rate + heading-lock trim. STABILIZE and ALT_HOLD never enable it, so yaw there is unchanged.
 
 ```
-          stick active?
-          ┌──────────────────────────────────────────────────────────┐
-          │                                                          │
-   ┌──► PILOT ──────────────────────► BRAKE ──── |vel| < 0.20 m/s ──► HOLD ──► RETURNING
-   │      │  stick released                │                              │
-   │      │                               │ stick pressed                │
-   │      │◄──────────────────────────────┘                              │
-   └──────────────────────────────────────────────────────────────────────┘
-          (RETURNING blends from controller output → stick over ~0.5 s)
+shaped heading target:  rate_tgt slews to the demanded rate at max_accel;  target += rate_tgt·dt
+yaw_rate_cmd = rate_tgt + constrain(kp · wrap(target − yaw), ±max_rate)
 ```
 
-| State | N/E velocity source | Hold position latched? |
+| Entry point | Used by | Demanded rate |
 |---|---|---|
-| PILOT | `stick × MAX_VEL_NE` | No |
-| BRAKE | 0 m/s | No — latch on stop |
-| HOLD | `PosControl::NED_update()` | Yes |
-| RETURNING | linear blend (controller → stick, 200 ticks ≈ 0.5 s) | Releasing |
+| `update_rate(yaw, rate)` | POS_HOLD yaw stick | `stick_rate` × stick (deadband 0.10, rescaled) |
+| `update_heading(yaw, yaw_des, rate_ff)` | TrajectoryTracker | `rate_ff` + approach toward `yaw_des` (≤ `max_rate`, sqrt profile) |
 
-D axis: altitude position is latched once both N and E axes have settled to HOLD. After that it is held via `AltControl::alt_hold_from_rate()`.
+The target is leashed to within 0.6 rad of the vehicle, and shifted by `yaw_frame_reset()` when the estimator's yaw steps. Gains are per-drone (`HeadingGains`): `kp` 1.75 /s, `stick_rate` 3.0 rad/s, `max_rate` 1.0 rad/s, `max_accel` 4.0 rad/s² — starting values, not flight-tuned.
+
+---
+
+## TrajectoryTracker (`TrajectoryTracker.hpp/.cpp`)
+
+The layer above the position, altitude and heading controllers — the role `AC_Circle` and Guided play over `AC_PosControl` in ArduPilot. It turns a commanded point or circle into the moving reference (`TrajRef`: position, velocity, acceleration feed-forward, heading, yaw-rate feed-forward) that those controllers track through their `track()` / `update_heading()` entry points. It contains no feedback loops.
+
+Commands arrive over MAVLink (`COMMAND_LONG`, see `src/coms/README.md`), cross to ControlThread through `g_traj_mailbox`, and are judged by `FlightStateMachine::traj_command()`. Everything is NED, metres; positions are offsets from an origin set by command. A NaN parameter means "not given".
+
+| Command | Parameters | Behaviour |
+|---|---|---|
+| Set origin | — | Origin := current position. Refused while a trajectory is active. Survives disarm. |
+| Point | N, E, D | Straight line at `V_MOVE`, then hold. Defaults: N/E 0, D = current altitude. Heading held. |
+| Circle | radius, N, E, D, focus distance, direction, speed | Fly to the nearest point of the path, turn the nose along it, then follow it nose-first. Only the radius is required. |
+| Stop | — | Back to plain position hold. |
+
+**Ellipse** — focus distance `f` (0 = circle): foci `|f|` from the centre, along North if `f > 0`, East if `f < 0`; `radius` is focus-to-near-end, so semi-major = `r + |f|`, semi-minor = `sqrt(r·(r + 2|f|))`.
+**Direction** — positive (default) is right-handed about D: yaw increasing, clockwise seen from above.
+**Speed** — the commanded speed on the gentle parts, reduced where curvature would exceed `A_LAT_MAX` or `YAW_RATE_MAX`; the tracker looks ahead and brakes at `A_TAN_MAX` before a tight section.
+
+Rules:
+
+- Point and circle are only accepted while flying (phase ACTIVE) in POS_HOLD with a valid position and an origin set.
+- Roll, pitch or yaw stick outside its deadband cancels the trajectory, and it stays cancelled. So do leaving POS_HOLD, ground idle, disarming and losing the position. The controllers carry on from the last reference, so the hand-back is smooth.
+- The throttle stick moves the whole trajectory up and down (a height offset; the origin does not move). Each new command zeroes it.
+- Floor: the D at take-off is recorded. A point or circle whose altitude is lower than `FLOOR_MARGIN_M` (0.15 m) above it is refused and changes nothing (a running trajectory carries on). The throttle stick cannot lower a running trajectory past that height either. Plain POS_HOLD is not limited, so landing is unaffected.
+- If the vehicle is more than `ERR_SLOW_M` behind the reference, progress along the path slows, stopping at `ERR_PAUSE_M`.
+
+Limits are constants at the top of `TrajectoryTracker.hpp` (starting values, to be flight-tuned). The `TRAJ` log message records the tracker state, reference, heading target and yaw-rate command. `tools/sim/` flies all of this on the PC — see `tools/sim/README.md`.
+
+---
+
+## POS_HOLD notes
+
+Heading: `HeadingControl` — the yaw stick turns the heading target rather than commanding a raw rate.
+
+D axis: `AltControl::alt_hold()`, exactly as in ALT_HOLD — the throttle stick commands climb rate outside its deadband and the current altitude is held inside it.
+
+**Stick frame** — `PosControl::STICKS_BODY_FRAME` (`PosControl.hpp`, currently `true`): the pitch/roll sticks command forward/right acceleration relative to the nose and are rotated by yaw into N/E (ArduPilot Loiter behaviour). Set it to `false` for the sticks to command N/E directly.
+
+**Shadow mode** — `FlightStateMachine::CTUN_POSHOLD_SHADOW` (`FlightStateMachine.hpp`, currently `false`): when `true`, POS_HOLD flies as hands-off STABILIZE while the whole cascade above still runs every tick and feeds the `CTUN` log message, for tuning without closing the loop. If you turn it on, also drop `TAKEOFF_THR_THRESHOLD_HOLD` back to 0.10 (see the comment next to it).
 
 ---
 
@@ -368,10 +468,12 @@ D axis: altitude position is latched once both N and E axes have settled to HOLD
 
 Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders) — supplied per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`) rather than hardcoded `static constexpr` members; `Unmixer`'s constructor takes the config by reference and stores it.
 
-**Motor force model** — cubic fit directly against mechanical RPM:
+**RPM filtering** — each motor's RPM goes through a 2nd-order lowpass at `rpm_filt_hz` (20 Hz) and an optional 1st-order stage at `rpm_filt_extra_hz` (15 Hz, `<= 0` disables it) before the motor model, both at the fixed `CONTROL_DT_S`.
+
+**Motor force model** — cubic fit directly against mechanical RPM (values below are Drone1's, shared with Drone3; each drone's `UnmixerConfig` has its own):
 ```
 F_N = C3·rpm³ + C2·rpm² + C1·rpm + C0   // Drone1: motor_c3=5.8387e-14, motor_c2=7.5398e-9, motor_c1=-4.5422e-6, motor_c0=0.005144
-F_N = max(F_N, 0)                       // guard small negative thrust near zero RPM
+F_N = clamp(F_N, 0, max_thrust_n)       // guard small negative thrust near zero RPM, cap at bench max
 ```
 
 **X-frame geometry** (arm length `arm_length_m = 0.1275 m`, NED body frame):
@@ -425,7 +527,7 @@ error   --[1st-order LPF @ filt_error_hz]--> error_filt   (feeds P and I)
 derivative of error_filt --[1st-order LPF @ filt_d_hz]--> feeds D
 ```
 
-`filt_target_hz`/`filt_error_hz` default to `0` (disabled → passthrough), matching ArduPilot's `FLTT`/`FLTE` default-off behaviour; each `AttitudePID` rate loop overrides these explicitly (see the AttitudePID gains table above). There is **no explicit `dt` parameter** — `update()` derives it internally from `chVTGetSystemTimeX()` between calls. Two edge cases are handled specially:
+`filt_target_hz`/`filt_error_hz` default to `0` (disabled → passthrough), matching ArduPilot's `FLTT`/`FLTE` default-off behaviour; each `AttitudePID` rate loop overrides these explicitly (see the AttitudePID gains table above). There is **no explicit `dt` parameter** — `update()` derives it internally from `bprl_micros()` (`src/uptime.hpp`, a monotonic clock that doesn't wrap with the 16-bit system tick on Drone3) between calls. Two edge cases are handled specially:
 
 - **First sample** (`_deriv_valid == false`): returns `kp * error` only (no I or D term), and latches the timestamp — avoids a derivative spike from an undefined previous error.
 - **Stale input** (gap since the last call `> 200 ms`, `STALE_TIMEOUT_US`): calls `reset()` (zeroes the integrator and derivative state) and returns `kp * error` only, same as the first-sample case — protects against a large derivative/integral kick if a caller stops calling `update()` for a while and then resumes.
@@ -436,6 +538,6 @@ The integrator is clamped to `±imax`.
 
 ## Notes
 
-- **POS_HOLD yaw** — currently commands yaw *rate*, not yaw *angle*; an outer yaw-angle loop would need a heading reference from the IMX5 or a magnetometer. Tracked under "fix the position hold controller" in the root README's [TODO](../../README.md#todo) list.
+- **Yaw / heading hold** — in STABILIZE and ALT_HOLD the yaw stick commands yaw *rate*, and each attitude controller adds a heading-lock trim on top: while the yaw stick is inside its ±0.10 deadband the current heading is latched as the target and a PI on heading error (`yaw_hold` gains) adds a corrective rate, capped at `YAW_HOLD_MAX_RATE` (0.3 rad/s); moving the stick re-latches the target to wherever the nose is. POS_HOLD replaces this with `HeadingControl` (see above), which owns a heading target the stick turns or a trajectory sets. The heading itself comes from the EKF, which takes it from the IMX5 and/or the mocap yaw (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section) — there is no magnetometer.
 
 See the root README's [TODO](../../README.md#todo) list for planned feature work; this file documents the controllers as they exist today.

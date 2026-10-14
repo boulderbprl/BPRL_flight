@@ -105,6 +105,7 @@ public:
                 const float current_torque[2], const Unmixer &unmixer,
                 float out_cmds[3]) override;
     void reset_all() override;
+    void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
 
     // Set once per tick before the controller-list dispatch — see class comment.
     void set_roll_jerk(float roll_jerk) { _roll_jerk_input = roll_jerk; }

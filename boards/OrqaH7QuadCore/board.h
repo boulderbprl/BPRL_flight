@@ -88,9 +88,8 @@
 /* ── RC input — CRSF, full-duplex on USART6 (TX6/RX6 pads) ──────────────────
  * Not the hwdef's stock RC pad (that's half-duplex USART3/T3, default
  * protocol GHST) — moved to TX6/RX6 instead: easier to wire, standard
- * two-pin UART (no HDSEL), and leaves USART3 free for MAVLink/telemetry
- * (src/coms/MAVLink.cpp is unconditionally SD3 on every board — sharing it
- * with RC input on this board would have silently collided the two). */
+ * two-pin UART (no HDSEL). MAVLink/telemetry is on UART7 (TX7/RX7 pads,
+ * PE8/PE7) on this board — see BPRL_MAVLINK_SD in src/coms/MAVLink.hpp. */
 #define LINE_RC_INPUT_TX          PAL_LINE(GPIOC, 6U)    /* USART6_TX */
 #define LINE_RC_INPUT_RX          PAL_LINE(GPIOC, 7U)    /* USART6_RX */
 

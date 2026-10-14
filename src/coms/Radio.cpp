@@ -11,37 +11,40 @@
 #endif
 
 /*
- * Channel index assignment comes from DroneConfig::rc_map (see
- * configs/DroneConfig.hpp) — today's values for both drones (verified
- * against telemetry):
- *   thr         = 0  Throttle         → [0, 1]
- *   roll        = 1  Roll (aileron)   → [-1, 1]
- *   pitch       = 2  Pitch (elevator) → [-1, 1]
- *   yaw         = 3  Yaw (rudder)     → [-1, 1]
- *   arm         = 4  Arm switch       → >992 = armed
- *   flight_mode = 6  Flight mode switch (3-position) → [-1, 1]
- *   indi_switch = 7  Attitude-controller-select switch (3-position) → [-1, 1];
- *                    only the 3rd (highest) position selects the non-default
- *                    controller — see FlightStateMachine::set_active_controller()
- *   strain_cal_switch = 5  Momentary strain-bias-cal switch → >992 = held;
- *                    see JerkFit.hpp / ControlThread's strain calibration block
+ * Channel index assignment comes from kRcMaps[kDroneConfig.rc_tx] (see
+ * configs/DroneConfig.hpp) — one layout per physical transmitter, shared by
+ * every drone that flies with it:
+ *   thr, roll, pitch, yaw  sticks → [0, 1] / [-1, 1]
+ *   arm                    arm switch → >992 = armed
+ *   ctrl_select            3-position: which attitude controller flies —
+ *                          ControllersConfig::switch_pos[low/mid/high]
+ *   poshold_switch         high = POS_HOLD, low/mid = STABILIZE
+ *   strain_cal_switch      momentary strain-bias-cal switch → >992 = held;
+ *                          see JerkFit.hpp / ControlThread's strain calibration block
  *
  * Both SBUS and CRSF use the same 11-bit value range: 172–1811, centre 992.
  */
+static const RcChannelMap &rc() { return kRcMaps[static_cast<uint8_t>(kDroneConfig.rc_tx)]; }
+
 static float norm_axis(uint16_t v) { return (float)(v - 992)  / 819.0f;  }
 static float norm_thr (uint16_t v) { return (float)(v - 172)  / 1639.0f; }
 
 void  radio_input_init()   { PARSER.init();   }
 void  radio_input_update() { PARSER.update(); }
 
-float radio_thr()         { return norm_thr (PARSER.channel(kDroneConfig.rc_map.thr)); }
-float radio_roll()        { return norm_axis(PARSER.channel(kDroneConfig.rc_map.roll)); }
-float radio_pitch()       { return -norm_axis(PARSER.channel(kDroneConfig.rc_map.pitch)); }
-float radio_yaw()         { return norm_axis(PARSER.channel(kDroneConfig.rc_map.yaw)); }
-bool  radio_armed()       { return PARSER.channel(kDroneConfig.rc_map.arm) > 992u; }
-float radio_flight_mode() { return norm_axis(PARSER.channel(kDroneConfig.rc_map.flight_mode)); }
-float radio_indi()        { return norm_axis(PARSER.channel(kDroneConfig.rc_map.indi_switch)); }
-bool  radio_strain_cal()  { return PARSER.channel(kDroneConfig.rc_map.strain_cal_switch) > 992u; }
+float radio_thr()         { return norm_thr (PARSER.channel(rc().thr)); }
+float radio_roll()        { return norm_axis(PARSER.channel(rc().roll)); }
+float radio_pitch()       { return -norm_axis(PARSER.channel(rc().pitch)); }
+float radio_yaw()         { return norm_axis(PARSER.channel(rc().yaw)); }
+bool  radio_armed()       { return PARSER.channel(rc().arm) > 992u; }
+#if RADIO_PROTOCOL == RADIO_PROTO_CRSF
+bool  radio_valid()       { return PARSER.data_valid(); }
+#else // RADIO_PROTO_SBUS — no single _valid flag; frame_lost/failsafe stand in for it
+bool  radio_valid()       { return !PARSER.frame_lost() && !PARSER.failsafe(); }
+#endif
+float radio_flight_mode() { return norm_axis(PARSER.channel(rc().poshold_switch)); }
+float radio_indi()        { return norm_axis(PARSER.channel(rc().ctrl_select)); }
+bool  radio_strain_cal()  { return PARSER.channel(rc().strain_cal_switch) > 992u; }
 
 int radio_switch_position()
 {

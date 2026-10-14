@@ -59,7 +59,13 @@ bool ICM20948::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     reg_write(B2_GYRO_CFG1,    0x07); // ±2000 dps, DLPF on
     reg_write(B2_ACCEL_SMPL_1, 0x00);
     reg_write(B2_ACCEL_SMPL_2, 0x00); // 1.125 kHz ODR
-    reg_write(B2_ACCEL_CFG,    0x19); // ±16 g, DLPF on
+    // 0x1F = DLPFCFG(0b011=3)<<3 | ACCEL_FS_SEL(0b11=±16g)<<1 | FCHOICE(1).
+    // Previously 0x19, which omits the FS_SEL bits entirely (bits[2:1]=00 ->
+    // actually configures the chip's MINIMUM range, ±2g, not ±16g as the old
+    // comment here claimed) while ACCEL_SCALE still assumed ±16g's 2048
+    // LSB/g — real ±2g range is 16384 LSB/g, so every reading was too large
+    // by 16384/2048 = 8x. Found via bench accel Z reading ~8x gravity.
+    reg_write(B2_ACCEL_CFG,    0x1F); // ±16 g, DLPF on
 
     set_bank(0);
     _ready = true;

@@ -3,11 +3,22 @@
 /*
  * Drone2 — CubeBlueH7.
  *
- * Values below are transcribed exactly from today's hardcoded constants
- * (Attitude_PID.cpp, Attitude_INDI.cpp, AltControl.cpp, PosControl.cpp,
- * MotorMixer.hpp, Unmixer.hpp, Radio.cpp, main.cpp's log rate) — identical to
- * Drone1's for now, since there was only ever one tuned set shared across
- * whichever board got compiled in. Free to diverge from here per airframe.
+ * Values below started as an exact transcription of Drone1's hardcoded
+ * constants (Attitude_PID.cpp, Attitude_INDI.cpp, AltControl.cpp,
+ * PosControl.cpp, MotorMixer.hpp, Unmixer.hpp, Radio.cpp, main.cpp's log
+ * rate), since there was only ever one tuned set shared across whichever
+ * board got compiled in. Free to diverge from here per airframe.
+ *
+ * Drone1 is a 5in racing quad; Drone2 is the larger S500. The roll/pitch
+ * angle-P and rate PID gains in .pid/.indi/.pid_pi (roll_att, pitch_att, and
+ * .pid's roll_rate/pitch_rate) have since been updated to the S500-tuned
+ * values from the ArduPilot fork (jd-hanley/ardupilot, Strain_rate branch,
+ * AC_AttitudeControl_Multi.h) — angle P 4.5, rate P/I/D 0.135/0.135/0.0036,
+ * rate D-term filter 20 Hz. .indi/.pid_pi's roll_rate/pitch_rate ("SLC",
+ * 6.5 gain) are a different two-stage architecture with no ArduPilot rate-PID
+ * equivalent, so they're untouched; their roll_accel/pitch_accel inner loop
+ * already matched ArduPilot's tuned accel PI exactly. Yaw gains are also
+ * untouched — still Drone1's.
  *
  * Field order below matches each struct's declaration order in
  * configs/DroneConfig.hpp exactly (plain aggregate init, no designated
@@ -16,10 +27,10 @@
 const DroneConfig kDroneConfig = {
     // .pid — AttitudePidGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, yaw_stick_gain }
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
-        { 0.08f, 0.05f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
-        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
+        { 4.50f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 4.50f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  — S500 ArduPilot-tuned (was Drone1's 0.08/0.05/0.002, filt_d 30)
+        { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate — S500 ArduPilot-tuned (was Drone1's 0.09/0.06/0.002, filt_d 30)
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         3.0f,  // yaw_stick_gain
@@ -27,8 +38,8 @@ const DroneConfig kDroneConfig = {
     
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
@@ -43,7 +54,7 @@ const DroneConfig kDroneConfig = {
     },
 
     // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while .controllers.jerk_enabled=false below; copied from .indi
+    // Unused while no .controllers.switch_pos entry names AttCtrl::INDI_JERK; copied from .indi
     // above (this drone's own values) only to keep the struct valid — see
     // Drone1's .indi_jerk comment for the full rationale.
     {
@@ -66,7 +77,7 @@ const DroneConfig kDroneConfig = {
     },
 
     // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while .controllers.jindi_enabled=false below; copied from
+    // Unused while no .controllers.switch_pos entry names AttCtrl::JINDI; copied from
     // .indi_jerk above (this drone's own values) only to keep the struct
     // valid — see Drone1's .jindi comment for the full rationale.
     {
@@ -89,8 +100,8 @@ const DroneConfig kDroneConfig = {
 
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate  ("SLC")
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate ("SLC")
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
@@ -100,22 +111,32 @@ const DroneConfig kDroneConfig = {
         3.0f,  // yaw_stick_gain
     },
     
-    // .alt — AltControlGains { climb_rate }
+    // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
     {
+        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
+        0.40f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
     },
     
-    // .pos — PosControlGains { pos_N, pos_E, pos_D, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
     
-    // .rc_map — RcChannelMap { thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch }
-    { 0, 1, 2, 3, 4, 6, 7, 5 },
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // Starting point, not flight-tuned: kp matches the heading-lock trim
+    // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
+    { 1.75f,   // kp
+      3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
+      1.0f,    // max_rate
+      4.0f,    // max_accel
+      0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
+
+    // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
+    RcTransmitter::TX1,  // RC controller 1 — same channels this config had before the shared maps; TODO confirm on the bench which transmitter Drone2 flies with
     
     // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
     {
@@ -123,44 +144,65 @@ const DroneConfig kDroneConfig = {
         { +1.0f, -1.0f, +1.0f, -1.0f },  // pitch_factor
         { +1.0f, +1.0f, -1.0f, -1.0f },  // yaw_factor
         { 0, 1, 2, 3 },                  // motor_map — identity: ESC wired FR->MOT1..RR->MOT4
-        50, 150, 900,                    // pwm_min, pwm_idle, pwm_max
+        150, 200, 950,                    // pwm_min, pwm_idle, pwm_max
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
     
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
-    // motor_c0..c3 re-expressed in raw RPM (was normalised-omega cubic C0=2.4540 C1=2.2831 C2=0.5607 C3=0.0134,
-    // center=2005.0 scale=880.8); values below reproduce that same fit exactly, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0
+    // PLACEHOLDER — these 12in motors/props haven't been on the thrust stand.
+    // motor_c0..c3 are the Strain_Drone_Integration branch's normalised-RPM
+    // cubic (C0=4.0396 C1=4.4596 C2=1.2797 C3=0.0244, center=4841 scale=2528)
+    // expanded to raw RPM, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0 — identical
+    // curve, ~4.0 N/motor at 4841 RPM. Re-fit once measured.
     {
-        0.1275f,                                          // arm_length_m
-        0.004223f, -7.2859e-6f, 6.6321e-9f, 2.2519e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
-        7.04f,                                              // max_thrust_n
-        20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
+        0.3f,                                                   // arm_length_m
+        0.021051f, -6.8474e-5f, 1.78308e-7f, 1.51028e-12f,      // motor_c0, motor_c1, motor_c2, motor_c3
+        27.49f,                                                 // max_thrust_n
+        20.0f, 15.0f,                                           // rpm_filt_hz, rpm_filt_extra_hz
     },
     
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link }
-    { true, true, true },
-    
-    // .controllers — ControllersConfig { indi_enabled, jerk_enabled, jindi_enabled, pid_jerk_enabled }
-    { false, false, false, false },  // jerk/jindi/pid_jerk_enabled: off by default — not yet bench/flight tuned on this airframe
-    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
+    // shaft-encoder RPM (src/sensors/EncoderRPM.hpp) substitutes in, all 4 motors now instrumented:
+    //   NODE_ID 0 (CAN 0x70) — front-right (FR, logical 0)
+    //   NODE_ID 1 (CAN 0x71) — back-right  (RR, logical 3)
+    //   NODE_ID 2 (CAN 0x72) — back-left   (RL, logical 1)
+    //   NODE_ID 3 (CAN 0x73) — front-left  (FL, logical 2)
+    // see Strain_CAN/Feather_Code/Feather_Code.ino's NODE_ID comment for which physical board is which.
     {
-        50.0f, // log_rate_hz
+        true,           // has_baro
+        false,           // has_can_imx5_ins
+        false,           // has_mocap_link
+        true,           // has_encoder_rpm
+        { 0, 3, 1, 2 }, // encoder_motor_map — [node0..node3] -> logical motor (FR=0/RL=1/FL=2/RR=3)
+    },
+
+    // .controllers — ControllersConfig { switch_pos[3] }
+    // Controller flown at each ctrl_select switch position [low, mid, high];
+    // poshold_switch high runs POS_HOLD around it, low/mid flies it directly (STABILIZE).
+    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID } },  // PID only — the others are not yet bench/flight tuned on this airframe
+    
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
+    {
+        100.0f, // log_rate_hz
         { true, // att
-          true, // lin
+          false, // lin
           true, // rcin
-          true, // outp
-          true, // rpms
-          true, // strn
-          true, // imu1
-          true, // imu2
-          true, // imu3
-          true, // indi
-          true, // baro
-          true, // ctun
-          true, // mocp
-          true, // indij
-          true, // jindi
-          true }, // jpid
+          false, // outp
+          false, // rpms
+          false, // strt
+          false, // imu1
+          false, // imu2
+          false, // imu3
+          false, // indi
+          false, // baro
+          false, // ctun
+          false, // mocp
+          false, // traj
+          false, // mavl
+          true, // strn (STN1..STN4)
+          false, // indij
+          false, // jindi
+          false }, // jpid
     },
 };

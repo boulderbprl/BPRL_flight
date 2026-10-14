@@ -103,7 +103,11 @@ class SerialReader:
         return lines
 
     def stop(self):
+        """Signal the reader thread to stop and wait for it to actually exit,
+        so the caller can safely read() the same serial object afterward
+        without racing the background thread for bytes."""
         self._stop.set()
+        self._thread.join(timeout=2.0)
 
 
 # ── Line readers (blocking, for command-response flows) ───────────────────────
@@ -298,6 +302,54 @@ def parse_pos_line(line: str, state: PosVelState) -> bool:
         state.mocap_pos   = [float(parts[7]), float(parts[8]), float(parts[9])]
         state.mocap_vel   = [float(parts[10]), float(parts[11]), float(parts[12])]
         state.mocap_valid = bool(int(parts[13]))
+        state.received_any = True
+        state.usb_rx_any   = True
+        state.last_rx      = time.monotonic()
+        return True
+    except (ValueError, IndexError):
+        return False
+
+
+# ── Strain gauge array (single I2C node, 36 channels, 4 arms x 9) ────────────
+# ConBoard at I2C 0x09: 36 int16 channels (0.1 uV/count), streamed in channel
+# order, 9 per arm: ARM1 = front right, ARM2 = back right, ARM3 = back left,
+# ARM4 = front left — see src/sensors/StrainGauge.hpp.
+
+STRAIN_ARM_SIZES = [9, 9, 9, 9]
+STRAIN_ARM_NAMES = ["Front R", "Back R", "Back L", "Front L"]
+STRAIN_COUNTS_PER_VOLT = 10_000_000.0
+
+@dataclass
+class StrainState:
+    time_ms:        float = 0.0
+    valid:          bool  = False
+    last_update_ms: int   = 0
+    hz:             int   = 0
+    arms:           list  = field(default_factory=lambda: [[0] * n for n in STRAIN_ARM_SIZES])
+    received_any:   bool  = False
+    usb_rx_any:     bool  = False
+    last_rx:        float = field(default_factory=time.monotonic)
+    lines_rx:       int   = 0
+
+
+def parse_strain_line(line: str, state: StrainState) -> bool:
+    """Parse a $STRAIN CSV line into state. Returns True on success."""
+    if not line.startswith("$STRAIN,"):
+        return False
+    try:
+        parts = line[8:].split(",")
+        # <ms>,<valid>,<last_update_ms>,<hz>, then per arm: (ARMn,<n values>)
+        if len(parts) < 4 + sum(1 + n for n in STRAIN_ARM_SIZES):
+            return False
+        state.time_ms        = float(parts[0])
+        state.valid          = bool(int(parts[1]))
+        state.last_update_ms = int(parts[2])
+        state.hz             = int(parts[3])
+        idx = 4
+        for arm, n in enumerate(STRAIN_ARM_SIZES):
+            idx += 1  # skip "ARMn" label
+            state.arms[arm] = [int(v) for v in parts[idx:idx + n]]
+            idx += n
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()

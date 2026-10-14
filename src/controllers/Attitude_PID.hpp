@@ -1,5 +1,6 @@
 #pragma once
 #include "PID.hpp"
+#include "src/math/math.hpp"
 #include "AttitudeController.hpp"
 #include "configs/DroneConfig.hpp"
 
@@ -38,6 +39,7 @@ public:
                 const float current_torque[2], const Unmixer &unmixer,
                 float out_cmds[3]) override;
     void reset_all() override;
+    void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
 
 private:
     PID _roll_att;
@@ -51,6 +53,6 @@ private:
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
 
-    static constexpr float YAW_STICK_DEADBAND = 0.10f;  // normalised stick [-1,1], matches FlightStateMachine::STICK_DEADBAND
+    static constexpr float YAW_STICK_DEADBAND = 0.10f;  // normalised stick [-1,1], matches PosControl::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE  = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
 };

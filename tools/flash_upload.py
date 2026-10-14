@@ -5,8 +5,8 @@ Uploads a raw .bin firmware file to a Cube flight controller via the
 PX4/ArduPilot ChibiOS bootloader protocol over USB/UART.
 
 Usage:
-    python3 tools/flash_upload.py --port /dev/ttyACM0 build/BPRL.bin
-    python3 tools/flash_upload.py build/BPRL.bin       (auto-detects port)
+    python3 tools/flash_upload.py --port /dev/ttyACM0 build/Drone2/BPRL.bin
+    python3 tools/flash_upload.py build/Drone2/BPRL.bin   (auto-detects port)
 
 Requirements:
     pip install pyserial
@@ -382,7 +382,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Upload BPRL firmware to a Cube flight controller.")
     parser.add_argument('firmware',
-                        help="Path to firmware .bin file (e.g. build/BPRL.bin)")
+                        help="Path to firmware .bin file (e.g. build/Drone2/BPRL.bin)")
     parser.add_argument('--port', default=None,
                         help="Serial port (e.g. /dev/ttyACM0). "
                              "Auto-detected if omitted.")

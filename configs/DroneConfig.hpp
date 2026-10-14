@@ -135,18 +135,62 @@ struct AttitudePidPiGains {
 
 // Gains for AltControl (src/controllers/AltControl.hpp).
 struct AltControlGains {
-    PidGains climb_rate;
+    PidGains pos_D, climb_rate;
+    float    hover_thr;   // throttle [0,1] this airframe hovers at — the closed-loop altitude hold's starting point (read OUTP Thr in a steady hover)
 };
 
 // Gains for PosControl (src/controllers/PosControl.hpp).
 struct PosControlGains {
-    PidGains pos_N, pos_E, pos_D, vel_N, vel_E;
+    PidGains pos_N, pos_E, vel_N, vel_E;
+};
+
+// Gains for HeadingControl (src/controllers/HeadingControl.hpp) — POS_HOLD's
+// heading loop, which feeds whichever attitude controller is active.
+struct HeadingGains {
+    float kp;          // 1/s     heading error → yaw-rate trim
+    float stick_rate;  // rad/s   turn rate a full yaw stick commands in POS_HOLD
+    float max_rate;    // rad/s   cap on the heading-error trim, and on the turn rate toward a commanded heading
+    float max_accel;   // rad/s²  how fast the heading target's own rate may change
+    float lag_s;       // s       yaw-rate loop's response lag — measure from a log (delay between TRAJ YawR and ATT R)
 };
 
 // RC channel index assignment (src/coms/Radio.cpp). Both SBUS and CRSF use
 // the same 11-bit channel numbering, so one map covers either protocol.
+//   ctrl_select     3-position switch: which attitude controller flies —
+//                   ControllersConfig::switch_pos[low/mid/high]
+//   poshold_switch  high = POS_HOLD (position loop outside whichever attitude
+//                   controller ctrl_select picked); low/mid = STABILIZE
 struct RcChannelMap {
-    uint8_t thr, roll, pitch, yaw, arm, flight_mode, indi_switch, strain_cal_switch;
+    uint8_t thr, roll, pitch, yaw, arm, ctrl_select, poshold_switch, strain_cal_switch;
+};
+
+// The lab's RC transmitters. Each has its own channel layout, defined once
+// in kRcMaps[] below; a drone picks one with DroneConfig::rc_tx. Moving a
+// drone to the other transmitter is a one-word config change.
+enum class RcTransmitter : uint8_t {
+    TX1 = 0,   // RC controller 1
+    TX2 = 1,   // RC controller 2
+};
+
+constexpr RcChannelMap kRcMaps[2] = {
+    // TX1 — RC controller 1
+    { 0,   // thr
+      1,   // roll
+      2,   // pitch
+      3,   // yaw
+      4,   // arm
+      7,   // ctrl_select
+      6,   // poshold_switch
+      5 }, // strain_cal_switch (momentary)
+    // TX2 — RC controller 2
+    { 0,   // thr
+      3,   // roll
+      1,   // pitch
+      2,   // yaw
+      4,   // arm
+      5,   // ctrl_select
+      6,   // poshold_switch
+      7 }, // strain_cal_switch (momentary)
 };
 
 // Motor mixing geometry (src/controllers/MotorMixer.hpp). Factor arrays are
@@ -189,19 +233,44 @@ struct UnmixerConfig {
 // has_mocap_link are metadata only for now (those paths already self-gate at
 // runtime via g_can_imu.valid/g_mocap.valid staying false absent traffic);
 // has_baro actually gates whether SPIThread bothers polling the barometer.
+//
+// has_encoder_rpm selects the CAN shaft-angle encoder nodes (src/sensors/
+// EncoderRPM.hpp, one Feather M4 + AS5047P per node, CAN 0x70-0x73) as the
+// RPM source for the EKF vibration-notch tracker and the INDI Unmixer, in
+// place of DShot bidirectional telemetry. It only ever takes effect when
+// DShot itself isn't the active motor protocol (MOTOR_PROTOCOL !=
+// MOTOR_PROTO_DSHOT, src/coms/PWM.hpp — a per-board compile-time choice, see
+// configs/<Drone>/config.mk) — DShot RPM always wins when DShot is selected.
+// encoder_motor_map[node] is that node's logical motor index (FR=0, RL=1,
+// FL=2, RR=3 — MotorMixerConfig's logical order, NOT the CAN/NODE_ID
+// numbering) for whichever physical motor that encoder is actually clamped
+// to; -1 means the node isn't wired to a motor on this airframe. Verify
+// against the physical harness before enabling — a wrong mapping feeds one
+// motor's RPM into another motor's notch/torque estimate.
 struct SensorsConfig {
-    bool has_baro;
-    bool has_can_imx5_ins;
-    bool has_mocap_link;
+    bool    has_baro;
+    bool    has_can_imx5_ins;
+    bool    has_mocap_link;
+    bool    has_encoder_rpm;
+    int8_t  encoder_motor_map[4];   // [node0..node3] -> logical motor index, or -1
 };
 
-// Which attitude controllers this drone offers on the RC switch, beyond the
-// always-present default (PID, always list index 0).
+// Attitude controllers FlightStateMachine can fly.
+enum class AttCtrl : uint8_t {
+    PID,        // AttitudePID — always built, the fallback
+    INDI,       // AttitudeINDI
+    INDI_JERK,  // AttitudeINDIJerk (roll_jerk as the INDI inner loop) — see Attitude_INDI_Jerk.hpp
+    PID_JERK,   // AttitudePIDJerk (angle→rate→accel→jerk PID cascade on roll) — see Attitude_PID_Jerk.hpp
+    JINDI,      // AttitudeJINDI (roll_jerk as a convex-combined second path) — see Attitude_JINDI.hpp
+};
+
+// Which controller flies at each position of the ctrl_select switch
+// [low, mid, high]. The same controller may appear more than once. Every
+// controller listed runs every tick (shadow mode, so its log stays live);
+// ones not listed don't run at all. The poshold_switch then flies the
+// selected controller either directly (STABILIZE) or under POS_HOLD.
 struct ControllersConfig {
-    bool indi_enabled;
-    bool jerk_enabled;  // AttitudeINDIJerk (roll_jerk as the INDI inner loop) — see Attitude_INDI_Jerk.hpp
-    bool jindi_enabled; // AttitudeJINDI (roll_jerk as a convex-combined second path) — see Attitude_JINDI.hpp
-    bool pid_jerk_enabled; // AttitudePIDJerk (angle→rate→accel→jerk PID cascade on roll) — see Attitude_PID_Jerk.hpp
+    AttCtrl switch_pos[3];
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
@@ -209,7 +278,9 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, indij, jindi, jpid;
+    bool att, lin, rcin, outp, rpms, strt, imu1, imu2, imu3, indi, baro, ctun, mocp, traj, mavl;
+    bool strn;                // strain gauge array — gates all four of STN1..STN4 together
+    bool indij, jindi, jpid;  // jerk-controller diagnostics (INDJ / JIND / JPID)
 };
 
 struct LoggingConfig {
@@ -225,7 +296,8 @@ struct DroneConfig {
     AttitudePidPiGains pid_pi;
     AltControlGains   alt;
     PosControlGains   pos;
-    RcChannelMap      rc_map;
+    HeadingGains      heading;
+    RcTransmitter     rc_tx;        // which transmitter layout in kRcMaps[] this drone flies with
     MotorMixerConfig  mixer;
     UnmixerConfig     unmixer;
     SensorsConfig     sensors;

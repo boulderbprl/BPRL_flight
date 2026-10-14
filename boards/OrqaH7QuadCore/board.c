@@ -35,12 +35,12 @@ void boardInit(void)
     palSetPad(GPIOE, 11U);
     palSetPadMode(GPIOE, 11U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_HIGHEST);
 
-    /* ── USART3 — MAVLink/telemetry (PD8=TX, PD9=RX) → AF7 ───────────────
-     * Matches the Cube boards' TELEM2 usage (src/coms/MAVLink.cpp is
-     * unconditionally SD3 on every board) — free again now that RC input
-     * uses USART6 instead (below).                                        */
-    palSetPadMode(GPIOD, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
-    palSetPadMode(GPIOD, 9U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
+    /* ── UART7 — MAVLink/telemetry radio (PE8=TX7, PE7=RX7) → AF7 ────────
+     * The TX7/RX7 pads (ArduPilot's hwdef labels this port GPS) — where the
+     * mocap telemetry radio is wired on this board; see BPRL_MAVLINK_SD in
+     * src/coms/MAVLink.hpp. The T3/R3 pads (USART3, PD8/PD9) are unused.   */
+    palSetPadMode(GPIOE, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOE, 7U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
 
     /* ── USART6 — RC input, CRSF, full-duplex (PC6=TX6, PC7=RX6) → AF7 ───
      * Standard two-wire UART, no HDSEL needed — unlike the T3 pad this

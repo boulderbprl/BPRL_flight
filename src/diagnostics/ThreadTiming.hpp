@@ -57,7 +57,8 @@ struct ThreadTimingStats {
     uint64_t       exec_sum_us;   // divide by sample_count for the running average
     uint32_t       sample_count;
     uint32_t       miss_count;    // ticks where exec_us > period_us
-    uint32_t       tick_start_us; // scratch, set by TICK_BEGIN
+    systime_t      tick_start;    // scratch, set by TICK_BEGIN (raw ticks, not
+                                   // pre-converted to us — see timing_tick_end)
 };
 
 extern ThreadTimingStats g_timing_stats[TIMING_MAX_THREADS];

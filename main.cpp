@@ -16,6 +16,7 @@
  *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
  *   src/sensors/StrainRate.*  Strain rate sensor, CAN/I2C switchable via STRAIN_RATE_INTERFACE.
+ *   src/sensors/EncoderRPM.*  Shaft-angle encoder RPM nodes, CAN 0x70-0x73 (Feather M4 + AS5047P).
  *   src/coms/PWM.*, DShot.* Motor output — bidirectional DShot 600 by default (MOTOR_PROTOCOL in PWM.hpp).
  *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
  *   src/controllers/       PID, AttitudeController, MotorMixer.
@@ -29,8 +30,19 @@
  *   1. Write: void my_poll(void *ctx)
  *   2. Add: bprl_i2c_register(MY_ADDR, my_poll, nullptr);  below.
  *
- * ── Switching motor protocol to DShot ───────────────────────────────────────
- *   Replace the body of motor_output_write() in src/coms/PWM.cpp only.
+ * ── Switching motor protocol ─────────────────────────────────────────────────
+ *   Set MOTOR_PROTOCOL in src/coms/PWM.hpp (or -DMOTOR_PROTOCOL=... in a
+ *   drone's config.mk, see configs/Drone2/config.mk for the pattern):
+ *     MOTOR_PROTO_DSHOT (default) / MOTOR_PROTO_PWM — Cube AUX2-5 or Orqa
+ *       MOT1-4, driven directly by FMU timers (src/coms/DShot.*, PWM.cpp).
+ *     MOTOR_PROTO_IOMCU — Cube carrier boards' MAIN 1-4, driven by the
+ *       carrier board's separate IO co-processor over UART instead of FMU
+ *       timers (src/coms/IOMCU.hpp) — for boards where AUX is unreliable.
+ *       Uses USART6 (PC6/PC7) — do not also set RADIO_PROTOCOL=SBUS on a
+ *       board using this; SBUS wants the same USART6/PC7 pin pair (see
+ *       "Switching radio protocol" below) and the two would conflict. CRSF,
+ *       the actual default on Cube boards, uses USART2/TELEM1 instead and
+ *       does not conflict.
  *
  * ── Switching radio protocol ────────────────────────────────────────────────
  *   Change RADIO_PROTOCOL in src/coms/Radio.hpp (or pass -DRADIO_PROTOCOL=...
@@ -43,6 +55,8 @@
 #include "src/coms/CAN.hpp"
 #include "src/coms/I2C.hpp"
 #include "src/sensors/StrainRate.hpp"
+#include "src/sensors/StrainGauge.hpp"
+#include "src/sensors/EncoderRPM.hpp"
 #include "src/coms/PWM.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/usb_serial.hpp"
@@ -72,11 +86,9 @@ int main(void)
     IWDG1->KR  = 0xCCCCU;  /* start */
     IWDG1->KR  = 0xAAAAU;  /* reload */
 
-    /* Staged LED diagnostic: blink count tells us how far boot got.
-     *   3 fast blinks  = halInit() done, pre-RTOS code running
-     *   +5 slow blinks = chSysInit() + usb_serial_init() succeeded
-     *   Then HeartbeatThread takes over at ~0.5 Hz.
-     */
+    /* Staged LED diagnostic — kept harmless for CubeOrangePlus/future boards,
+     * but neither Cube board has a usable status LED, so it's silent here.
+     * DBG_PRINTF() below (once SDU1 exists) is the real signal now. */
 #define BLINK_TICK  4000000U   /* ~50 ms at 400 MHz */
 #define BLINK_SLOW 32000000U   /* ~400 ms at 400 MHz */
 #define BLINK_GAP    400000U   /* ~5 ms gap */
@@ -112,19 +124,58 @@ int main(void)
      * ══════════════════════════════════════════════════════════════════════ */
     const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
+#if defined(BPRL_BOARD_CUBEBLUE)
+        // 400 Hz — strain gauge array (StrainGauge.hpp). One poll is ~1.9 ms
+        // of bus time (2 x select write + 36-byte read at 400 kHz), so this
+        // is close to the fastest the bus allows; STN1/STN3's logged Hz
+        // shows the rate actually achieved.
+        /* .i2c     = */ TIME_US2I(2500),
+#else
         /* .i2c     = */ TIME_US2I(5000),  // 200 Hz
-        /* .control = */ TIME_US2I(2500),  // 400 Hz — matches ArduPilot default
+#endif
+        /* .control = */ TIME_US2I(CONTROL_PERIOD_US),  // 400 Hz — set in src/threads.hpp, shared with CONTROL_DT_S
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),
         /* .debug   = */ TIME_MS2I(100),
         /* .log     = */ { TIME_MS2I(1000.0f / kDroneConfig.logging.log_rate_hz) },  // from DroneConfig
     };
 
+    // ── IMPORTANT: none of the calls below were ever board-conditional in
+    // git history. The Cube Blue bring-up's "disable everything" (this
+    // whole block was commented out at HEAD, commit 42448c9, before this
+    // bring-up session even started) therefore disabled every peripheral —
+    // including motor_output_init() — for EVERY board, not just
+    // CubeBlueH7. Restored full peripheral init for CubeOrangePlus/Orqa
+    // below, matching the last confirmed-working configuration (commit
+    // 61c453a, confirmed flying on CubeOrangePlus) plus encoder_rpm_init(),
+    // a real feature added since. Cube Blue keeps its own deliberate,
+    // still-in-progress staged config. ──
+#if defined(BPRL_BOARD_CUBEBLUE)
+    // Cube Blue bring-up, stage 3: motor_output_init()/ControlThread
+    // (stage 2) and now i2c_drv_init()/I2CThread (stage 3) all re-enabled.
+    // I2C was a suspect during IMU calibration debugging (disabling it
+    // lined up with tools/calibrate.py's "No response to CAL,set"
+    // failures) but was cleared — disabling it entirely did not fix that
+    // symptom, and the actual cause was a race in calibrate.py's own
+    // background reader thread (fixed there, unrelated to firmware). Not
+    // yet bench-verified running on its own on this board, though —
+    // exercise the strain gauge array (I2C 0x09, StrainGauge.hpp)
+    // before trusting it in flight.
+    motor_output_init();
+    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    i2c_drv_init();        // start I2CD2 at 400 kHz
+    strain_gauge_init();   // register I2C 0x09 strain gauge array node
+    // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
+    encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
+    radio_input_init();    // start USART3 CRSF receiver at 420000 baud
+#else
     motor_output_init();
     can_drv_init();        // start FDCAN1, register IMX5 callbacks
     i2c_drv_init();        // start I2CD2 at 400 kHz
     strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
+    encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
+#endif
     threads_start(kRates);
 
     /* Main thread: low-priority idle, feeds IWDG. */

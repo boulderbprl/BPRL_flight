@@ -176,6 +176,13 @@
 #define STM32_SAI1SEL                       STM32_SAI1SEL_PLL1_Q_CK
 #define STM32_LPTIM1SEL                     STM32_LPTIM1SEL_PCLK1
 #define STM32_CECSEL                        STM32_CECSEL_LSI_CK
+/* Tried deriving USB's 48 MHz from PLL3_Q instead of HSI48 (to match
+ * ArduPilot's CubeOrange config) as a hypothesis for "enumerates but no
+ * data" — reverted: it instead made the board never boot at all (stuck
+ * enumerating as the bootloader, never reaching the app), so something in
+ * that PLL3 retune is wrong/unstable on this silicon. Back to HSI48 for
+ * every board until that's understood; the "enumerates, no data" bug is
+ * still open. */
 #define STM32_USBSEL                        STM32_USBSEL_HSI48_CK
 #define STM32_I2C123SEL                     STM32_I2C123SEL_PCLK1
 #define STM32_RNGSEL                        STM32_RNGSEL_HSI48_CK
@@ -353,10 +360,30 @@
 /*
  * PWM driver system settings.
  */
+// TIM1/TIM4: CubeBlueH7's standard-PWM motor output (src/coms/PWM.cpp,
+// MOTOR_PROTO_PWM) uses ChibiOS's own tested PWMDriver instead of hand-
+// rolled register writes (matching ArduPilot's own AP_HAL_ChibiOS::RCOutput,
+// which does the same via pwmStart()/PWMConfig for every protocol it
+// supports). NOT harmless to enable unconditionally, unlike most other
+// peripherals in this file: DShot.cpp defines its own raw ISR vector
+// handlers for TIM1/TIM4 interrupts, and those are always compiled in
+// regardless of MOTOR_PROTOCOL (DShot.cpp itself isn't protocol-gated,
+// only which of its functions PWM.cpp calls is) — enabling ChibiOS's own
+// PWM driver globally makes it generate its own handlers for the same
+// vectors, producing "multiple definition of VectorXX" link errors on
+// every board, including the DShot ones that never touch PWMD1/PWMD4 at
+// runtime. Gated to CubeBlueH7 specifically (currently the only board
+// whose config.mk sets MOTOR_PROTOCOL=MOTOR_PROTO_PWM) so DShot-protocol
+// boards never link in ChibiOS's PWM driver at all.
+#if defined(BPRL_BOARD_CUBEBLUE)
+#define STM32_PWM_USE_TIM1                  TRUE
+#define STM32_PWM_USE_TIM4                  TRUE
+#else
 #define STM32_PWM_USE_TIM1                  FALSE
+#define STM32_PWM_USE_TIM4                  FALSE
+#endif
 #define STM32_PWM_USE_TIM2                  FALSE
 #define STM32_PWM_USE_TIM3                  FALSE
-#define STM32_PWM_USE_TIM4                  FALSE
 #define STM32_PWM_USE_TIM5                  FALSE
 #define STM32_PWM_USE_TIM8                  FALSE
 #define STM32_PWM_USE_TIM12                 FALSE
@@ -395,15 +422,25 @@
  */
 #define STM32_SERIAL_USE_USART1             FALSE
 #define STM32_SERIAL_USE_USART2             TRUE   /* TELEM1 — CRSF radio (SD2) */
-#define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — future sensor (SD3) */
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_SERIAL_USE_USART3             FALSE  /* T3/R3 pads unused — MAVLink is on UART7 on this board */
+#else
+#define STM32_SERIAL_USE_USART3             TRUE   /* TELEM2 — MAVLink/mocap radio (SD3), see src/coms/MAVLink.hpp */
+#endif
 #define STM32_SERIAL_USE_UART4              FALSE
 #define STM32_SERIAL_USE_UART5              FALSE
 #if defined(BPRL_BOARD_ORQA)
 #define STM32_SERIAL_USE_USART6             TRUE   /* TX6/RX6 — CRSF radio (SD6) */
+#elif defined(BPRL_BOARD_CUBEBLUE)
+#define STM32_SERIAL_USE_USART6             TRUE   /* PC6/PC7 — FMU<->IOMCU bridge (SD6), MOTOR_PROTO_IOMCU only; see src/coms/IOMCU.hpp */
 #else
-#define STM32_SERIAL_USE_USART6             FALSE  /* FMU↔IOMCU bridge; not used by firmware */
+#define STM32_SERIAL_USE_USART6             FALSE  /* FMU<->IOMCU bridge; not used by firmware */
 #endif
+#if defined(BPRL_BOARD_ORQA)
+#define STM32_SERIAL_USE_UART7              TRUE   /* TX7/RX7 — MAVLink/mocap radio (SD7), see src/coms/MAVLink.hpp */
+#else
 #define STM32_SERIAL_USE_UART7              FALSE
+#endif
 #define STM32_SERIAL_USE_UART8              FALSE
 #define STM32_SERIAL_USE_LPUART1            FALSE
 

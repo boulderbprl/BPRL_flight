@@ -518,6 +518,77 @@ void EKF::update_ned_vel(const float vel_ned[3], float R_var)
     _update(3, H, R_diag, innov);
 }
 
+void EKF::reset_yaw(float yaw_rad)
+{
+    if (!_initialized) return;
+
+    float ro, pi, yaw_now;
+    quat_to_euler(_get_quat(), ro, pi, yaw_now);
+
+    // Pure world-frame yaw rotation, pre-multiplied — same construction as
+    // StateManager's _yaw_offset_q: shifts yaw by delta, leaves roll/pitch.
+    const float delta = wrap_pi(yaw_rad - yaw_now);
+    const float c = cosf(delta * 0.5f);
+    const float s = sinf(delta * 0.5f);
+    const Quat  q = quat_norm(quat_mul({ c, 0.0f, 0.0f, s }, _get_quat()));
+    _x[iQ0] = q.w;  _x[iQ1] = q.x;  _x[iQ2] = q.y;  _x[iQ3] = q.z;
+
+    // That rotation is linear in the quaternion states (q' = L*q, L
+    // orthogonal), so carry the covariance along with it: P' = L*P*L^T over
+    // the quaternion rows, then columns. Without this the quaternion/gyro-
+    // bias cross terms would still describe the pre-rotation quaternion.
+    // Body-frame u/v/w and NED X/Y/Z are unaffected by a heading change.
+    for (int j = 0; j < N; ++j) {
+        const float p0 = _P[iQ0][j], p1 = _P[iQ1][j], p2 = _P[iQ2][j], p3 = _P[iQ3][j];
+        _P[iQ0][j] = c*p0 - s*p3;
+        _P[iQ1][j] = c*p1 - s*p2;
+        _P[iQ2][j] = s*p1 + c*p2;
+        _P[iQ3][j] = s*p0 + c*p3;
+    }
+    for (int i = 0; i < N; ++i) {
+        const float p0 = _P[i][iQ0], p1 = _P[i][iQ1], p2 = _P[i][iQ2], p3 = _P[i][iQ3];
+        _P[i][iQ0] = c*p0 - s*p3;
+        _P[i][iQ1] = c*p1 - s*p2;
+        _P[i][iQ2] = s*p1 + c*p2;
+        _P[i][iQ3] = s*p0 + c*p3;
+    }
+}
+
+void EKF::update_yaw(float yaw_rad, float R_var)
+{
+    if (!_initialized) return;
+
+    // h(q) = atan2(a, b) — the same 321 yaw quat_to_euler() returns.
+    const float w = _x[iQ0], x = _x[iQ1], y = _x[iQ2], z = _x[iQ3];
+    const float a   = 2.0f * (w*z + x*y);
+    const float b   = 1.0f - 2.0f * (y*y + z*z);
+    const float den = a*a + b*b;                 // = cos²(pitch)
+    if (den < YAW_MIN_COS2_PITCH) return;
+
+    const float innov = wrap_pi(yaw_rad - atan2f(a, b));
+
+    // dh/dq = (b*da/dq - a*db/dq) / (a² + b²)
+    const float inv = 1.0f / den;
+    float H[1][N] = {};
+    H[0][iQ0] = inv * (b * 2.0f*z);
+    H[0][iQ1] = inv * (b * 2.0f*y);
+    H[0][iQ2] = inv * (b * 2.0f*x + a * 4.0f*y);
+    H[0][iQ3] = inv * (b * 2.0f*w + a * 4.0f*z);
+
+    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // H is not diagonal here, so S = H*P*H^T + R over the quaternion block.
+    float S = R_var;
+    for (int i = iQ0; i <= iQ3; ++i)
+        for (int j = iQ0; j <= iQ3; ++j)
+            S += H[0][i] * _P[i][j] * H[0][j];
+    if (S < 1e-10f || innov * innov > S * YAW_CHI2_GATE * YAW_CHI2_GATE) return;
+
+    const float R_diag[1]    = { R_var };
+    const float innov_arr[1] = { innov };
+    _update(1, H, R_diag, innov_arr);
+    _normalize_quat();
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * Generic measurement update: m ≤ 6 measurements.
  *

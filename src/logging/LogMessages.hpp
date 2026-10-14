@@ -33,19 +33,25 @@ constexpr uint8_t LOG_MSG_LIN  = 0x0AU;  // linear states: position + velocity +
 constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + flight mode + arm state
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
 constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
-constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
-constexpr uint8_t LOG_MSG_JKFT = 0x12U;  // Jerk estimates (z and roll) based on roll rate and four strain channels (WIP)
-constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (ICM-45686,  SPI1, CS=PG1)  (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (ICM-42688,  SPI4, CS=PC15) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (ICM-42688,  SPI4, CS=PC13) (body-frame, post-rotation, pre-EKF)
-constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged; not selectable, see LOG_MSG_INDIJ)
+constexpr uint8_t LOG_MSG_STRT = 0x08U;  // strain RATE sensor (CAN 0x69, 4 arms, in development) — not to be confused with STN1..STN4 (strain gauges)
+constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (SPI1, CS=PG1)  (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-42688 on Drone3/Orqa, ICM-20649 on Drone2/CubeBlue) (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (SPI4, CS=PC15) (board-conditional chip, see IMU1) (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (SPI4, CS=PC13) (board-conditional chip, see IMU1) (body-frame, post-rotation, pre-EKF)
+constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of FlightStateMachine's active controller)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
 constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
-constexpr uint8_t LOG_MSG_PIDJ = 0x13U;  // original single-stage AttitudePIDJerk diagnostics — retired, kept only so old logs still decode (rewritten controller logs LOG_MSG_JPID)
-constexpr uint8_t LOG_MSG_INDIJ = 0x14U; // AttitudeINDIJerk diagnostics — INDI with roll_jerk as the roll inner loop, see Attitude_INDI_Jerk.hpp
-constexpr uint8_t LOG_MSG_JINDI = 0x15U; // AttitudeJINDI diagnostics — roll_jerk as an independent convex-combined path, see Attitude_JINDI.hpp
-constexpr uint8_t LOG_MSG_JPID = 0x16U;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
+constexpr uint8_t LOG_MSG_TRAJ = 0x12U;  // trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command
+constexpr uint8_t LOG_MSG_MAVL = 0x13U;  // MAVLink receive counters + last trajectory command and its result (5 Hz)
+constexpr uint8_t LOG_MSG_STN1 = 0x14U;  // strain GAUGE array (I2C 0x09), ARM1 front right, channels 0-8, + chunk 0 receive rate
+constexpr uint8_t LOG_MSG_STN2 = 0x15U;  // strain gauge array, ARM2 back right,  channels 9-17
+constexpr uint8_t LOG_MSG_STN3 = 0x16U;  // strain gauge array, ARM3 back left,   channels 18-26, + chunk 1 receive rate
+constexpr uint8_t LOG_MSG_STN4 = 0x17U;  // strain gauge array, ARM4 front left,  channels 27-35
+constexpr uint8_t LOG_MSG_JKFT = 0x18U;  // Jerk estimates (z and roll) based on roll rate and four strain-rate channels (WIP)
+constexpr uint8_t LOG_MSG_PIDJ = 0x19U;  // original single-stage AttitudePIDJerk diagnostics — retired, never written (rewritten controller logs LOG_MSG_JPID)
+constexpr uint8_t LOG_MSG_INDIJ = 0x1AU; // AttitudeINDIJerk diagnostics — INDI with roll_jerk as the roll inner loop, see Attitude_INDI_Jerk.hpp
+constexpr uint8_t LOG_MSG_JINDI = 0x1BU; // AttitudeJINDI diagnostics — roll_jerk as an independent convex-combined path, see Attitude_JINDI.hpp
+constexpr uint8_t LOG_MSG_JPID = 0x1CU;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -107,7 +113,7 @@ struct __attribute__((packed)) LogMsgRPMS {
 };
 // Format: "Qiiii"   Body: 8+4×4 = 24 B   Record: 27 B
 
-struct __attribute__((packed)) LogMsgSTRN {
+struct __attribute__((packed)) LogMsgSTRT {
     uint64_t time_us;
     int16_t  s0;    // arm FR strain rate (raw int16 from CAN 0x69)
     int16_t  s1;    // arm RL
@@ -154,7 +160,7 @@ struct __attribute__((packed)) LogMsgINDI {
     float    g1_pitch;     // N·m per rad/s²  live NLMS-adapted G1_hat, pitch (seed: DroneConfig::AttitudeIndiGains::g1_seed_pitch)
 };
 // Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
-// Always populated (while indi_enabled) — AttitudeINDI is pure shadow, never
+// Always populated (while a switch_pos entry names AttCtrl::INDI) — AttitudeINDI is pure shadow, never
 // selectable, running alongside whichever of AttitudePID/AttitudeINDIJerk
 // actually flies (OUTP).
 
@@ -190,7 +196,7 @@ struct __attribute__((packed)) LogMsgINDIJ {
 // Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B
 // Gated by DroneConfig::LoggingConfig::enable.indij, same mechanism as
 // LOG_MSG_INDI's log_en.indi — always populated while AttitudeINDIJerk is in
-// the drone's config (ControllersConfig::jerk_enabled), regardless of
+// the drone's config (a ControllersConfig::switch_pos entry names AttCtrl::INDI_JERK), regardless of
 // whether it's the controller actually driving OUTP (see $TEL's active
 // controller index).
 
@@ -213,7 +219,7 @@ struct __attribute__((packed)) LogMsgJINDI {
 // Format: "Qfffffffffffff"   Body: 8+13×4 = 60 B   Record: 63 B
 // Gated by DroneConfig::LoggingConfig::enable.jindi, same mechanism as
 // LOG_MSG_INDIJ's log_en.indij — always populated while AttitudeJINDI is in
-// the drone's config (ControllersConfig::jindi_enabled), regardless of
+// the drone's config (a ControllersConfig::switch_pos entry names AttCtrl::JINDI), regardless of
 // whether it's the controller actually driving OUTP (see $TEL's active
 // controller index).
 
@@ -233,8 +239,8 @@ struct __attribute__((packed)) LogMsgJPID {
 // Measured roll rate / P_DOT / strain jerk are not repeated here — see
 // ATT.P, ATT.Pdot and JKFT.Pdd.
 // Gated by DroneConfig::LoggingConfig::enable.jpid — always populated while
-// AttitudePIDJerk is in the drone's config (ControllersConfig::
-// pid_jerk_enabled), regardless of whether it's the controller actually
+// AttitudePIDJerk is in the drone's config (a ControllersConfig::switch_pos
+// entry names AttCtrl::PID_JERK), regardless of whether it's the controller actually
 // driving OUTP (see $TEL's active controller index). Zeroed otherwise.
 
 struct __attribute__((packed)) LogMsgBARO {
@@ -259,7 +265,7 @@ struct __attribute__((packed)) LogMsgCTUN {
     float    vel_e_err;   // m/s  inner loop E error
     float    roll_tgt;    // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
     float    pitch_tgt;   // rad  lean angle pos-hold would have sent to the attitude controller (shadow)
-    float    climb_rate_tgt; // m/s  alt-hold climb rate target (positive = descend), D-axis output of NED_update
+    float    climb_rate_tgt; // m/s  alt-hold climb rate target (positive = descend), AltControl::climb_rate_tgt()
     float    climb_rate_err; // m/s  climb rate error, target - measured (state[W])
 };
 // Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B
@@ -276,6 +282,75 @@ struct __attribute__((packed)) LogMsgMOCP {
     uint8_t  valid;  // 1 once mocap link is connected and receiving (g_mocap.valid)
 };
 // Format: "QffffffB"   Body: 8+6×4+1 = 33 B   Record: 36 B
+
+struct __attribute__((packed)) LogMsgTRAJ {
+    uint64_t time_us;
+    uint8_t  state;        // TrajState: 0 idle (POS_HOLD on the sticks), 1 moving to a point / to the circle, 2 holding a point, 3 on the circle
+    float    ref_n;        // m      reference position N the controllers are tracking (0 while idle — see CTUN for the stick targets)
+    float    ref_e;        // m
+    float    ref_d;        // m      includes the pilot's height offset
+    float    yaw_tgt;      // rad    HeadingControl's heading target (live whenever POS_HOLD is flying, trajectory or not)
+    float    yaw_rate_cmd; // rad/s  HeadingControl's output to the attitude controller's yaw-rate loop
+    float    height_off;   // m      throttle-stick offset on the trajectory's D (negative = raised)
+    float    path_speed;   // m/s    speed along the path
+};
+// Format: "QBfffffff"   Body: 8+1+7×4 = 37 B   Record: 40 B
+
+// MAVLinkThread's receive counters (MavlinkDiag, src/coms/MAVLink.hpp) —
+// the same numbers "MAV,diag" prints over USB, for when the vehicle is flying
+// and USB isn't connected. All counts are totals since boot: the rate of a
+// message is the difference between two records divided by the time between
+// them. Logged at about 5 Hz, not every log tick.
+//
+// TODO (once the trajectory-command / radio-link debugging is finished): this
+// is the verbose debugging layout. Cut it down to what stays useful:
+//   - log at 1-2 Hz;
+//   - add the mocap link's received rate: the average
+//     VISION_POSITION_ESTIMATE rate [Hz] since the previous MAVL record
+//     (from the change in vision_pos_rx). It belongs here rather than in
+//     MOCP because MOCP is written at 50 Hz, too fast to measure a ~30 Hz
+//     signal — at 1-2 Hz each record averages over 15-30 messages;
+//   - keep mocap_timeouts, traj_cmd_rx and traj_cmd_rej (plus
+//     last_cmd/last_result if still wanted);
+//   - drop the raw byte/frame/heartbeat/unknown/vision counters.
+struct __attribute__((packed)) LogMsgMAVL {
+    uint64_t time_us;
+    uint32_t bytes_rx;        // bytes read off the MAVLink UART
+    uint32_t frames_ok;       // frames parsed with a good CRC
+    uint32_t frames_bad_crc;
+    uint32_t heartbeat_rx;
+    uint32_t vision_pos_rx;   // VISION_POSITION_ESTIMATE
+    uint32_t vision_speed_rx; // VISION_SPEED_ESTIMATE
+    uint32_t unknown_rx;      // good frames this firmware does not handle
+    uint32_t mocap_timeouts;  // times the mocap link went >300 ms without a position
+    uint32_t traj_cmd_rx;     // trajectory COMMAND_LONGs received (retries of one command count once)
+    uint32_t traj_cmd_rej;    // ... answered with anything other than ACCEPTED
+    uint16_t last_cmd;        // MAVLink id of the latest trajectory command: 31010 origin, 31011 point, 31012 circle, 31013 stop; 0 = none yet
+    uint8_t  last_result;     // its MAV_RESULT: 0 accepted, 1 rejected for now, 2 denied, 4 failed; 255 = not answered yet
+};
+// Format: "QIIIIIIIIIIHB"   Body: 8+10×4+2+1 = 51 B   Record: 54 B
+
+/*
+ * Strain gauge array (src/sensors/StrainGauge.hpp) — 36 raw int16 channels
+ * (0.1 uV/count), one message per arm, 9 channels each. The sensor delivers
+ * the 36 channels as two separate 18-channel I2C chunks (chunk 0 = ARM1+ARM2,
+ * chunk 1 = ARM3+ARM4), so the first message of each chunk (STN1, STN3)
+ * also carries that chunk's measured receive rate.
+ */
+struct __attribute__((packed)) LogMsgSTNA {  // STN2, STN4
+    uint64_t time_us;
+    int16_t  d[9];   // this arm's 9 channels, in channel order
+};
+// Format: "Qhhhhhhhhh"   Body: 8+9×2 = 26 B   Record: 29 B
+
+struct __attribute__((packed)) LogMsgSTNH {  // STN1, STN3
+    uint64_t time_us;
+    int16_t  d[9];   // this arm's 9 channels, in channel order
+    uint16_t hz;     // chunks actually received from the sensor per second, averaged
+                     // over the last ~1 s — the I2C data rate, NOT the logging rate
+    uint8_t  valid;  // 1 once at least one full 36-channel frame has been read
+};
+// Format: "QhhhhhhhhhHB"   Body: 8+9×2+2+1 = 29 B   Record: 32 B
 
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
@@ -329,11 +404,11 @@ constexpr LogDef kLogDefs[] = {
       "TimeUS,RPM0,RPM1,RPM2,RPM3",
       sizeof(LogMsgRPMS) },
 
-    { LOG_MSG_STRN,
-      "STRN",
+    { LOG_MSG_STRT,
+      "STRT",
       "QhhhhB",
       "TimeUS,S0,S1,S2,S3,Valid",
-      sizeof(LogMsgSTRN) },
+      sizeof(LogMsgSTRT) },
 
     { LOG_MSG_JKFT,
       "JKFT",
@@ -389,6 +464,42 @@ constexpr LogDef kLogDefs[] = {
       "QffffffB",
       "TimeUS,X,Y,Z,VX,VY,VZ,Valid",
       sizeof(LogMsgMOCP) },
+
+    { LOG_MSG_TRAJ,
+      "TRAJ",
+      "QBfffffff",
+      "TimeUS,State,RefN,RefE,RefD,YawT,YawR,HOff,Spd",
+      sizeof(LogMsgTRAJ) },
+
+    { LOG_MSG_MAVL,
+      "MAVL",
+      "QIIIIIIIIIIHB",
+      "TimeUS,Bytes,Ok,Bad,HB,VisP,VisV,Unk,MocTO,TrjRx,TrjRej,Cmd,Res",
+      sizeof(LogMsgMAVL) },
+
+    { LOG_MSG_STN1,
+      "STN1",
+      "QhhhhhhhhhHB",
+      "TimeUS,D0,D1,D2,D3,D4,D5,D6,D7,D8,Hz,Valid",
+      sizeof(LogMsgSTNH) },
+
+    { LOG_MSG_STN2,
+      "STN2",
+      "Qhhhhhhhhh",
+      "TimeUS,D9,D10,D11,D12,D13,D14,D15,D16,D17",
+      sizeof(LogMsgSTNA) },
+
+    { LOG_MSG_STN3,
+      "STN3",
+      "QhhhhhhhhhHB",
+      "TimeUS,D18,D19,D20,D21,D22,D23,D24,D25,D26,Hz,Valid",
+      sizeof(LogMsgSTNH) },
+
+    { LOG_MSG_STN4,
+      "STN4",
+      "Qhhhhhhhhh",
+      "TimeUS,D27,D28,D29,D30,D31,D32,D33,D34,D35",
+      sizeof(LogMsgSTNA) },
 
     { LOG_MSG_PIDJ,
       "PIDJ",

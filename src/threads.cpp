@@ -9,6 +9,7 @@
  * exported via threads.hpp for use by Coms drivers (e.g. CAN.cpp).
  */
 
+#include "src/uptime.hpp"
 #include "src/threads.hpp"
 #include "src/FlightState.hpp"
 #include "src/coms/SPI.hpp"
@@ -19,6 +20,7 @@
 #endif
 #include "src/coms/PWM.hpp"
 #include "src/coms/DShot.hpp"
+#include "src/coms/IOMCU.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/MotorMixer.hpp"
@@ -48,10 +50,11 @@ float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
-float   g_indij_diag[12]     = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — AttitudeINDIJerk shadow diagnostics, populated whenever jerk_enabled
+float   g_indij_diag[12]     = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — AttitudeINDIJerk shadow diagnostics, populated whenever a switch_pos entry names AttCtrl::INDI_JERK
 float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever pid_jerk_enabled
 float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever jindi_enabled
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
+float   g_traj_diag[8]       = {};   // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed]
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
@@ -68,8 +71,14 @@ StrainRateRaw g_strain_rate = {};
 float         g_strain_bias[4] = {};  // per-channel zero-offset, live-calibrated by ControlThread — see JerkFit.hpp
 bool          g_strain_cal_active = false;  // raw channel-6 cal switch state this tick — see radio_strain_cal()
 
+MUTEX_DECL(encoderRpm_mtx);
+EncoderRPMRaw g_encoder_rpm[ENCODER_RPM_NUM_NODES] = {};
+
 MUTEX_DECL(mocap_mtx);
 MocapRaw  g_mocap   = {};
+
+MUTEX_DECL(traj_mtx);
+TrajMailbox g_traj_mailbox = {};
 
 MUTEX_DECL(baro_mtx);
 BaroRaw   g_baro    = {};
@@ -108,7 +117,7 @@ static StateManager state_mgr;
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
 static THD_WORKING_AREA(waCAN,      2048);
-static THD_WORKING_AREA(waI2C,      1024);
+static THD_WORKING_AREA(waI2C,      1024);  // CubeBlueH7: I2C2 hosts the strain-gauge array sensor
 static THD_WORKING_AREA(waControl,  16384);  // doubled from 8192: merged thread now carries the full EKF update
                                               // (former waStateEst was 6144) plus three shadow attitude controllers
                                               // (PID/INDI/PID+PI) in one call chain, with CH_DBG_ENABLE_STACK_CHECK
@@ -118,6 +127,9 @@ static THD_WORKING_AREA(waHeartbeat, 1024);
 static THD_WORKING_AREA(waLog,      8192);  // 8 KB: FatFS + ring-read stack
 static THD_WORKING_AREA(waUSBCmd,   4096);  // 4 KB: FatFS log access + line parser
 static THD_WORKING_AREA(waMAVLink,  2048);  // MAVLink parser + heartbeat sender
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+static THD_WORKING_AREA(waIOMCU,    2048);  // FMU<->IOMCU UART transactions (MAIN 1-4)
+#endif
 #ifdef BPRL_DEBUG
 static THD_WORKING_AREA(waDebug,    2048);
 #endif
@@ -145,6 +157,58 @@ static int   s_primary_lane = 0;
  * SPIThread — 1 kHz  NORMALPRIO+30
  * Reads raw accel+gyro from all three on-board IMUs.
  * ══════════════════════════════════════════════════════════════════════════ */
+/* ── IMU read health (SPIThread only) ─────────────────────────────────────
+ * Returns true if this read produced a sample worth publishing. Once an IMU
+ * that has been valid produces IMU_FAIL_LIMIT consecutive bad reads, its
+ * g_imu[idx].valid is cleared so StateManager drops that lane from the blend
+ * and from primary selection, and it stays dropped until reboot — a lane
+ * that stopped predicting has a stale state, and letting it rejoin mid-flight
+ * would step the estimate.
+ *
+ * A read is bad if the driver reports failure, or if all six values are
+ * identical to the previous read. The second test is what catches a dead
+ * chip on most boards: only ICM45686::read() can actually return false once
+ * initialised (empty FIFO / bad packet header) — the other drivers return
+ * true unconditionally, and a chip that has stopped responding just reads
+ * back a constant bus value. A live sensor's noise makes 100 identical
+ * six-axis samples in a row implausible. */
+static constexpr uint32_t IMU_FAIL_LIMIT = 100;   // consecutive bad reads (~0.1 s at SPIThread's 1 kHz)
+
+static bool imu_sample_good(int idx, bool read_ok, const float a[3], const float g[3])
+{
+    static float    s_last[3][6];
+    static bool     s_have_last[3];
+    static uint32_t s_fail_count[3];
+    static bool     s_failed[3];
+
+    if (s_failed[idx]) return false;
+
+    bool good = read_ok;
+    if (read_ok) {
+        const float cur[6] = { a[0], a[1], a[2], g[0], g[1], g[2] };
+        if (s_have_last[idx] && memcmp(cur, s_last[idx], sizeof(cur)) == 0) good = false;
+        memcpy(s_last[idx], cur, sizeof(cur));
+        s_have_last[idx] = true;
+    }
+
+    if (good) {
+        s_fail_count[idx] = 0;
+        return true;
+    }
+
+    if (++s_fail_count[idx] >= IMU_FAIL_LIMIT) {
+        chMtxLock(&imu_mtx);
+        const bool was_valid = g_imu[idx].valid;
+        g_imu[idx].valid = false;
+        chMtxUnlock(&imu_mtx);
+        // Only latch an IMU that had been working; one that never came up
+        // (absent, or failed init) just keeps counting and stays invalid.
+        if (was_valid) s_failed[idx] = true;
+        s_fail_count[idx] = 0;
+    }
+    return false;
+}
+
 static THD_FUNCTION(SPIThread, arg)
 {
     chRegSetThreadName("spi");
@@ -164,55 +228,85 @@ static THD_FUNCTION(SPIThread, arg)
         float a[3], g[3];
 
 #if defined(BPRL_BOARD_CUBEBLUE)
-        // ── CubeBlueH7 axis rotations: UNVERIFIED PLACEHOLDER ────────────────
-        // The CubeOrangePlus rotations below (ROLL_180_YAW_135 etc.) were
-        // derived for that board's specific ICM-45686 mounting and do NOT
-        // apply here — CubeBlueH7 carries genuinely different, differently
-        // -mounted chips (2x ICM-20948 + 1x ICM-20602). Their actual mounting
-        // rotation relative to vehicle body axes is not derivable from source
-        // and has not been bench-verified, so this passes each chip's native
-        // axes straight through as NED z-down (X-fwd, Y-right, Z-down) with
-        // NO rotation applied. If that assumption is wrong, roll/pitch/yaw
-        // sign or axis mapping will be wrong on this board's lanes — verify
-        // on the bench before flight (e.g. tilt nose-down, confirm pitch
-        // angle sign in $TEL/$IMU telemetry; see tools/telemetry.py) and
-        // replace this block with the correct ROTATION_* mapping once known.
-        if (imu1.read(a, g)) {
+        // ── CubeBlueH7 axis rotations: bench-derived, NOT the CubeOrange
+        // hwdef.inc transcription this block used to carry. That transcription
+        // assumed this board's IMUs are mounted the same way as CubeOrange's —
+        // wrong: bench testing (hand rotation about each body axis, watching
+        // $TEL/$IMU P/Q/R) showed a consistent roll<->pitch axis swap plus a
+        // yaw sign flip on all three IMUs, meaning this board's physical
+        // mounting genuinely differs from CubeOrange's, not just a sign typo.
+        //
+        // Derivation: for each IMU, the previous (wrong) rotation matrix M
+        // is known and invertible (pure signed-permutation), so raw = M^T *
+        // observed_wrong_output recovers which native axis actually responded
+        // to each physical roll/pitch/yaw input. Solving for the new rotation
+        // that maps that native axis to the correct P/Q/R sign lands exactly
+        // on three of ArduPilot's own named rotations (cross-checked against
+        // AP_Math/vector3.cpp Vector3::rotate(), not just pattern-matched):
+        //   imu1 (PC2,  ICM-20649): ROTATION_ROLL_180  y=-y,     z=-z
+        //   imu2 (PE4,  ICM-20948): ROTATION_YAW_90    x=-y_old, y=x_old
+        //   imu3 (PC13, ICM-20602): ROTATION_YAW_180   x=-x,     y=-y
+        // Bench-confirm again after this change (tilt nose-down -> +pitch,
+        // right-wing-down -> +roll, nose-right -> +yaw; tools/telemetry.py)
+        // before trusting it for flight — this fixes the specific symptom
+        // reported, not a from-scratch re-derivation of the physical mount.
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
+            // ROTATION_ROLL_180 → NED z-down: [x, -y, -z]
+            const float ra[3] = { a[0], -a[1], -a[2] };
+            const float rg[3] = { g[0], -g[1], -g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[0].accel[k] = a[k] - g_cal.accel_bias[0][k];
-                g_imu[0].gyro[k]  = g[k] - g_cal.gyro_bias[0][k];
+                g_imu[0].accel[k] = ra[k] - g_cal.accel_bias[0][k];
+                g_imu[0].gyro[k]  = rg[k] - g_cal.gyro_bias[0][k];
             }
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
+            // ROTATION_YAW_90 → NED z-down: [-y, x, z]
+            const float ra[3] = { -a[1], a[0], a[2] };
+            const float rg[3] = { -g[1], g[0], g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[1].accel[k] = a[k] - g_cal.accel_bias[1][k];
-                g_imu[1].gyro[k]  = g[k] - g_cal.gyro_bias[1][k];
+                g_imu[1].accel[k] = ra[k] - g_cal.accel_bias[1][k];
+                g_imu[1].gyro[k]  = rg[k] - g_cal.gyro_bias[1][k];
             }
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu3.read(a, g)) {
+        if (imu_sample_good(2, imu3.read(a, g), a, g)) {
+            // ROTATION_YAW_180 → NED z-down: [-x, -y, z]
+            const float ra[3] = { -a[0], -a[1], a[2] };
+            const float rg[3] = { -g[0], -g[1], g[2] };
             chMtxLock(&imu_mtx);
             for (int k = 0; k < 3; k++) {
-                g_imu[2].accel[k] = a[k] - g_cal.accel_bias[2][k];
-                g_imu[2].gyro[k]  = g[k] - g_cal.gyro_bias[2][k];
+                g_imu[2].accel[k] = ra[k] - g_cal.accel_bias[2][k];
+                g_imu[2].gyro[k]  = rg[k] - g_cal.gyro_bias[2][k];
             }
             g_imu[2].valid = true;
             chMtxUnlock(&imu_mtx);
         }
 #elif defined(BPRL_BOARD_ORQA)
         // Only two physical IMUs on this board — g_imu[2] is never written
-        // and stays valid=false; StateManager already treats an invalid
-        // lane as absent. Rotations are transcribed from ArduPilot's
+        // and stays valid=false, so StateManager never activates lane 2
+        // (see _lane_active). Rotations are transcribed from ArduPilot's
         // OrqaH7QuadCore hwdef.dat (IMU Invensensev3 SPI:imu1
-        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and are
-        // bench-confirmed as of 2026-08-10 (tilt nose-down, correct pitch
-        // sign in $TEL/$IMU telemetry) — not yet flight-tested.
-        if (imu1.read(a, g)) {
+        // ROTATION_ROLL_180_YAW_270 / SPI:imu2 ROTATION_PITCH_180) and
+        // verified byte-for-byte 2026-08-12 against ArduPilot's own
+        // AP_Math/vector3.cpp (ROTATION_ROLL_180_YAW_270:
+        // "x=-y; y=-old_x; z=-z" — ROTATION_PITCH_180: "x=-x; z=-z") —
+        // both exactly match the signs below. A 2026-08-11 attempt to
+        // "fix" a large accel-Z calibration residual by flipping just the
+        // Z sign here was wrong: it turned a valid rotation (det=+1) into
+        // a mirror transform (det=-1), which isn't physically realizable
+        // by any real chip mounting, and produced exactly the symptom
+        // that should have been the giveaway — roll/yaw estimates
+        // mirrored ~180° once armed, gyro Z backwards, while X/Y stayed
+        // fine (unchanged by that edit). Reverted. The accel-Z bias
+        // question that prompted it is still open and needs a different
+        // explanation — not this rotation matrix, which is now confirmed
+        // correct against upstream ArduPilot source.
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
             // ROTATION_ROLL_180_YAW_270 → NED z-down: [-y, -x, -z]
             const float ra[3] = { -a[1], -a[0], -a[2] };
             const float rg[3] = { -g[1], -g[0], -g[2] };
@@ -224,7 +318,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
             // ROTATION_PITCH_180 → NED z-down: [-x, y, -z]
             const float ra[3] = { -a[0], a[1], -a[2] };
             const float rg[3] = { -g[0], g[1], -g[2] };
@@ -237,7 +331,7 @@ static THD_FUNCTION(SPIThread, arg)
             chMtxUnlock(&imu_mtx);
         }
 #else
-        if (imu1.read(a, g)) {
+        if (imu_sample_good(0, imu1.read(a, g), a, g)) {
             // ROTATION_ROLL_180_YAW_135 → NED z-down: [(y-x)/√2, (y+x)/√2, -z]
             static constexpr float RS = 0.70710678f;
             const float ra[3] = { RS*(a[1]-a[0]), RS*(a[1]+a[0]), -a[2] };
@@ -250,7 +344,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[0].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu2.read(a, g)) {
+        if (imu_sample_good(1, imu2.read(a, g), a, g)) {
             // Instance 0 (CS=PC15): ROTATION_YAW_90 → NED z-down: [-y,+x,+z]
             const float ra[3] = {-a[1], +a[0], +a[2]};
             const float rg[3] = {-g[1], +g[0], +g[2]};
@@ -262,7 +356,7 @@ static THD_FUNCTION(SPIThread, arg)
             g_imu[1].valid = true;
             chMtxUnlock(&imu_mtx);
         }
-        if (imu3.read(a, g)) {
+        if (imu_sample_good(2, imu3.read(a, g), a, g)) {
             // Instance 1 (CS=PC13): ROTATION_PITCH_180_YAW_90 → NED z-down: [-y,-x,-z]
             const float ra[3] = {-a[1], -a[0], -a[2]};
             const float rg[3] = {-g[1], -g[0], -g[2]};
@@ -330,7 +424,8 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 200 Hz  NORMALPRIO+20
+ * I2CThread — 200 Hz, NORMALPRIO+20 (CubeBlueH7: 400 Hz, NORMALPRIO+24 —
+ * above ControlThread, see threads_start() and main.cpp)
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
@@ -386,7 +481,7 @@ static THD_FUNCTION(ControlThread, arg)
     const int tid = TIMING_REGISTER("ctrl", period);
 
     systime_t next = chVTGetSystemTime();
-    uint32_t last_tick_us = TIME_I2US(chVTGetSystemTimeX());
+    uint32_t last_tick_us = bprl_micros();
     while (true) {
         TIMING_TICK_BEGIN(tid);
 
@@ -399,7 +494,7 @@ static THD_FUNCTION(ControlThread, arg)
         // dt — keeps EKF integration correct under scheduler jitter (same
         // approach PID::update() already uses). Clamped to +/-2x nominal so
         // a single missed-deadline outlier can't corrupt the integration.
-        const uint32_t now_us = TIME_I2US(chVTGetSystemTimeX());
+        const uint32_t now_us = bprl_micros();
         float dt = static_cast<float>(now_us - last_tick_us) * 1.0e-6f;
         last_tick_us = now_us;
         dt = constrain_float(dt, dt_nominal * 0.5f, dt_nominal * 2.0f);
@@ -452,8 +547,15 @@ static THD_FUNCTION(ControlThread, arg)
         // logical [FR,RL,FL,RR] via motor_map — Unmixer's geometry, $TEL,
         // and the SD log all assume that logical order, matching
         // MotorMixer's output convention (see MotorMixerConfig).
-        ESCTelemetry sm_telem[4];
+        // Zero-initialized: on a MOTOR_PROTO_PWM board (no DShot driver
+        // compiled in — see DShot.cpp's own header comment) this stays at
+        // its zeroed/invalid state, which is the physically correct
+        // answer — plain PWM ESCs have no RPM telemetry feedback path at
+        // all, unlike bidirectional DShot.
+        ESCTelemetry sm_telem[4] = {};
+#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
         dshot_get_telemetry(sm_telem);
+#endif
         uint32_t rpm_lane[4];
         for (int lane = 0; lane < 4; lane++) {
             const uint32_t raw = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
@@ -461,12 +563,39 @@ static THD_FUNCTION(ControlThread, arg)
         }
         uint32_t rpm[4];
         for (int i = 0; i < 4; i++) rpm[i] = rpm_lane[kDroneConfig.mixer.motor_map[i]];
+
+#if MOTOR_PROTOCOL != MOTOR_PROTO_DSHOT
+        // CAN shaft-encoder RPM substitutes for DShot telemetry on airframes
+        // that don't have DShot's own RPM feedback (see SensorsConfig's
+        // has_encoder_rpm comment in DroneConfig.hpp). DShot RPM always wins
+        // when DShot is actually the active protocol — this whole block
+        // compiles out in that case.
+        if (kDroneConfig.sensors.has_encoder_rpm) {
+            EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
+            chMtxLock(&encoderRpm_mtx);
+            memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
+            chMtxUnlock(&encoderRpm_mtx);
+            for (int node = 0; node < ENCODER_RPM_NUM_NODES; node++) {
+                const int8_t motor = kDroneConfig.sensors.encoder_motor_map[node];
+                if (motor < 0 || !enc_snap[node].valid) continue;
+                rpm[motor] = (uint32_t)fabsf(enc_snap[node].rpm);
+            }
+        }
+#endif
+
         chMtxLock(&esc_mtx);
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
         chMtxUnlock(&esc_mtx);
 
         // Run all EKF lanes and derive outputs.
         state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
+
+        // If the estimator just snapped yaw onto the mocap frame, move the
+        // attitude controllers' held heading by the same amount so the
+        // vehicle doesn't physically rotate to chase the old number.
+        const float yaw_reset_rad = state_mgr.consume_yaw_reset();
+        if (yaw_reset_rad != 0.0f)
+            flight_sm.yaw_frame_reset(yaw_reset_rad);
 #ifdef BPRL_DEBUG
         if (can_snap.has_new_quat)  s_can_quat_cnt++;
         if (can_snap.has_new_rates) s_can_rate_cnt++;
@@ -606,7 +735,29 @@ static THD_FUNCTION(ControlThread, arg)
 
         float torque_cmds[3];
         float thrust;
-        flight_sm.update(ctrl_full, euler, input, armed, rpm, roll_jerk, torque_cmds, thrust);
+        flight_sm.update(ctrl_full, euler, input, armed, mocap_snap.valid, rpm, roll_jerk, torque_cmds, thrust);
+
+        // Trajectory command from MAVLink, if one is waiting. Handled after
+        // update() so it is judged against this tick's mode and phase; a
+        // started trajectory takes effect on the next tick.
+        {
+            TrajCommand traj_cmd;
+            bool        have_traj_cmd = false;
+            chMtxLock(&traj_mtx);
+            if (g_traj_mailbox.cmd_pending) {
+                traj_cmd      = g_traj_mailbox.cmd;
+                have_traj_cmd = true;
+            }
+            chMtxUnlock(&traj_mtx);
+            if (have_traj_cmd) {
+                const TrajResult traj_result = flight_sm.traj_command(traj_cmd, ctrl_full, euler);
+                chMtxLock(&traj_mtx);
+                g_traj_mailbox.cmd_pending    = false;
+                g_traj_mailbox.result         = traj_result;
+                g_traj_mailbox.result_pending = true;
+                chMtxUnlock(&traj_mtx);
+            }
+        }
 
         float indi_diag[10];
         flight_sm.get_indi_diag(indi_diag);
@@ -622,6 +773,9 @@ static THD_FUNCTION(ControlThread, arg)
 
         float pidj_diag[9];
         flight_sm.get_pidj_diag(pidj_diag);
+
+        float traj_diag[8];
+        flight_sm.get_traj_diag(traj_diag);
 
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
@@ -641,6 +795,7 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_indij_diag, indij_diag, sizeof(g_indij_diag));
         memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
         memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
+        memcpy(g_traj_diag, traj_diag, sizeof(g_traj_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
         g_active_controller = flight_sm.active_index();
@@ -824,8 +979,10 @@ static void usb_log_erase(void)
     chMtxUnlock(&s_usb_write_mtx);
 }
 
+#ifdef BPRL_DEBUG
 /* Staging buffer for CAL,set commands; written to flash by CAL,commit. */
 static CalibData s_cal_stage = {};
+#endif
 
 static void usb_cmd_dispatch(const char *line)
 {
@@ -915,6 +1072,7 @@ static void usb_cmd_dispatch(const char *line)
             chMtxUnlock(&s_usb_write_mtx);
         }
     } else if (strncmp(line, "CAL,", 4) == 0) {
+#ifdef BPRL_DEBUG
         const char *rest = line + 4;
         if (strncmp(rest, "set,", 4) == 0) {
             // CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az>
@@ -980,7 +1138,19 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+#else
+        // No calibration write path in a non-debug build — cal_save()/
+        // cal_clear() (and the interrupt-disabling critical sections they
+        // use) aren't even compiled in (see CalFlash.hpp/.cpp), so there's
+        // nothing here to call regardless of which CAL,* subcommand this
+        // is. A clear error beats silently doing nothing if someone points
+        // calibrate.py at a flight build by mistake.
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "CAL,ERR,debug_build_required\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strcmp(line, "DSHOT,diag") == 0) {
+#if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
         DShotDiag d = {};
         dshot_get_diag(&d);
         chMtxLock(&s_usb_write_mtx);
@@ -1007,6 +1177,130 @@ static void usb_cmd_dispatch(const char *line)
             (unsigned)d.edges[3][0], (unsigned)d.edges[3][1],
             (unsigned)d.edges[3][2], (unsigned)d.edges[3][3],
             (unsigned)d.edges[3][4]);
+        chMtxUnlock(&s_usb_write_mtx);
+#else
+        // No DShot driver compiled in on a MOTOR_PROTO_PWM board — DShot.cpp
+        // compiles to nothing in that case (see its own header comment).
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "DSHOT,ERR,not_dshot_build\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
+#if MOTOR_PROTOCOL == MOTOR_PROTO_PWM
+    } else if (strcmp(line, "PWM,status") == 0) {
+        // Live register dump for TIM1/TIM4 (Cube-board standard PWM
+        // driver, src/coms/PWM.cpp) — read twice with a short delay so
+        // CNT's movement between the two reads proves the timer is
+        // actually clocked and counting, not just sitting in a
+        // configured-but-frozen state. Distinguishes "firmware never
+        // enabled the timer/channel" (CEN=0 or CCxE=0 here) from
+        // "registers look correct but no signal reaches the connector"
+        // (a wiring/hardware question, not a firmware one).
+        uint32_t t1_cr1 = TIM1->CR1, t1_ccer = TIM1->CCER, t1_bdtr = TIM1->BDTR;
+        uint32_t t1_ccr1 = TIM1->CCR1, t1_ccr2 = TIM1->CCR2, t1_ccr3 = TIM1->CCR3;
+        uint32_t t1_sr = TIM1->SR;
+        uint32_t t1_cnt_a = TIM1->CNT;
+        uint32_t t4_cr1 = TIM4->CR1, t4_ccer = TIM4->CCER;
+        uint32_t t4_ccr2 = TIM4->CCR2, t4_sr = TIM4->SR;
+        uint32_t t4_cnt_a = TIM4->CNT;
+        chThdSleepMilliseconds(2);
+        uint32_t t1_cnt_b = TIM1->CNT;
+        uint32_t t4_cnt_b = TIM4->CNT;
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "PWM,TIM1,CR1=0x%03x,CCER=0x%03x,BDTR=0x%04x,SR=0x%03x,"
+            "CCR1=%u,CCR2=%u,CCR3=%u,CNT=%u->%u\r\n",
+            (unsigned)t1_cr1, (unsigned)t1_ccer, (unsigned)t1_bdtr, (unsigned)t1_sr,
+            (unsigned)t1_ccr1, (unsigned)t1_ccr2, (unsigned)t1_ccr3,
+            (unsigned)t1_cnt_a, (unsigned)t1_cnt_b);
+        chprintf((BaseSequentialStream *)&SDU1,
+            "PWM,TIM4,CR1=0x%03x,CCER=0x%03x,SR=0x%03x,CCR2=%u,CNT=%u->%u\r\n",
+            (unsigned)t4_cr1, (unsigned)t4_ccer, (unsigned)t4_sr,
+            (unsigned)t4_ccr2, (unsigned)t4_cnt_a, (unsigned)t4_cnt_b);
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+    } else if (strcmp(line, "IOMCU,status") == 0) {
+        // PAGE_CONFIG read — the critical first bring-up check for the
+        // FMU<->IOMCU UART (src/coms/IOMCU.hpp): if this doesn't come back
+        // as protocol_version=4/protocol_version2=10, the UART/pin/CRC
+        // plumbing itself is wrong and nothing past this point (channel
+        // mask, safety-off, PWM writes) will work either — don't waste
+        // time on those until this passes.
+        uint16_t regs[2] = {};
+        bool ok = iomcu_read_registers(IOMCU_PAGE_CONFIG, 0, 2, regs);
+        chMtxLock(&s_usb_write_mtx);
+        if (ok) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                "IOMCU,OK,protocol_version=%u,protocol_version2=%u\r\n",
+                (unsigned)regs[0], (unsigned)regs[1]);
+        } else {
+            chprintf((BaseSequentialStream *)&SDU1, "IOMCU,ERR,no_response\r\n");
+        }
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
+    } else if (strcmp(line, "HW,status") == 0) {
+        // One-shot hardware connectivity snapshot — every "valid"/"has data"
+        // flag this firmware tracks, in one place, so bench wiring can be
+        // checked without a BPRL_DEBUG build or a scope. Each subsystem is
+        // snapshotted under its own mutex, same pattern as LogThread.
+        IMURaw imu_snap[3];
+        chMtxLock(&imu_mtx);
+        memcpy(imu_snap, g_imu, sizeof(imu_snap));
+        chMtxUnlock(&imu_mtx);
+
+        CANIMURaw can_imu_snap;
+        chMtxLock(&can_imu_mtx);
+        can_imu_snap = g_can_imu;
+        chMtxUnlock(&can_imu_mtx);
+
+        BaroRaw baro_snap;
+        chMtxLock(&baro_mtx);
+        baro_snap = g_baro;
+        chMtxUnlock(&baro_mtx);
+
+        StrainRateRaw strain_snap;
+        chMtxLock(&strainRate_mtx);
+        strain_snap = g_strain_rate;
+        chMtxUnlock(&strainRate_mtx);
+
+        EncoderRPMRaw enc_snap[ENCODER_RPM_NUM_NODES];
+        chMtxLock(&encoderRpm_mtx);
+        memcpy(enc_snap, g_encoder_rpm, sizeof(enc_snap));
+        chMtxUnlock(&encoderRpm_mtx);
+
+        CANDiag can_diag = {};
+        can_get_diag(can_diag);
+
+        const bool sd_ready = logger.is_ready();
+        const bool rc_valid = radio_valid();
+
+        chMtxLock(&s_usb_write_mtx);
+        for (int i = 0; i < 3; i++) {
+            chprintf((BaseSequentialStream *)&SDU1, "HW,IMU%d,%u\r\n", i, (unsigned)imu_snap[i].valid);
+        }
+        // Raw WHOAMI byte alongside IMU0's valid flag — this is how the
+        // primary slot's chip was identified as ICM-20649 (0xE1) rather than
+        // the originally-assumed ICM-20948 (0xEA); kept as a permanent bench
+        // diagnostic since board-to-board IMU population has already varied
+        // once (see src/coms/SPI.hpp). Distinct tag from "HW,IMU0" (the valid
+        // flag printed above) — sharing that tag used to clobber it in any
+        // parser keying rows by tag name (tools/hw_status.py included: it
+        // showed IMU0 as permanently invalid because this line, printed
+        // after the valid-flag loop, overwrote the "1"/"0" it had just
+        // parsed with this line's "whoami=0x.." string instead).
+        chprintf((BaseSequentialStream *)&SDU1, "HW,IMU0WHOAMI,0x%02X\r\n", (unsigned)imu1.whoami());
+        chprintf((BaseSequentialStream *)&SDU1, "HW,CANIMU,%u\r\n", (unsigned)can_imu_snap.valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,BARO,%u\r\n", (unsigned)baro_snap.valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,STRAIN,%u\r\n", (unsigned)strain_snap.valid);
+        for (int i = 0; i < ENCODER_RPM_NUM_NODES; i++) {
+            chprintf((BaseSequentialStream *)&SDU1, "HW,ENC%d,%u,%.2f\r\n",
+                     i, (unsigned)enc_snap[i].valid, (double)enc_snap[i].rpm);
+        }
+        chprintf((BaseSequentialStream *)&SDU1, "HW,RADIO,%u\r\n", (unsigned)rc_valid);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,SD,%u\r\n", (unsigned)sd_ready);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,CANBUS,total_rx=%lu,dispatched=%lu\r\n",
+                 (uint32_t)can_diag.total_rx, (uint32_t)can_diag.dispatched);
+        chprintf((BaseSequentialStream *)&SDU1, "HW,END\r\n");
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,status") == 0) {
         // Read FDCAN1 diagnostic registers directly (no driver API needed).
@@ -1045,10 +1339,13 @@ static void usb_cmd_dispatch(const char *line)
         chprintf((BaseSequentialStream *)&SDU1,
                  "MAV,DIAG,bytes_rx=%lu,frames_ok=%lu,frames_bad_crc=%lu,"
                  "heartbeat_rx=%lu,param_req_rx=%lu,vision_pos_rx=%lu,"
-                 "vision_speed_rx=%lu,unknown_rx=%lu\r\n",
+                 "vision_speed_rx=%lu,unknown_rx=%lu,mocap_timeouts=%lu,"
+                 "traj_cmd_rx=%lu,traj_cmd_rejected=%lu\r\n",
                  (uint32_t)d.bytes_rx, (uint32_t)d.frames_ok, (uint32_t)d.frames_bad_crc,
                  (uint32_t)d.heartbeat_rx, (uint32_t)d.param_req_rx, (uint32_t)d.vision_pos_rx,
-                 (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx);
+                 (uint32_t)d.vision_speed_rx, (uint32_t)d.unknown_rx,
+                 (uint32_t)d.mocap_timeouts,
+                 (uint32_t)d.traj_cmd_rx, (uint32_t)d.traj_cmd_rejected);
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "CAN,scan,start") == 0) {
         can_scan_start();
@@ -1090,6 +1387,32 @@ static void usb_cmd_dispatch(const char *line)
                  (int)snap.val[0], (int)snap.val[1],
                  (int)snap.val[2], (int)snap.val[3],
                  (unsigned)snap.valid);
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_GAUGE,zero") == 0) {
+        strain_gauge_calibrate();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "STRAIN_GAUGE,zero,OK\r\n");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "STRAIN_GAUGE,reset") == 0) {
+        bool sg_ok = strain_gauge_reset();
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1,
+                 "STRAIN_GAUGE,reset,%s\r\n", sg_ok ? "OK" : "FAIL");
+        chMtxUnlock(&s_usb_write_mtx);
+    } else if (strcmp(line, "ENC,read") == 0) {
+        EncoderRPMRaw snap[ENCODER_RPM_NUM_NODES];
+        chMtxLock(&encoderRpm_mtx);
+        memcpy(snap, g_encoder_rpm, sizeof(snap));
+        chMtxUnlock(&encoderRpm_mtx);
+        chMtxLock(&s_usb_write_mtx);
+        for (int node = 0; node < ENCODER_RPM_NUM_NODES; node++) {
+            chprintf((BaseSequentialStream *)&SDU1,
+                     "ENC,%d,%.2f,%u,%u,%u\r\n",
+                     node, (double)snap[node].rpm,
+                     (unsigned)snap[node].angle_raw,
+                     (unsigned)snap[node].error_flag,
+                     (unsigned)snap[node].valid);
+        }
         chMtxUnlock(&s_usb_write_mtx);
     } else if (strcmp(line, "I2C,scan") == 0) {
         // Probe every valid I2C address (0x08–0x77) and report which ones ACK.
@@ -1134,7 +1457,11 @@ static THD_FUNCTION(USBCmdThread, arg)
     chRegSetThreadName("usbcmd");
     (void)arg;
 
-    static char   s_line[64];
+    // 128, not 64: CAL,set,<i>,<gx>,<gy>,<gz>,<ax>,<ay>,<az> with 6 floats at
+    // %f precision (see calibrate.py) can run past 64 bytes when a bias is
+    // large (e.g. a mis-signed accel axis producing a ~2x-gravity residual),
+    // and a truncated line here was silently dropped rather than erroring.
+    static char   s_line[128];
     static uint8_t s_len = 0;
 
     const int tid = TIMING_REGISTER("usbcmd", 0);  // event-driven, no fixed period
@@ -1179,6 +1506,8 @@ static THD_FUNCTION(DebugThread, arg)
 
     uint32_t prev_quat_cnt = 0, prev_rate_cnt = 0;
     uint32_t can_quat_hz   = 0, can_rate_hz   = 0;
+    uint32_t prev_strain_cnt = 0;
+    uint32_t strain_hz      = 0;
     int      rate_tick     = 0;
 
     const int tid = TIMING_REGISTER("debug", period);
@@ -1186,7 +1515,8 @@ static THD_FUNCTION(DebugThread, arg)
     systime_t next = chVTGetSystemTime();
     while (true) {
         TIMING_TICK_BEGIN(tid);
-        /* ── Update CAN INS rate estimate once per second (10 ticks) ───── */
+        /* ── Update CAN INS / strain gauge rate estimates once per second
+         *    (10 ticks) ─────────────────────────────────────────────────── */
         if (++rate_tick >= 10) {
             uint32_t qc = s_can_quat_cnt;
             uint32_t rc = s_can_rate_cnt;
@@ -1194,6 +1524,13 @@ static THD_FUNCTION(DebugThread, arg)
             can_rate_hz   = rc - prev_rate_cnt;
             prev_quat_cnt = qc;
             prev_rate_cnt = rc;
+
+            chMtxLock(&strainGauge_mtx);
+            uint32_t sc = g_strain_gauge.update_count;
+            chMtxUnlock(&strainGauge_mtx);
+            strain_hz       = sc - prev_strain_cnt;
+            prev_strain_cnt = sc;
+
             rate_tick     = 0;
         }
 
@@ -1319,7 +1656,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
                 "%d,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
                 (double)(yaw   * 57.2958f),
@@ -1358,7 +1695,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f,"
                 "%.2f,%.2f,%.2f,%.4f,%.4f,%.4f\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()), primary_lane,
+                bprl_millis(), primary_lane,
                 (double)(lane_roll[0]*57.2958f), (double)(lane_pitch[0]*57.2958f),
                 (double)(lane_yaw[0]*57.2958f),
                 (double)lane_p[0], (double)lane_q[0], (double)lane_r[0],
@@ -1391,7 +1728,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
                 "%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%d,"
                 "%.5f,%.5f,%.5f,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)imu_ax[0], (double)imu_ay[0], (double)imu_az[0],
                 (double)imu_gx[0], (double)imu_gy[0], (double)imu_gz[0], (int)imu_v[0],
                 (double)imu_ax[1], (double)imu_ay[1], (double)imu_az[1],
@@ -1424,7 +1761,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.4f,%.4f,%.4f,"
                 "%.4f,%.4f,%.4f,"
                 "%.4f,%.4f,%.4f,%d\r\n",
-                (uint32_t)TIME_I2MS(chVTGetSystemTime()),
+                bprl_millis(),
                 (double)pos_x, (double)pos_y, (double)pos_z,
                 (double)vel_u, (double)vel_v, (double)vel_w,
                 (double)mocap_x, (double)mocap_y, (double)mocap_z,
@@ -1438,6 +1775,50 @@ static THD_FUNCTION(DebugThread, arg)
             }
         }
 
+        /* ── Emit $STRAIN line over USB (strain gauge array, single node) ── */
+        /* Format: $STRAIN,<ms>,<valid>,<last_ms>,<hz>,
+         *   ARM1,<9 values>,ARM2,<9 values>,ARM3,<9 values>,ARM4,<9 values>
+         * Single I2C node at 0x09 (ConBoard), 36 channels of raw int16
+         * counts (0.1 uV/count) in channel order 0-35, 9 per arm: ARM1 =
+         * front right, ARM2 = back right, ARM3 = back left, ARM4 = front
+         * left (see StrainGauge.hpp). <hz> is the actual sensor update rate
+         * (successful reads/sec) computed from
+         * g_strain_gauge.update_count above — distinct from this thread's
+         * fixed 10 Hz print rate. */
+        {
+            bool     s_valid;
+            uint32_t s_last_ms;
+            int16_t  s_data[STRAIN_GAUGE_NUM_CHANNELS];
+            chMtxLock(&strainGauge_mtx);
+            s_valid   = g_strain_gauge.valid;
+            s_last_ms = g_strain_gauge.last_update_ms;
+            memcpy(s_data, g_strain_gauge.data, sizeof(s_data));
+            chMtxUnlock(&strainGauge_mtx);
+
+            // Worst case ~50 (header) + 4 x 5 (labels) + 36 x 7 (",-32768").
+            static char strain_buf[384];
+            MemoryStream strain_ms;
+            msObjectInit(&strain_ms, (uint8_t *)strain_buf, sizeof(strain_buf) - 1, 0);
+            chprintf((BaseSequentialStream *)&strain_ms, "$STRAIN,%lu,%d,%lu,%lu",
+                     bprl_millis(),
+                     (int)s_valid, (unsigned long)s_last_ms,
+                     (unsigned long)strain_hz);
+            for (int arm = 0; arm < STRAIN_GAUGE_NUM_ARMS; arm++) {
+                chprintf((BaseSequentialStream *)&strain_ms, ",ARM%d", arm + 1);
+                for (int i = 0; i < STRAIN_GAUGE_CHANNELS_PER_ARM; i++) {
+                    chprintf((BaseSequentialStream *)&strain_ms, ",%d",
+                             s_data[arm * STRAIN_GAUGE_CHANNELS_PER_ARM + i]);
+                }
+            }
+            chprintf((BaseSequentialStream *)&strain_ms, "\r\n");
+            size_t slen = strain_ms.eos;
+            if (slen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
+                chnWriteTimeout((BaseChannel *)&SDU1,
+                                (uint8_t *)strain_buf, slen, TIME_MS2I(50));
+                chMtxUnlock(&s_usb_write_mtx);
+            }
+        }
+
         TIMING_TICK_END(tid);
         next = chThdSleepUntilWindowed(next, chTimeAddX(next, period));
     }
@@ -1446,14 +1827,16 @@ static THD_FUNCTION(DebugThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * LogThread — 50 Hz  NORMALPRIO-15
- * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN, IMU1, IMU2, IMU3.
+ * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRT, IMU1, IMU2, IMU3
+ * (plus STN1..STN4, the strain gauge array, where the drone's config enables it).
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
 
 /* ══════════════════════════════════════════════════════════════════════════
  * MAVLinkThread — 100 Hz, NORMALPRIO-8
- * Slimmed-down MAVLink on TELEM2 (USART3, 115200 baud).
+ * Slimmed-down MAVLink at 115200 baud on TELEM2/USART3 (Cube boards) or
+ * TX7/RX7/UART7 (BPRL_BOARD_ORQA) — see BPRL_MAVLINK_SD in MAVLink.hpp.
  * Sends heartbeat at 1 Hz; receives VISION_POSITION_ESTIMATE and
  * VISION_SPEED_ESTIMATE and writes them into g_mocap for the EKF.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1474,6 +1857,33 @@ static THD_FUNCTION(MAVLinkThread, arg)
     }
 }
 
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+/* ══════════════════════════════════════════════════════════════════════════
+ * IOMCUThread — targets ~400 Hz, actual rate bounded by UART round-trip
+ * Owns the FMU<->IOMCU UART (SD6) exclusively. Sends whatever's currently
+ * published in g_iomcu_cmd (via iomcu_set_pwm(), called from PWM.cpp's
+ * motor_output_write()) as one PAGE_DIRECT_PWM write per tick. This is the
+ * only thread that ever touches SD6 after iomcu_init() — see IOMCU.hpp for
+ * why ControlThread must never block on this UART directly.
+ * ══════════════════════════════════════════════════════════════════════════ */
+static THD_FUNCTION(IOMCUThread, arg)
+{
+    (void)arg;
+    chRegSetThreadName("iomcu");
+
+    const int tid = TIMING_REGISTER("iomcu", TIME_MS2I(2));
+
+    while (true) {
+        TIMING_TICK_BEGIN(tid);
+        iomcu_send_now();  // false on timeout/CRC error just means try again
+                            // next tick — harmless as long as one lands within
+                            // the IO's 200 ms failsafe window (see IOMCU.hpp).
+        TIMING_TICK_END(tid);
+        chThdSleepMilliseconds(2);
+    }
+}
+#endif
+
 static THD_FUNCTION(LogThread, arg)
 {
     chRegSetThreadName("log");
@@ -1489,16 +1899,12 @@ static THD_FUNCTION(LogThread, arg)
 
     while (true) {
         TIMING_TICK_BEGIN(tid);
-        /* Timestamp in microseconds -- genuine microsecond resolution, not
-         * millisecond-quantized (see git history for why this used to
-         * multiply a TIME_I2MS() value by 1000: that made every message
-         * type in a tick collapse onto an identical coarse timestamp,
-         * which downstream log readers see as mass duplicate-timestamp
-         * records). */
-        const uint64_t t_us = (uint64_t)TIME_I2US(chVTGetSystemTime());
+
+        /* Timestamp in microseconds since boot (monotonic — see src/uptime.hpp). */
+        const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], indij_diag[12], jindi_diag[13], pidj_diag[9];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], traj_diag[8], indij_diag[12], jindi_diag[13], pidj_diag[9];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -1507,6 +1913,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(ctrl,       g_ctrl,       sizeof(ctrl));
         memcpy(indi_diag,  g_indi_diag,  sizeof(indi_diag));
         memcpy(ctun_diag,  g_ctun_diag,  sizeof(ctun_diag));
+        memcpy(traj_diag,  g_traj_diag,  sizeof(traj_diag));
         memcpy(indij_diag, g_indij_diag, sizeof(indij_diag));
         memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
         memcpy(pidj_diag,  g_pidj_diag,  sizeof(pidj_diag));
@@ -1522,6 +1929,32 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(strain_bias, g_strain_bias, sizeof(strain_bias));
         strain_cal_active  = g_strain_cal_active;
         chMtxUnlock(&strainRate_mtx);
+
+        /* ── Strain gauge array snapshot + per-chunk receive rate ─────── */
+        /* Hz is how many times each I2C chunk actually arrived per second
+         * (g_strain_gauge.chunk_count, bumped by the driver on every
+         * successful chunk read), averaged over a ~1 s window — the
+         * sensor's real data rate, independent of this thread's logging
+         * rate. */
+        StrainGaugeRaw sg = {};
+        chMtxLock(&strainGauge_mtx);
+        sg = g_strain_gauge;
+        chMtxUnlock(&strainGauge_mtx);
+        static uint32_t sg_win_start_ms  = 0;
+        static uint32_t sg_win_count[2]  = {0, 0};
+        static uint16_t sg_chunk_hz[2]   = {0, 0};
+        {
+            const uint32_t now_ms  = bprl_millis();
+            const uint32_t span_ms = now_ms - sg_win_start_ms;
+            if (span_ms >= 1000U) {
+                for (int c = 0; c < 2; c++) {
+                    const uint32_t n = sg.chunk_count[c] - sg_win_count[c];
+                    sg_chunk_hz[c]  = (uint16_t)((n * 1000U + span_ms / 2U) / span_ms);
+                    sg_win_count[c] = sg.chunk_count[c];
+                }
+                sg_win_start_ms = now_ms;
+            }
+        }
 
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
         uint32_t rpm_log[4];
@@ -1710,16 +2143,40 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_RPMS, msg);
         }
 
-        /* ── STRN — strain rate sensor ────────────────────────────────── */
-        if (log_en.strn) {
-            LogMsgSTRN msg = {};
+        /* ── STRT — strain rate sensor ────────────────────────────────── */
+        if (log_en.strt) {
+            LogMsgSTRT msg = {};
             msg.time_us = t_us;
             msg.s0      = strain.val[0];
             msg.s1      = strain.val[1];
             msg.s2      = strain.val[2];
             msg.s3      = strain.val[3];
             msg.valid   = (uint8_t)strain.valid;
-            logger.write(LOG_MSG_STRN, msg);
+            logger.write(LOG_MSG_STRT, msg);
+        }
+
+        /* ── STN1..STN4 — strain gauge array, one message per arm ─────── */
+        /* STN1/STN3 are the first arm of I2C chunk 0/1 and carry that
+         * chunk's receive rate (see the snapshot above). */
+        if (log_en.strn) {
+            static const uint8_t kStrId[STRAIN_GAUGE_NUM_ARMS] =
+                { LOG_MSG_STN1, LOG_MSG_STN2, LOG_MSG_STN3, LOG_MSG_STN4 };
+            for (int arm = 0; arm < STRAIN_GAUGE_NUM_ARMS; arm++) {
+                const int16_t *src = &sg.data[arm * STRAIN_GAUGE_CHANNELS_PER_ARM];
+                if ((arm % 2) == 0) {
+                    LogMsgSTNH msg = {};
+                    msg.time_us = t_us;
+                    memcpy(msg.d, src, sizeof(msg.d));
+                    msg.hz      = sg_chunk_hz[arm / 2];
+                    msg.valid   = (uint8_t)sg.valid;
+                    logger.write(kStrId[arm], msg);
+                } else {
+                    LogMsgSTNA msg = {};
+                    msg.time_us = t_us;
+                    memcpy(msg.d, src, sizeof(msg.d));
+                    logger.write(kStrId[arm], msg);
+                }
+            }
         }
 
         /* ── JKFT — jerk fitting ───────────────────────────────────────── */
@@ -1780,6 +2237,48 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_MOCP, msg);
         }
 
+        /* ── TRAJ — trajectory tracker reference + POS_HOLD heading loop ─ */
+        if (log_en.traj) {
+            LogMsgTRAJ msg = {};
+            msg.time_us      = t_us;
+            msg.state        = (uint8_t)traj_diag[0];
+            msg.ref_n        = traj_diag[1];
+            msg.ref_e        = traj_diag[2];
+            msg.ref_d        = traj_diag[3];
+            msg.yaw_tgt      = traj_diag[4];
+            msg.yaw_rate_cmd = traj_diag[5];
+            msg.height_off   = traj_diag[6];
+            msg.path_speed   = traj_diag[7];
+            logger.write(LOG_MSG_TRAJ, msg);
+        }
+
+        /* ── MAVL — MAVLink receive counters, ~5 Hz ───────────────────── */
+        if (log_en.mavl) {
+            static uint32_t mavl_tick = 0;
+            const uint32_t  mavl_every = (kDroneConfig.logging.log_rate_hz > 5.0f)
+                                       ? (uint32_t)(kDroneConfig.logging.log_rate_hz / 5.0f) : 1U;
+            if (++mavl_tick >= mavl_every) {
+                mavl_tick = 0;
+                MavlinkDiag d = {};
+                mavlink_get_diag(d);
+                LogMsgMAVL msg = {};
+                msg.time_us         = t_us;
+                msg.bytes_rx        = d.bytes_rx;
+                msg.frames_ok       = d.frames_ok;
+                msg.frames_bad_crc  = d.frames_bad_crc;
+                msg.heartbeat_rx    = d.heartbeat_rx;
+                msg.vision_pos_rx   = d.vision_pos_rx;
+                msg.vision_speed_rx = d.vision_speed_rx;
+                msg.unknown_rx      = d.unknown_rx;
+                msg.mocap_timeouts  = d.mocap_timeouts;
+                msg.traj_cmd_rx     = d.traj_cmd_rx;
+                msg.traj_cmd_rej    = d.traj_cmd_rejected;
+                msg.last_cmd        = d.last_traj_cmd;
+                msg.last_result     = d.last_traj_result;
+                logger.write(LOG_MSG_MAVL, msg);
+            }
+        }
+
         logger.flush();
 
         /* If a write error killed the logger, attempt a clean restart.
@@ -1802,18 +2301,47 @@ void threads_start(const ThreadRates &rates)
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
     //   ControlThread   +22  400 Hz EKF + PID/mixer/DShot
-    //   I2CThread       +20  200 Hz aux-sensor polling
+    //   I2CThread       +20  200 Hz aux-sensor polling — except CubeBlueH7
+    //                        (Drone2): +24 and 400 Hz, i.e. ABOVE ControlThread,
+    //                        because that drone's inner loop is commanded
+    //                        from the strain gauge signal this thread reads
+    //   IOMCUThread     +12  ~400 Hz FMU<->IOMCU (MOTOR_PROTO_IOMCU only)
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
-    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 (vision position)
+    //   MAVLinkThread    -8  100 Hz MAVLink on TELEM2 / Orqa TX7-RX7 (vision position)
     //   DebugThread     -10  10 Hz $TEL/$EKFL USB stream
     //   LogThread       -15  50 Hz SD card logging
     //   USBCmdThread    -20  event-driven USB commands
 
+    // ── IMPORTANT: none of these chThdCreateStatic calls were ever
+    // board-conditional in git history. The Cube Blue bring-up's "disable
+    // everything, add back one at a time" (this whole function was
+    // commented out at HEAD, commit 42448c9, before this bring-up session
+    // even started) therefore disabled every thread — including
+    // ControlThread, i.e. no flight control at all — for EVERY board, not
+    // just CubeBlueH7. Restored full thread set for CubeOrangePlus/Orqa
+    // below, matching the last confirmed-working configuration (commit
+    // 61c453a, confirmed flying on CubeOrangePlus). Cube Blue keeps its own
+    // deliberate, still-in-progress staged config. ──
     chThdCreateStatic(waSPI,       sizeof(waSPI),       NORMALPRIO + 30, SPIThread,       (void *)&rates.spi);
     chThdCreateStatic(waCAN,       sizeof(waCAN),       NORMALPRIO + 28, CANThread,       nullptr);
-    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
+    // Cube Blue bring-up, stage 3: ControlThread (stage 2) and now
+    // I2CThread (stage 3) both re-enabled — see main.cpp's i2c_drv_init()
+    // call site for why I2C was parked and why it's now cleared.
+#if defined(BPRL_BOARD_CUBEBLUE)
+    // Above ControlThread (+22), below CANThread (+28): the strain gauge
+    // signal is this drone's inner-loop command, so a poll must never wait
+    // behind a control tick. Cheap for ControlThread — a poll is DMA-driven
+    // and this thread sleeps while the bytes are on the wire.
+    const tprio_t i2c_prio = NORMALPRIO + 24;
+#else
+    const tprio_t i2c_prio = NORMALPRIO + 20;
+#endif
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       i2c_prio,        I2CThread,       (void *)&rates.i2c);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
+#if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
+    chThdCreateStatic(waIOMCU,     sizeof(waIOMCU),     NORMALPRIO + 12, IOMCUThread,     nullptr);
+#endif
     chThdCreateStatic(waRadio,     sizeof(waRadio),     NORMALPRIO + 10, RadioThread,     (void *)&rates.radio);
     chThdCreateStatic(waHeartbeat, sizeof(waHeartbeat), NORMALPRIO -  5, HeartbeatThread, (void *)&rates.heartbeat);
     chThdCreateStatic(waMAVLink,   sizeof(waMAVLink),   NORMALPRIO -  8, MAVLinkThread,   nullptr);

@@ -74,15 +74,24 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x05 | RCIN | time_us, roll_stk, pitch_stk, yaw_stk, thr_stk, flight_mode, indi_stk, armed |
 | 0x06 | OUTP | time_us, roll_tq, pitch_tq, yaw_tq, throttle |
 | 0x07 | RPMS | time_us, rpm0–rpm3 |
-| 0x08 | STRN | time_us, s0–s3, valid |
+| 0x08 | STRT | time_us, s0–s3, valid |
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g1_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
-| 0x13 | PIDJ | time_us, roll_jerk, cmd_roll, roll_rate_tgt, cmd_yaw |
+| 0x10 | CTUN | time_us, pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err — POS_HOLD tuning diagnostics; temporary, compiled in only while `LOG_CTUN_ENABLED` is 1 |
+| 0x11 | MOCP | time_us, x, y, z, vx, vy, vz, valid — raw mocap estimate, pre-EKF |
+| 0x12 | TRAJ | time_us, state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_off, path_speed — trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command |
+| 0x13 | MAVL | time_us, then totals since boot: bytes_rx, frames_ok, frames_bad_crc, heartbeat_rx, vision_pos_rx, vision_speed_rx, unknown_rx, mocap_timeouts, traj_cmd_rx, traj_cmd_rej; last_cmd, last_result — MAVLink receive counters (same as `MAV,diag`) and the latest trajectory command with its answer; ~5 Hz |
+| 0x14–0x17 | STN1–STN4 | strain **gauge** array (not strain rate — that is STRT): time_us, then 9 raw int16 strain gauge channels (0.1 µV/count) per message, one message per arm: STN1 = front right (D0–D8), STN2 = back right (D9–D17), STN3 = back left (D18–D26), STN4 = front left (D27–D35). STN1 and STN3 also carry `hz` and `valid`: `hz` is how many times per second that I2C chunk (chunk 0 = STN1+STN2, chunk 1 = STN3+STN4) was actually received from the sensor, averaged over ~1 s. Gated together by `LogEnableConfig::strn` |
+| 0x18 | JKFT | time_us, jerk estimates (z and roll) fitted from roll rate and the four strain-rate channels — see `src/sensors/JerkFit.hpp` |
+| 0x19 | PIDJ | retired (original single-stage AttitudePIDJerk) — FMT still emitted, never written |
+| 0x1A | INDJ | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g2_roll, jerk_cmd_roll, kappa2_roll — AttitudeINDIJerk |
+| 0x1B | JIND | time_us, unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll — AttitudeJINDI |
+| 0x1C | JPID | time_us, rate_tgt, accel_tgt, jerk_tgt, torque_pi, torque_d, torque_roll, cmd_roll, cmd_pitch, cmd_yaw — AttitudePIDJerk |
 
-INDI (0x0E) is pure shadow — never selectable by the channel-7 switch. PIDJ (0x13) is the switch's actual alternative to plain PID (`RCIN.indi_stk` > 0.33 selects it); see `src/controllers/README.md`.
+Naming: **STRT** is the strain-*rate* sensor (CAN 0x69, `LogEnableConfig::strt`); **STN1–STN4** are the strain-*gauge* array (`LogEnableConfig::strn`). INDI (0x0E) and the jerk-controller messages are logged whenever that controller is in the drone's list, selected or not (shadow mode).
 
-No message carries a rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
+No message carries a logging-rate field — every enabled message logs at the `LogThread` period, so it would only ever record a constant. (`Hz` in STN1/STN3 is different: it is the measured rate the strain gauge data arrives over I2C, not the logging rate.) That period (default 50 Hz) and which of these message types are enabled are now both per-drone: `LoggingConfig::log_rate_hz` and `LoggingConfig::enable` (`LogEnableConfig`, one bool per message type) in `configs/<Drone>/drone_config.cpp` — see `configs/DroneConfig.hpp`. Disabling a message here only stops its data records from being written each tick; `Logger::write_schema_header()` still emits every type's `FMT` record regardless, so a disabled message just never appears in the data stream. See `LogMessages.hpp` for struct definitions and ArduPilot format codes.
 
 Each `kLogDefs[]` entry's `name`/`fmt`/`labels` strings must fit the FMT record's fixed fields (`name` ≤4 chars, `fmt` ≤15, `labels` ≤63 — one byte short of the declared 4/16/64-byte fields since `strncpy` reserves a byte for the null terminator). A `static_assert` right after the table checks every entry at build time, so an over-length string fails the build instead of being silently truncated by `strncpy` at runtime (which happened once before the check existed).
 

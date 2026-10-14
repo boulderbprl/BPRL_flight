@@ -4,6 +4,9 @@
 #include "src/FlightState.hpp"
 #include "src/coms/DShot.hpp"   // ESCTelemetry
 #include "src/sensors/StrainRate.hpp"
+#include "src/sensors/StrainGauge.hpp"
+#include "src/sensors/EncoderRPM.hpp"
+#include "src/controllers/TrajectoryTracker.hpp"   // TrajCommand, TrajResult
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -37,7 +40,7 @@ struct MocapRaw {
     bool  has_new_pos; // fresh x/y/z this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
     bool  has_new_vel; // fresh vx/vy/vz this tick — set by VISION_SPEED_ESTIMATE, cleared by ControlThread
     bool  has_new_yaw; // fresh yaw this tick — set by VISION_POSITION_ESTIMATE, cleared by ControlThread
-    bool  valid;       // mocap link connected and receiving
+    bool  valid;       // mocap link connected and receiving — cleared by MAVLinkThread after 300 ms without a position message
 };
 
 struct BaroRaw {
@@ -58,6 +61,7 @@ extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, 
 extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
 extern float   g_indi_diag[10];      // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 extern float   g_ctun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
+extern float   g_traj_diag[8];       // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed] — see FlightStateMachine::get_traj_diag()
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 extern int     g_radio_switch_pos;   // raw controller-select switch position (0/1/2, low/mid/high) — RadioThread writes; ControlThread reads to drive FlightStateMachine::set_active_controller()
@@ -72,6 +76,21 @@ extern CANIMURaw g_can_imu;
 
 extern mutex_t  mocap_mtx;
 extern MocapRaw g_mocap;
+
+/* ── Trajectory commands (MAVLinkThread → ControlThread → MAVLinkThread) ────
+ * MAVLinkThread posts a decoded command; ControlThread hands it to
+ * FlightStateMachine::traj_command() on its next tick and posts the result;
+ * MAVLinkThread sends that back as the COMMAND_ACK. One command in flight at
+ * a time. mav_command is the MAVLink command id, kept so the ACK can name it. */
+struct TrajMailbox {
+    TrajCommand cmd;
+    uint16_t    mav_command;
+    bool        cmd_pending;      // set by MAVLinkThread, cleared by ControlThread
+    TrajResult  result;
+    bool        result_pending;   // set by ControlThread, cleared by MAVLinkThread
+};
+extern mutex_t     traj_mtx;
+extern TrajMailbox g_traj_mailbox;
 
 extern mutex_t baro_mtx;
 extern BaroRaw g_baro;
@@ -94,7 +113,17 @@ extern bool      g_motor_test_active;
 extern int32_t   g_motor_test_cmd[4]; // 0–1000 values [FR, RL, FL, RR]
 
 /* ── Thread rates — passed as arg by main, stored locally per thread ──────
- * All rates live in main.cpp.  Change them there to retune loop timing.    */
+ * All rates live in main.cpp.  Change them there to retune loop timing —
+ * except ControlThread's, which is set here so the fixed-dt filters that
+ * run inside it (PosControl, Unmixer, AttitudeINDI) track it automatically. */
+
+// ControlThread period. main.cpp's kRates.control is derived from this, and
+// CONTROL_DT_S is the fixed dt for every filter that runs once per control
+// tick. Fixed rather than measured: lowpass2p() recomputes its coefficients
+// from dt every call, and tick-to-tick jitter in a measured dt shows up as
+// multiplicative noise on the filter output.
+static constexpr uint32_t CONTROL_PERIOD_US = 2500;   // 400 Hz — matches ArduPilot default
+static constexpr float    CONTROL_DT_S      = CONTROL_PERIOD_US * 1.0e-6f;
 
 struct LogRates {
     sysinterval_t period;  // derived from the drone's DroneConfig::logging.log_rate_hz (default 50 Hz) — see main.cpp

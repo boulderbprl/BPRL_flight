@@ -22,11 +22,21 @@ struct CalibData {
 static_assert(sizeof(CalibData) == 128, "CalibData must be 128 bytes");
 
 // Read calibration from flash. Returns false and leaves |out| zeroed if
-// no valid calibration is stored (bad magic or CRC mismatch).
+// no valid calibration is stored (bad magic or CRC mismatch). Always
+// available — a flight build still needs to load and apply a calibration
+// saved earlier from a debug build, it just can't write a new one itself.
 bool cal_load(CalibData &out);
 
+// Write path — only compiled in under BPRL_DEBUG (see CalFlash.cpp). Both
+// briefly disable interrupts board-wide (ArduPilot's own STM32H7 flash
+// driver does the same by default; see the comments at the definitions),
+// which must never happen on a flight build regardless of whether anything
+// would actually call it — hence gating the functions themselves, not just
+// the USB commands that are their only real callers.
+#ifdef BPRL_DEBUG
 // Erase sector 7 then write |d| to flash.  Returns false on write error.
 bool cal_save(const CalibData &d);
 
 // Erase sector 7 (clears calibration).
 void cal_clear();
+#endif
