@@ -91,12 +91,12 @@ const DroneConfig kDroneConfig = {
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 80.00f,  10.0f,  0.0f, 15.0f, 20.0f, 20.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]
+        { 25.00f,  10.0f,  0.0f, 1000.0f, 0.0f, 0.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]
         0.0048f,  //0.006f,  // g1_seed_roll — shared by both of roll's paths, see class comment
         0.0065f, // g1_seed_pitch
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
         40.0f,   // h_roll — 1000/25
-        0.88f,    // alpha — fully accel-path for now, not yet characterized
+        0.0f,    // alpha — fully accel-path for now, not yet characterized
         0.0f,    // nlms_mu_pid
         0.0f,    // nlms_mu_indi
         3.0f,    // yaw_gain

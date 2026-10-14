@@ -55,7 +55,7 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
 
     // ── Roll: two independent full-torque-reference paths, then blend ──────
     _jerk_cmd_roll = _roll_accel.update(accel_cmd_roll, p_dot_meas);
-    _jerk_cmd_roll = lowpass2p(_jerk_cmd_roll, _jerk_cmd_filt_state, JERK_CMD_FILT_HZ, NLMS_DT_S);
+    // _jerk_cmd_roll = lowpass2p(_jerk_cmd_roll, _jerk_cmd_filt_state, JERK_CMD_FILT_HZ, NLMS_DT_S);
 
     // Accel path — instant-actuation assumption, anchored to the plant's
     // actual/measured torque. Identical in form to AttitudeINDI's own roll
@@ -74,10 +74,16 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
     // battery. roll_jerk_input/jerk_cmd_roll stay unfiltered/as-filtered-
     // above for logging; only this error, which actually drives torque,
     // gets the notch.
-    const float jerk_err_raw = _jerk_cmd_roll - _roll_jerk_input;
+    // Measured jerk lowpassed at JERK_MEAS_LPF_HZ (own filter state — see header).
+    _jerk_meas_lpf = lowpass(_roll_jerk_input, _jerk_meas_lpf, lowpass_alpha(JERK_MEAS_LPF_HZ, NLMS_DT_S));
+    const float roll_jerk_filt = _jerk_meas_lpf;
+
+    const float jerk_err_raw = _jerk_cmd_roll - roll_jerk_filt;
     // const float jerk_err = notch_apply(jerk_err_raw, _jerk_err_notch_state, _jerk_err_notch_coeffs);
-    const float jerk_err = jerk_err_raw;
-    _tau_jerk_roll = _tau_cmd_jerk_prev_roll + (_g1_roll / _h_roll) * jerk_err;
+    // Single-pole lowpass on the error (JERK_ERR_LPF_HZ, see header).
+    _jerk_err_lpf = lowpass(jerk_err_raw, _jerk_err_lpf, lowpass_alpha(JERK_ERR_LPF_HZ, NLMS_DT_S));
+    const float jerk_err = _jerk_err_lpf;
+    _tau_jerk_roll = _tau_cmd_jerk_prev_roll + (_g1_roll / _h_roll) * jerk_err * 0.13;
     // Clamp to the same physical torque limit normalize_torque() divides by
     // — a persistent jerk_cmd/roll_jerk bias would otherwise integrate
     // without bound, and this keeps the jerk path's contribution to the
@@ -140,6 +146,8 @@ void AttitudeJINDI::reset_all()
     _yaw_target_valid = false;
     _jerk_cmd_filt_state    = Biquad2pState();
     _jerk_err_notch_state   = Biquad2pState();
+    _jerk_err_lpf           = 0.0f;
+    _jerk_meas_lpf          = 0.0f;
     _tau_cmd_jerk_prev_roll = 0.0f;
 
     // Reset only the NLMS differencing/filter memory — G1_hat itself is

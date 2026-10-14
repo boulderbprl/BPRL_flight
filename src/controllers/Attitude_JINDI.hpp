@@ -182,6 +182,20 @@ private:
     NotchCoeffs   _jerk_err_notch_coeffs;
     Biquad2pState _jerk_err_notch_state;
 
+    // ── Lowpass on the jerk path's error ─────────────────────────────────────
+    // Single-pole (1st-order IIR via lowpass()/lowpass_alpha()). In LOG0046
+    // the jerk path contributed ~3.5× the accel path's 40-50 Hz torque — the
+    // same arm-mode loop that limit-cycled the old PIDJerk.
+    static constexpr float JERK_ERR_LPF_HZ = 20.0f;
+    float _jerk_err_lpf = 0.0f;   // single-pole filter state = previous output
+
+    // Single-pole lowpass on the measured jerk before it enters the
+    // jerk error. Its own state (not shared with any other filter), and
+    // applied to a local copy so _roll_jerk_input stays the raw set_roll_jerk()
+    // value.
+    static constexpr float JERK_MEAS_LPF_HZ = 20.0f;
+    float _jerk_meas_lpf = 0.0f;   // single-pole filter state = previous output
+
     // TC — the actual combined torque commanded last tick (_tau_roll,
     // clamped to ±unmixer.max_torque_nm()), carried forward as the jerk
     // path's increment base point for next tick (see class comment: the
