@@ -205,7 +205,7 @@ struct __attribute__((packed)) LogMsgJINDI {
     float    accel_roll;    // rad/s²  roll's rate-PID commanded angular acceleration (also the target fed into the accel→jerk stage)
     float    accel_pitch;   // rad/s²  pitch's rate-PID commanded angular acceleration
     float    g1_roll;       // N·m per rad/s²  live NLMS-adapted G1_hat, roll — shared by BOTH of roll's paths (no separate G2, see Attitude_JINDI.hpp)
-    float    g1_pitch;      // N·m per rad/s²  live NLMS-adapted G1_hat, pitch
+    float    jerk_filt;     // rad/s³  measured roll jerk (JKFT.Pdd) after JINDI's JERK_MEAS_LPF_HZ lowpass — what the jerk error uses (AttitudeJINDI::roll_jerk_filt()). Was g1_pitch.
     float    jerk_cmd_roll; // rad/s³  reference/target jerk fed into the jerk path (AttitudeJINDI::jerk_cmd_roll()) — compare against JKFT.Pdd, the actual/measured roll_jerk
     float    alpha_roll;    // convex-combination weight, roll — static per-drone config value (DroneConfig::AttitudeJindiGains::alpha), repeats every tick, logged for reference
     float    tau_roll;      // N·m  alpha-blended combined torque reference, pre-normalise (AttitudeJINDI::combined_torque_roll()) — tau_accel_roll/tau_jerk_roll blended by alpha_roll, what normalize_torque() turns into cmd_roll
@@ -411,7 +411,8 @@ constexpr LogDef kLogDefs[] = {
       // references); AlR = alpha_roll; TC = tau_roll (the alpha-blended
       // combination, pre-normalise) — at exactly 63 chars, see LogDef's
       // comment on the cap; TC is as short as it can be and still fit.
-      "TimeUS,UnR,UnP,TAR,TJR,CmdR,CmdP,AccR,AccP,G1R,G1P,JCmdR,AlR,TC",
+      // Pdd here = filtered measured jerk (jerk_filt), not JKFT.Pdd raw.
+      "TimeUS,UnR,UnP,TAR,TJR,CmdR,CmdP,AccR,AccP,G1R,Pdd,JCmdR,AlR,TC",
       sizeof(LogMsgJINDI) },
 
     { LOG_MSG_JPID,

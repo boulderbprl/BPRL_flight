@@ -129,6 +129,10 @@ public:
     // rationale as AttitudeINDIJerk::kappa2_roll().
     float alpha_roll() const { return _alpha; }
 
+    // Measured roll jerk after the JERK_MEAS_LPF_HZ lowpass — the value the
+    // jerk error actually uses (most recent update()). Diagnostic only.
+    float roll_jerk_filt() const { return _jerk_meas_lpf; }
+
     // Tells the live NLMS estimator whether this controller is the one
     // currently driving out_cmds (vs. running in shadow) — same mechanism
     // as AttitudeINDI::set_indi_active().
@@ -186,7 +190,7 @@ private:
     // Single-pole (1st-order IIR via lowpass()/lowpass_alpha()). In LOG0046
     // the jerk path contributed ~3.5× the accel path's 40-50 Hz torque — the
     // same arm-mode loop that limit-cycled the old PIDJerk.
-    static constexpr float JERK_ERR_LPF_HZ = 20.0f;
+    static constexpr float JERK_ERR_LPF_HZ = 35.0f;
     float _jerk_err_lpf = 0.0f;   // single-pole filter state = previous output
 
     // Single-pole lowpass on the measured jerk before it enters the

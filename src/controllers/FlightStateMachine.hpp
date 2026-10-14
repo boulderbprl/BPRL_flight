@@ -173,7 +173,7 @@ public:
     // the controller actually driving out_cmds; see active_index().
     void get_indij_diag(float diag[12]) const { memcpy(diag, _indij_diag, sizeof(_indij_diag)); }
 
-    // diag[13]: [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch, jerk_cmd_roll, alpha_roll, tau_roll]
+    // diag[13]: [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll]
     // Same shape as get_indij_diag(), plus tau_roll — see AttitudeJINDI::
     // get_diag()/get_g1()/jerk_cmd_roll()/alpha_roll()/combined_torque_roll().
     // tau_accel_roll/tau_jerk_roll are roll's two independent path torque
@@ -276,7 +276,7 @@ private:
     // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — see get_indij_diag()
     float _indij_diag[12] = {};
 
-    // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch, jerk_cmd_roll, alpha_roll, tau_roll] — see get_jindi_diag()
+    // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — see get_jindi_diag()
     float _jindi_diag[13] = {};
 
     // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — see get_pidj_diag()

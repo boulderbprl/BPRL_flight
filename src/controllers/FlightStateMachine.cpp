@@ -172,7 +172,7 @@ void FlightStateMachine::run_attitude(const float euler[],
         _jindi_diag[6] = accel_cmd[0];
         _jindi_diag[7] = accel_cmd[1];
         _jindi_diag[8]  = g1[0];
-        _jindi_diag[9]  = g1[1];
+        _jindi_diag[9]  = _jindi.roll_jerk_filt();
         _jindi_diag[10] = _jindi.jerk_cmd_roll();
         _jindi_diag[11] = _jindi.alpha_roll();
         _jindi_diag[12] = _jindi.combined_torque_roll();

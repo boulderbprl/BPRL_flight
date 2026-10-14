@@ -80,9 +80,10 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
 
     const float jerk_err_raw = _jerk_cmd_roll - roll_jerk_filt;
     // const float jerk_err = notch_apply(jerk_err_raw, _jerk_err_notch_state, _jerk_err_notch_coeffs);
-    // Single-pole lowpass on the error (JERK_ERR_LPF_HZ, see header).
-    _jerk_err_lpf = lowpass(jerk_err_raw, _jerk_err_lpf, lowpass_alpha(JERK_ERR_LPF_HZ, NLMS_DT_S));
-    const float jerk_err = _jerk_err_lpf;
+    // Single-pole lowpass on the error (JERK_ERR_LPF_HZ, see header) — disabled.
+    // _jerk_err_lpf = lowpass(jerk_err_raw, _jerk_err_lpf, lowpass_alpha(JERK_ERR_LPF_HZ, NLMS_DT_S));
+    // const float jerk_err = _jerk_err_lpf;
+    const float jerk_err = jerk_err_raw;
     _tau_jerk_roll = _tau_cmd_jerk_prev_roll + (_g1_roll / _h_roll) * jerk_err * 0.13;
     // Clamp to the same physical torque limit normalize_torque() divides by
     // — a persistent jerk_cmd/roll_jerk bias would otherwise integrate
