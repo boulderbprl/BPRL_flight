@@ -310,13 +310,14 @@ def parse_pos_line(line: str, state: PosVelState) -> bool:
         return False
 
 
-# ── Strain gauge array (single I2C node, 9 real channels, uneven 5+4 split) ──
-# Bench-confirmed 2026-09: this device exposes exactly 9 real channels, once
-# (the sensor's chunk index doesn't select distinct data) — see
-# src/sensors/StrainGauge.hpp for how that was determined. A physical touch
-# test found the arm boundary mid-array: data[0:5] = ARM1, data[5:9] = ARM2.
+# ── Strain gauge array (single I2C node, 36 channels, 4 arms x 9) ────────────
+# ConBoard at I2C 0x09: 36 int16 channels (0.1 uV/count), streamed in channel
+# order, 9 per arm: ARM1 = front right, ARM2 = back right, ARM3 = back left,
+# ARM4 = front left — see src/sensors/StrainGauge.hpp.
 
-STRAIN_ARM_SIZES = [5, 4]
+STRAIN_ARM_SIZES = [9, 9, 9, 9]
+STRAIN_ARM_NAMES = ["Front R", "Back R", "Back L", "Front L"]
+STRAIN_COUNTS_PER_VOLT = 10_000_000.0
 
 @dataclass
 class StrainState:

@@ -161,7 +161,8 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strn, imu1, imu2, imu3, indi, baro, ctun, mocp, traj, mavl;
+    bool att, lin, rcin, outp, rpms, strt, imu1, imu2, imu3, indi, baro, ctun, mocp, traj, mavl;
+    bool strg;  // strain gauge array — gates all four of STR1..STR4 together
 };
 
 struct LoggingConfig {

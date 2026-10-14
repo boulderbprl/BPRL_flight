@@ -108,7 +108,7 @@ const DroneConfig kDroneConfig = {
     // The 3-position control switch maps low/mid/high, PID always 0, INDI next if enabled, PID+PI last if enabled 
     { true, false },
    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[15] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
     {
         50.0f, // log_rate_hz
         { true, // att
@@ -116,7 +116,7 @@ const DroneConfig kDroneConfig = {
           true, // rcin
           true, // outp
           true, // rpms
-          true, // strn
+          true, // strt
           true, // imu1
           true, // imu2
           true, // imu3
@@ -125,6 +125,7 @@ const DroneConfig kDroneConfig = {
           true, // ctun
           true, // mocp
           true, // traj
-          true }, // mavl
+          true, // mavl
+          false }, // strg (STR1..STR4)
     },
 };

@@ -124,7 +124,15 @@ int main(void)
      * ══════════════════════════════════════════════════════════════════════ */
     const ThreadRates kRates = {
         /* .spi     = */ TIME_US2I(1000),
+#if defined(BPRL_BOARD_CUBEBLUE)
+        // 400 Hz — strain gauge array (StrainGauge.hpp). One poll is ~1.9 ms
+        // of bus time (2 x select write + 36-byte read at 400 kHz), so this
+        // is close to the fastest the bus allows; STR1/STR3's logged Hz
+        // shows the rate actually achieved.
+        /* .i2c     = */ TIME_US2I(2500),
+#else
         /* .i2c     = */ TIME_US2I(5000),  // 200 Hz
+#endif
         /* .control = */ TIME_US2I(CONTROL_PERIOD_US),  // 400 Hz — set in src/threads.hpp, shared with CONTROL_DT_S
         /* .radio   = */ TIME_MS2I(10),
         /* .heartbeat = */ TIME_MS2I(500),

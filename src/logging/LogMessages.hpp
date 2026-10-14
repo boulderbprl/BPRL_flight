@@ -33,7 +33,7 @@ constexpr uint8_t LOG_MSG_LIN  = 0x0AU;  // linear states: position + velocity +
 constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + flight mode + arm state
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
 constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
-constexpr uint8_t LOG_MSG_STRN = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
+constexpr uint8_t LOG_MSG_STRT = 0x08U;  // strain rate sensor (CAN 0x69, 4 arms, in development)
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (SPI1, CS=PG1)  (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20948 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (SPI4, CS=PC15) (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20948 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (SPI4, CS=PC13) (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-20602 on Drone2/CubeBlueH7; body-frame, post-rotation, pre-EKF)
@@ -43,6 +43,10 @@ constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer p
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
 constexpr uint8_t LOG_MSG_TRAJ = 0x12U;  // trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command
 constexpr uint8_t LOG_MSG_MAVL = 0x13U;  // MAVLink receive counters + last trajectory command and its result (5 Hz)
+constexpr uint8_t LOG_MSG_STR1 = 0x14U;  // strain gauge array (I2C 0x09), ARM1 front right, channels 0-8, + chunk 0 receive rate
+constexpr uint8_t LOG_MSG_STR2 = 0x15U;  // strain gauge array, ARM2 back right,  channels 9-17
+constexpr uint8_t LOG_MSG_STR3 = 0x16U;  // strain gauge array, ARM3 back left,   channels 18-26, + chunk 1 receive rate
+constexpr uint8_t LOG_MSG_STR4 = 0x17U;  // strain gauge array, ARM4 front left,  channels 27-35
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -104,7 +108,7 @@ struct __attribute__((packed)) LogMsgRPMS {
 };
 // Format: "Qiiii"   Body: 8+4×4 = 24 B   Record: 27 B
 
-struct __attribute__((packed)) LogMsgSTRN {
+struct __attribute__((packed)) LogMsgSTRT {
     uint64_t time_us;
     int16_t  s0;    // arm FR strain rate (raw int16 from CAN 0x69)
     int16_t  s1;    // arm RL
@@ -236,6 +240,28 @@ struct __attribute__((packed)) LogMsgMAVL {
 };
 // Format: "QIIIIIIIIIIHB"   Body: 8+10×4+2+1 = 51 B   Record: 54 B
 
+/*
+ * Strain gauge array (src/sensors/StrainGauge.hpp) — 36 raw int16 channels
+ * (0.1 uV/count), one message per arm, 9 channels each. The sensor delivers
+ * the 36 channels as two separate 18-channel I2C chunks (chunk 0 = ARM1+ARM2,
+ * chunk 1 = ARM3+ARM4), so the first message of each chunk (STR1, STR3)
+ * also carries that chunk's measured receive rate.
+ */
+struct __attribute__((packed)) LogMsgSTRA {  // STR2, STR4
+    uint64_t time_us;
+    int16_t  d[9];   // this arm's 9 channels, in channel order
+};
+// Format: "Qhhhhhhhhh"   Body: 8+9×2 = 26 B   Record: 29 B
+
+struct __attribute__((packed)) LogMsgSTRH {  // STR1, STR3
+    uint64_t time_us;
+    int16_t  d[9];   // this arm's 9 channels, in channel order
+    uint16_t hz;     // chunks actually received from the sensor per second, averaged
+                     // over the last ~1 s — the I2C data rate, NOT the logging rate
+    uint8_t  valid;  // 1 once at least one full 36-channel frame has been read
+};
+// Format: "QhhhhhhhhhHB"   Body: 8+9×2+2+1 = 29 B   Record: 32 B
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -288,11 +314,11 @@ constexpr LogDef kLogDefs[] = {
       "TimeUS,RPM0,RPM1,RPM2,RPM3",
       sizeof(LogMsgRPMS) },
 
-    { LOG_MSG_STRN,
-      "STRN",
+    { LOG_MSG_STRT,
+      "STRT",
       "QhhhhB",
       "TimeUS,S0,S1,S2,S3,Valid",
-      sizeof(LogMsgSTRN) },
+      sizeof(LogMsgSTRT) },
 
     { LOG_MSG_IMU1,
       "IMU1",
@@ -354,6 +380,30 @@ constexpr LogDef kLogDefs[] = {
       "QIIIIIIIIIIHB",
       "TimeUS,Bytes,Ok,Bad,HB,VisP,VisV,Unk,MocTO,TrjRx,TrjRej,Cmd,Res",
       sizeof(LogMsgMAVL) },
+
+    { LOG_MSG_STR1,
+      "STR1",
+      "QhhhhhhhhhHB",
+      "TimeUS,D0,D1,D2,D3,D4,D5,D6,D7,D8,Hz,Valid",
+      sizeof(LogMsgSTRH) },
+
+    { LOG_MSG_STR2,
+      "STR2",
+      "Qhhhhhhhhh",
+      "TimeUS,D9,D10,D11,D12,D13,D14,D15,D16,D17",
+      sizeof(LogMsgSTRA) },
+
+    { LOG_MSG_STR3,
+      "STR3",
+      "QhhhhhhhhhHB",
+      "TimeUS,D18,D19,D20,D21,D22,D23,D24,D25,D26,Hz,Valid",
+      sizeof(LogMsgSTRH) },
+
+    { LOG_MSG_STR4,
+      "STR4",
+      "Qhhhhhhhhh",
+      "TimeUS,D27,D28,D29,D30,D31,D32,D33,D34,D35",
+      sizeof(LogMsgSTRA) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

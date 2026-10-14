@@ -10,14 +10,14 @@
  * src/coms/Baro/MS5611.hpp.
  *
  * CubeBlueH7 (Drone2) also hosts a strain-gauge array sensor on this same
- * I2C2 bus (36 measurements/frame, addr 0x09/0x10) — see StrainGauge.hpp,
+ * I2C2 bus (36 measurements/frame, addr 0x09) — see StrainGauge.hpp,
  * a distinct sensor from StrainRate.* and mutually exclusive with it (see
  * main.cpp's strain_gauge_init()/strain_rate_init() call site).
  *
  * Adding devices:
  *   1. Write a poll function: void my_poll(void *ctx)
  *   2. In main(): bprl_i2c_register(MY_ADDR, my_poll, nullptr);
- *   I2CThread calls i2c_poll_all() at 200 Hz.
+ *   I2CThread calls i2c_poll_all() at 200 Hz (400 Hz on CubeBlueH7).
  *
  * I2C2 on PB10 (SCL) / PB11 (SDA), AF4, 400 kHz.
  */

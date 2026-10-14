@@ -149,7 +149,7 @@ BPRL_flight/
 | SPIThread | NORMALPRIO+30 | 1 kHz | Read all three on-board IMUs + MS5611 barometer |
 | CANThread | NORMALPRIO+28 | event-driven | Block on FDCAN1 RxFIFO, dispatch frames on arrival |
 | ControlThread | NORMALPRIO+22 | 400 Hz (`CONTROL_PERIOD_US` in `src/threads.hpp`) | Full 3-lane EKF (fuse sensors → g_state[]) → FlightStateMachine → MotorMixer → motor output, all in one tick |
-| I2CThread | NORMALPRIO+20 | 200 Hz | Poll I2C devices (strain sensors; DPS310 barometer on Drone3) |
+| I2CThread | NORMALPRIO+20 (+24 on Drone2, above ControlThread) | 200 Hz (400 Hz on Drone2) | Poll I2C devices (strain sensors; DPS310 barometer on Drone3) |
 | IOMCUThread | NORMALPRIO+12 | ~400 Hz | FMU↔IO co-processor PWM writes — only built with `MOTOR_PROTO_IOMCU` (Drone2) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 200 ms tick | LED heartbeat (200 ms flash every 2 s) |
@@ -498,7 +498,8 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 | `RCIN` | 0x05 | TimeUS, RollStk, PitchStk, YawStk, ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)), Armed |
 | `OUTP` | 0x06 | TimeUS, RollTq, PitchTq, YawTq (normalized torque [-1,1] into mixer), Thr |
 | `RPMS` | 0x07 | TimeUS, RPM0–RPM3 (mechanical RPM via DShot GCR telemetry) |
-| `STRN` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
+| `STRT` | 0x08 | TimeUS, S0–S3 (int16 strain-rate, CAN 0x69), Valid |
+| `STR1`–`STR4` | 0x14–0x17 | TimeUS, then 9 raw int16 strain gauge channels each (0.1 µV/count), one message per arm: `STR1` front right (D0–D8), `STR2` back right (D9–D17), `STR3` back left (D18–D26), `STR4` front left (D27–D35). `STR1` and `STR3` add Hz (measured receive rate of I2C chunk 0 / chunk 1 from the sensor, averaged over ~1 s — not the logging rate) and Valid. Drone2 only |
 | `IMU1`/`IMU2`/`IMU3` | 0x0B/0x0C/0x0D | TimeUS, AccX, AccY, AccZ (m/s²), GyrX, GyrY, GyrZ (rad/s), Valid — one series per on-board IMU |
 | `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel), G1R, G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`, roll/pitch) |
 | `BARO` | 0x0F | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
@@ -519,7 +520,7 @@ python3 tools/logs.py logs decode LOG0042.BIN
 python3 tools/logs.py logs download --decode
 ```
 
-Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strn.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strt.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
 
 Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
 
@@ -665,7 +666,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits five CSV streams at 10 Hz over the **US
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 | `$POS` | time_ms, x, y, z (EKF position), u, v, w (EKF body velocity), mocap x, y, z, mocap vx, vy, vz, mocap_valid |
-| `$STRAIN` | time_ms, valid, last_update_ms, update_hz, then the strain gauge array's `ARM1` and `ARM2` channel values |
+| `$STRAIN` | time_ms, valid, last_update_ms, update_hz, then the strain gauge array's 36 raw int16 channels (0.1 µV/count) as `ARM1`–`ARM4` (front right, back right, back left, front left), 9 values each |
 
 Without `-DBPRL_DEBUG` the USB port still accepts commands from the ground tools — only the continuous stream is suppressed. Remove `-DBPRL_DEBUG` before flight to eliminate scheduling jitter from the print thread.
 

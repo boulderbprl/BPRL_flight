@@ -29,7 +29,7 @@ from bprl_common import (
     ImuSample, parse_imu_line,
     EkfLaneState, parse_ekfl_line,
     PosVelState, parse_pos_line,
-    StrainState, parse_strain_line,
+    StrainState, parse_strain_line, STRAIN_ARM_NAMES,
 )
 
 from rich.layout import Layout
@@ -481,20 +481,24 @@ def build_strain_panel(s: StrainState) -> Panel:
     else:
         stale_note = ""
 
-    total_ch = sum(len(a) for a in s.arms)
+    # One row per arm, columns are the channel's index within that arm; the
+    # "ch" column gives the row's global channel range (0-35) for mapping
+    # back to the sensor's own numbering.
+    per_arm = max(len(a) for a in s.arms)
     tbl = Table(show_header=True, header_style="bold", box=None, padding=(0, 1))
     tbl.add_column("Arm", min_width=6)
-    for i in range(total_ch):
-        tbl.add_column(f"ch{i}", min_width=7, justify="right")
+    tbl.add_column("Pos", min_width=8)
+    tbl.add_column("ch", min_width=6, style="dim")
+    for i in range(per_arm):
+        tbl.add_column(f"+{i}", min_width=7, justify="right")
 
-    # Global channel index per row (blank outside that arm's own slice) so
-    # the arm boundary is visible directly in the column layout.
     offset = 0
     for arm_idx, arm_vals in enumerate(s.arms):
-        cells = ([f"[bold]ARM{arm_idx + 1}[/bold]"]
-                 + [""] * offset
+        cells = ([f"[bold]ARM{arm_idx + 1}[/bold]",
+                  STRAIN_ARM_NAMES[arm_idx],
+                  f"{offset}-{offset + len(arm_vals) - 1}"]
                  + [f"{v:6d}" for v in arm_vals]
-                 + [""] * (total_ch - offset - len(arm_vals)))
+                 + [""] * (per_arm - len(arm_vals)))
         tbl.add_row(*cells)
         offset += len(arm_vals)
 

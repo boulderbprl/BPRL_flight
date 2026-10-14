@@ -418,7 +418,8 @@ static THD_FUNCTION(CANThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * I2CThread — 200 Hz  NORMALPRIO+20
+ * I2CThread — 200 Hz, NORMALPRIO+20 (CubeBlueH7: 400 Hz, NORMALPRIO+24 —
+ * above ControlThread, see threads_start() and main.cpp)
  * Calls each registered I2C device's poll function once per tick.
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(I2CThread, arg)
@@ -1692,13 +1693,12 @@ static THD_FUNCTION(DebugThread, arg)
 
         /* ── Emit $STRAIN line over USB (strain gauge array, single node) ── */
         /* Format: $STRAIN,<ms>,<valid>,<last_ms>,<hz>,
-         *   ARM1,<5 values>,ARM2,<4 values>
-         * Single I2C node at 0x09, 9 real channels total, bench-confirmed
-         * split at a physical arm boundary: data[0..4] (5 ch) = ARM1,
-         * data[5..8] (4 ch) = ARM2 — see StrainGauge.hpp for how this was
-         * determined (the sensor's chunk index doesn't actually select
-         * distinct data; only 9 channels are real). <hz> is the actual
-         * sensor update rate (successful reads/sec) computed from
+         *   ARM1,<9 values>,ARM2,<9 values>,ARM3,<9 values>,ARM4,<9 values>
+         * Single I2C node at 0x09 (ConBoard), 36 channels of raw int16
+         * counts (0.1 uV/count) in channel order 0-35, 9 per arm: ARM1 =
+         * front right, ARM2 = back right, ARM3 = back left, ARM4 = front
+         * left (see StrainGauge.hpp). <hz> is the actual sensor update rate
+         * (successful reads/sec) computed from
          * g_strain_gauge.update_count above — distinct from this thread's
          * fixed 10 Hz print rate. */
         {
@@ -1711,21 +1711,20 @@ static THD_FUNCTION(DebugThread, arg)
             memcpy(s_data, g_strain_gauge.data, sizeof(s_data));
             chMtxUnlock(&strainGauge_mtx);
 
-            static char strain_buf[192];
+            // Worst case ~50 (header) + 4 x 5 (labels) + 36 x 7 (",-32768").
+            static char strain_buf[384];
             MemoryStream strain_ms;
             msObjectInit(&strain_ms, (uint8_t *)strain_buf, sizeof(strain_buf) - 1, 0);
             chprintf((BaseSequentialStream *)&strain_ms, "$STRAIN,%lu,%d,%lu,%lu",
                      bprl_millis(),
                      (int)s_valid, (unsigned long)s_last_ms,
                      (unsigned long)strain_hz);
-            chprintf((BaseSequentialStream *)&strain_ms, ",ARM1");
-            for (int i = 0; i < STRAIN_GAUGE_ARM1_CHANNELS; i++) {
-                chprintf((BaseSequentialStream *)&strain_ms, ",%d", s_data[i]);
-            }
-            chprintf((BaseSequentialStream *)&strain_ms, ",ARM2");
-            for (int i = STRAIN_GAUGE_ARM1_CHANNELS;
-                 i < STRAIN_GAUGE_ARM1_CHANNELS + STRAIN_GAUGE_ARM2_CHANNELS; i++) {
-                chprintf((BaseSequentialStream *)&strain_ms, ",%d", s_data[i]);
+            for (int arm = 0; arm < STRAIN_GAUGE_NUM_ARMS; arm++) {
+                chprintf((BaseSequentialStream *)&strain_ms, ",ARM%d", arm + 1);
+                for (int i = 0; i < STRAIN_GAUGE_CHANNELS_PER_ARM; i++) {
+                    chprintf((BaseSequentialStream *)&strain_ms, ",%d",
+                             s_data[arm * STRAIN_GAUGE_CHANNELS_PER_ARM + i]);
+                }
             }
             chprintf((BaseSequentialStream *)&strain_ms, "\r\n");
             size_t slen = strain_ms.eos;
@@ -1744,7 +1743,8 @@ static THD_FUNCTION(DebugThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * LogThread — 50 Hz  NORMALPRIO-15
- * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRN, IMU1, IMU2, IMU3.
+ * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRT, IMU1, IMU2, IMU3
+ * (plus STR1..STR4, the strain gauge array, where the drone's config enables it).
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1839,6 +1839,32 @@ static THD_FUNCTION(LogThread, arg)
         chMtxLock(&strainRate_mtx);
         strain = g_strain_rate;
         chMtxUnlock(&strainRate_mtx);
+
+        /* ── Strain gauge array snapshot + per-chunk receive rate ─────── */
+        /* Hz is how many times each I2C chunk actually arrived per second
+         * (g_strain_gauge.chunk_count, bumped by the driver on every
+         * successful chunk read), averaged over a ~1 s window — the
+         * sensor's real data rate, independent of this thread's logging
+         * rate. */
+        StrainGaugeRaw sg = {};
+        chMtxLock(&strainGauge_mtx);
+        sg = g_strain_gauge;
+        chMtxUnlock(&strainGauge_mtx);
+        static uint32_t sg_win_start_ms  = 0;
+        static uint32_t sg_win_count[2]  = {0, 0};
+        static uint16_t sg_chunk_hz[2]   = {0, 0};
+        {
+            const uint32_t now_ms  = bprl_millis();
+            const uint32_t span_ms = now_ms - sg_win_start_ms;
+            if (span_ms >= 1000U) {
+                for (int c = 0; c < 2; c++) {
+                    const uint32_t n = sg.chunk_count[c] - sg_win_count[c];
+                    sg_chunk_hz[c]  = (uint16_t)((n * 1000U + span_ms / 2U) / span_ms);
+                    sg_win_count[c] = sg.chunk_count[c];
+                }
+                sg_win_start_ms = now_ms;
+            }
+        }
 
         /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
         uint32_t rpm_log[4];
@@ -1972,16 +1998,40 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_RPMS, msg);
         }
 
-        /* ── STRN — strain rate sensor ────────────────────────────────── */
-        if (log_en.strn) {
-            LogMsgSTRN msg = {};
+        /* ── STRT — strain rate sensor ────────────────────────────────── */
+        if (log_en.strt) {
+            LogMsgSTRT msg = {};
             msg.time_us = t_us;
             msg.s0      = strain.val[0];
             msg.s1      = strain.val[1];
             msg.s2      = strain.val[2];
             msg.s3      = strain.val[3];
             msg.valid   = (uint8_t)strain.valid;
-            logger.write(LOG_MSG_STRN, msg);
+            logger.write(LOG_MSG_STRT, msg);
+        }
+
+        /* ── STR1..STR4 — strain gauge array, one message per arm ─────── */
+        /* STR1/STR3 are the first arm of I2C chunk 0/1 and carry that
+         * chunk's receive rate (see the snapshot above). */
+        if (log_en.strg) {
+            static const uint8_t kStrId[STRAIN_GAUGE_NUM_ARMS] =
+                { LOG_MSG_STR1, LOG_MSG_STR2, LOG_MSG_STR3, LOG_MSG_STR4 };
+            for (int arm = 0; arm < STRAIN_GAUGE_NUM_ARMS; arm++) {
+                const int16_t *src = &sg.data[arm * STRAIN_GAUGE_CHANNELS_PER_ARM];
+                if ((arm % 2) == 0) {
+                    LogMsgSTRH msg = {};
+                    msg.time_us = t_us;
+                    memcpy(msg.d, src, sizeof(msg.d));
+                    msg.hz      = sg_chunk_hz[arm / 2];
+                    msg.valid   = (uint8_t)sg.valid;
+                    logger.write(kStrId[arm], msg);
+                } else {
+                    LogMsgSTRA msg = {};
+                    msg.time_us = t_us;
+                    memcpy(msg.d, src, sizeof(msg.d));
+                    logger.write(kStrId[arm], msg);
+                }
+            }
         }
 
         /* ── IMU1/IMU2/IMU3 — per-IMU raw accel + gyro ──────────────────── */
@@ -2092,7 +2142,10 @@ void threads_start(const ThreadRates &rates)
     //   SPIThread       +30  1 kHz IMU reads
     //   CANThread       +28  event-driven CAN RX
     //   ControlThread   +22  400 Hz EKF + PID/mixer/DShot
-    //   I2CThread       +20  200 Hz aux-sensor polling
+    //   I2CThread       +20  200 Hz aux-sensor polling — except CubeBlueH7
+    //                        (Drone2): +24 and 400 Hz, i.e. ABOVE ControlThread,
+    //                        because that drone's inner loop is commanded
+    //                        from the strain gauge signal this thread reads
     //   IOMCUThread     +12  ~400 Hz FMU<->IOMCU (MOTOR_PROTO_IOMCU only)
     //   RadioThread     +10  100 Hz RC input
     //   HeartbeatThread  -5  LED + DShot diag
@@ -2116,7 +2169,16 @@ void threads_start(const ThreadRates &rates)
     // Cube Blue bring-up, stage 3: ControlThread (stage 2) and now
     // I2CThread (stage 3) both re-enabled — see main.cpp's i2c_drv_init()
     // call site for why I2C was parked and why it's now cleared.
-    chThdCreateStatic(waI2C,       sizeof(waI2C),       NORMALPRIO + 20, I2CThread,       (void *)&rates.i2c);
+#if defined(BPRL_BOARD_CUBEBLUE)
+    // Above ControlThread (+22), below CANThread (+28): the strain gauge
+    // signal is this drone's inner-loop command, so a poll must never wait
+    // behind a control tick. Cheap for ControlThread — a poll is DMA-driven
+    // and this thread sleeps while the bytes are on the wire.
+    const tprio_t i2c_prio = NORMALPRIO + 24;
+#else
+    const tprio_t i2c_prio = NORMALPRIO + 20;
+#endif
+    chThdCreateStatic(waI2C,       sizeof(waI2C),       i2c_prio,        I2CThread,       (void *)&rates.i2c);
     chThdCreateStatic(waControl,   sizeof(waControl),   NORMALPRIO + 22, ControlThread,   (void *)&rates.control);
 #if MOTOR_PROTOCOL == MOTOR_PROTO_IOMCU
     chThdCreateStatic(waIOMCU,     sizeof(waIOMCU),     NORMALPRIO + 12, IOMCUThread,     nullptr);

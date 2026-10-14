@@ -141,23 +141,24 @@ const DroneConfig kDroneConfig = {
         false,  // pid_pi_enabled — off by default, see .pid_pi comment above — not yet bench/flight tuned
     },
     
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[15] }
+    // .logging — LoggingConfig { log_rate_hz, log_enabled[16] }
     {
-        50.0f, // log_rate_hz
+        100.0f, // log_rate_hz
         { true, // att
-          true, // lin
+          false, // lin
           true, // rcin
-          true, // outp
-          true, // rpms
-          true, // strn
+          false, // outp
+          false, // rpms
+          false, // strt
           false, // imu1
           false, // imu2
           false, // imu3
-          true, // indi
+          false, // indi
           false, // baro
           false, // ctun
           false, // mocp
           false, // traj
-          false }, // mavl
+          false, // mavl
+          true }, // strg (STR1..STR4)
     },
 };

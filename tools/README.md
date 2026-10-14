@@ -264,7 +264,8 @@ python3 tools/logs.py log-status
 | `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see BPRL_flight's `src/controllers/README.md`), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
-| `<stem>_strn.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_strt.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
+| `<stem>_str1.csv` … `_str4.csv` | TimeUS, 9 raw int16 strain gauge channels each (0.1 µV/count): `str1` front right (D0–D8), `str2` back right (D9–D17), `str3` back left (D18–D26), `str4` front left (D27–D35). `str1`/`str3` add Hz (measured I2C receive rate of that chunk, not the logging rate) and Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
