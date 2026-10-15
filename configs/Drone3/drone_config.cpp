@@ -43,48 +43,27 @@ const DroneConfig kDroneConfig = {
     },
 
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while no .controllers.switch_pos entry names AttCtrl::INDI; copied from Drone1 only to keep the struct valid.
-    {
-        { 6.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 6.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        0.0035f, // g1_seed_roll
-        0.0045f, // g1_seed_pitch
-        1.0f,    // indi_output_gain_roll (kappa)
-        1.0f,    // indi_output_gain_pitch (kappa)
-        0.05f,   // nlms_mu_pid
-        0.005f,  // nlms_mu_indi
-        1.5f,    // yaw_gain
-    },
-
-    // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while no .controllers.switch_pos entry names AttCtrl::INDI_JERK; copied from Drone1
-    // only to keep the struct valid — see Drone1's .indi_jerk comment.
+    // Copied verbatim from Drone1's .indi (same motors/props) — keep in sync until
+    // this airframe has its own INDI tuning.
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
-        0.0035f, // g1_seed_roll
-        0.0045f, // g1_seed_pitch
-        0.0035f, // g2_seed_roll
-        1.0f,    // indi_output_gain_roll (kappa)
+        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        0.005f, // g1_seed_roll (was indi_gain_roll)
+        0.0065f, // g1_seed_pitch (was indi_gain_pitch)
+        1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
         1.0f,    // indi_output_gain_pitch (kappa)
-        0.1f,    // jerk_output_gain_roll (kappa2)
-        0.05f,   // nlms_mu_pid
-        0.005f,  // nlms_mu_indi
-        1.5f,    // yaw_gain
+        0.05f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
+        0.005f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
+        3.0f,    // yaw_gain
     },
 
     // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while no .controllers.switch_pos entry names AttCtrl::JINDI; copied from
-    // .indi_jerk above only to keep the struct valid — see Drone1's .jindi comment.
+    // Unused while no .controllers.switch_pos entry names AttCtrl::JINDI; kept only
+    // to keep the struct valid — see Drone1's .jindi comment.
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
@@ -104,7 +83,7 @@ const DroneConfig kDroneConfig = {
     },
 
     // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
-    // Unused — AttitudePIDPI is no longer wired into FlightStateMachine's controller list (not an AttCtrl option); copied from Drone1 only to keep the struct valid.
+    // Unused while no .controllers.switch_pos entry names AttCtrl::PID_PI; copied from Drone1.
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
@@ -166,15 +145,19 @@ const DroneConfig kDroneConfig = {
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
 
-    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
     // Same motors, props and arm length as Drone1 — keep this identical to
     // Drone1's .unmixer (bench thrust fit, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0).
     {
         0.1275f,                                          // arm_length_m
         0.005144f, -4.5422e-6f, 7.5398e-9f, 5.8387e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
         7.04f,                                              // max_thrust_n
-        20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
     },
+
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
+    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
+    // Extra stage off on this airframe (2nd-order only).
+    { 20.0f, 0.0f },
 
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU. Mocap over the MAVLink radio (UART7).
@@ -184,7 +167,7 @@ const DroneConfig kDroneConfig = {
     // .controllers — ControllersConfig { switch_pos[3] }
     // Controller flown at each ctrl_select switch position [low, mid, high];
     // poshold_switch high runs POS_HOLD around it, low/mid flies it directly (STABILIZE).
-    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID } },  // PID only — the others are not yet flight tested on this airframe
+    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::INDI } },  // low/mid = PID, high = INDI (INDI not yet flight tested on this airframe)
 
     // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
@@ -195,17 +178,16 @@ const DroneConfig kDroneConfig = {
           true, // outp
           true, // rpms
           false, // strt
-          true, // imu1
-          true, // imu2
+          false, // imu1
+          false, // imu2
           false, // imu3
-          false, // indi
+          true, // indi
           false, // baro
           true, // ctun
           true, // mocp
           true, // traj
           true, // mavl
           false, // strn (STN1..STN4)
-          false, // indij
           false, // jindi
           false }, // jpid
     },

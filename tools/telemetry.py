@@ -55,7 +55,7 @@ def build_telemetry_panel(s: TelState) -> Panel:
     arm_text = Text("● ARMED  ", style="bold red") if s.armed \
                else Text("● DISARMED", style="bold green")
     mode_tag = f"[bold cyan]{flight_mode_name(s.flight_mode)}[/bold cyan]"
-    ctrl_styles = ["bold yellow", "bold magenta", "bold blue"]  # PID, INDI, PID+PI
+    ctrl_styles = ["bold yellow", "bold magenta", "bold blue", "bold green", "bold bright_red"]  # PID, INDI, PID+PI, PID_JERK, JINDI
     ctrl_style = ctrl_styles[s.active_controller] if 0 <= s.active_controller < len(ctrl_styles) else "bold red"
     ctrl_tag = f"[{ctrl_style}]{attitude_ctrl_name(s.active_controller)}[/{ctrl_style}]"
     t_sec = s.time_ms / 1000.0
@@ -77,6 +77,13 @@ def build_telemetry_panel(s: TelState) -> Panel:
                  f"R: {s.r:+8.4f}",
                  f"Pitch: {s.rc_pitch:+5.3f}")
     grid.add_row("", "", f"Yaw:   {s.rc_yaw:+5.3f}")
+    if s.rc_poshold is None:
+        grid.add_row("", "", "PosHld: [dim]n/a (old fw)[/dim]")
+    else:
+        # Same threshold FlightStateMachine uses: > +0.33 = POS_HOLD, else STABILIZE.
+        sw_tag = "[bold cyan]HIGH[/bold cyan]" if s.rc_poshold > 0.33 else \
+                 ("MID" if s.rc_poshold >= -0.33 else "LOW")
+        grid.add_row("", "", f"PosHld: {s.rc_poshold:+5.3f} {sw_tag}")
 
     imu_grid = Table.grid(padding=(0, 2))
     imu_grid.add_column(min_width=20)

@@ -42,48 +42,13 @@ const DroneConfig kDroneConfig = {
         3.0f,    // yaw_gain
     },
 
-    // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // roll_att/pitch_att/roll_rate/pitch_rate/yaw_rate/yaw_hold/g1_seed_*/
-    // indi_output_gain_*/nlms_mu_*/yaw_gain copied from .indi above (same
-    // airframe, same role — roll's g1_seed/indi_output_gain now feed the
-    // "P" term of roll's PD-style correction, jerk_output_gain_roll/
-    // g2_seed_roll the "D" term on top, see AttitudeIndiJerkGains's comment
-    // in DroneConfig.hpp).
-    // roll_accel/g2_seed_roll/jerk_output_gain_roll are new and
-    // uncharacterized — deliberately low-authority (jerk_output_gain_roll
-    // way down at 0.1, roll_accel ki=0, no integrator) pending bench/flight
-    // identification, not a tuned starting point. This replaces
-    // AttitudePIDJerk's config (retired 2026-08-11 after it flipped the
-    // drone on takeoff — see git history around that date for the writeup).
-    {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
-        { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 8.00f,  2.0f,  0.0f, 5.0f, 31.25f, 31.35f, 31.25f },    // (P was 34.2) roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; first-cut P-only, needs bench ID
-        0.006f,  // g1_seed_roll — "P" term seed, see above
-        0.0065f, // g1_seed_pitch
-        0.001f,  // g2_seed_roll — "D" term seed, bootstrapped from g1_seed_roll (same rigid-body 1/I argument), needs independent bench ID
-        0.9f,    // indi_output_gain_roll (kappa) — "P" term
-        1.0f,    // indi_output_gain_pitch (kappa)
-        0.1f,    // jerk_output_gain_roll (kappa2) — "D" term, deliberately low authority pending characterization
-        0.0f,   // nlms_mu_pid
-        0.0f,  // nlms_mu_indi
-        3.0f,    // yaw_gain
-    },
-
     // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
     // roll_att/pitch_att/roll_rate/pitch_rate/yaw_rate/yaw_hold/roll_accel/
-    // g1_seed_*/indi_output_gain_pitch copied from .indi_jerk above (same
-    // airframe, same role — roll's accel->jerk PID stage is unchanged, only
-    // what happens to jerk_cmd afterward differs, see Attitude_JINDI.hpp).
-    // h_roll = 1000/25 = 40.0, given directly. alpha is not yet
-    // characterized — 1.0 reproduces plain accel-path-only behavior (jerk
-    // path computed but zero-weighted), same "reproduces pre-adaptation
-    // behavior" convention as .indi's kappa. nlms_mu_* at 0 for now (G1
-    // adaptation machinery stays wired, just not live yet).
+    // g1_seed_* originally copied from the (now removed) INDI-Jerk
+    // controller's set, see Attitude_JINDI.hpp. h_roll = 1000/25 = 40.0,
+    // given directly. alpha = 0 is full jerk-path reliance on roll (flown,
+    // ee3b405); 1.0 would be plain accel-path-only. nlms_mu_* at 0 for now
+    // (G1 adaptation machinery stays wired, just not live yet).
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
@@ -96,7 +61,7 @@ const DroneConfig kDroneConfig = {
         0.0065f, // g1_seed_pitch
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
         40.0f,   // h_roll — 1000/25
-        0.0f,    // alpha — fully accel-path for now, not yet characterized
+        0.0f,    // alpha — 0 = fully jerk-path on roll (flown); 1 = fully accel-path
         0.0f,    // nlms_mu_pid
         0.0f,    // nlms_mu_indi
         3.0f,    // yaw_gain
@@ -155,14 +120,17 @@ const DroneConfig kDroneConfig = {
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
     
-    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
     // motor_c0..c3: bench thrust fit, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0
     {
         0.1275f,                                          // arm_length_m
         0.005144f, -4.5422e-6f, 7.5398e-9f, 5.8387e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
         7.04f,                                              // max_thrust_n
-        20.0f, 15.0f,                                       // rpm_filt_hz, rpm_filt_extra_hz
     },
+
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
+    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
+    { 20.0f, 15.0f },
    
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
@@ -192,7 +160,6 @@ const DroneConfig kDroneConfig = {
           true, // traj
           true, // mavl
           false, // strn (STN1..STN4 — no strain gauge array on this airframe)
-          false, // indij
           true, // jindi
           true }, // jpid
     },

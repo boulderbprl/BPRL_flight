@@ -13,7 +13,7 @@ COMMON="$C/PID.cpp $C/AltControl.cpp $C/PosControl.cpp $REPO/src/math/math.cpp $
 
 $CXX -o "$OUT/sim" "$SIM/sim.cpp" $COMMON \
     $C/HeadingControl.cpp $C/TrajectoryTracker.cpp $C/FlightStateMachine.cpp \
-    $C/Attitude_PID.cpp $C/Attitude_INDI.cpp $C/Attitude_INDI_Jerk.cpp \
-    $C/Attitude_JINDI.cpp $C/Attitude_PID_Jerk.cpp $C/Unmixer.cpp
+    $C/Attitude_PID.cpp $C/Attitude_INDI.cpp \
+    $C/Attitude_JINDI.cpp $C/Attitude_PID_Jerk.cpp $C/Attitude_PID_PI.cpp $C/Unmixer.cpp
 "$OUT/sim" "$OUT"
 echo "CSV output in $OUT"

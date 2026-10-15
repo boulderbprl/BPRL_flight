@@ -388,8 +388,9 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `STATEMGR_LP_UVW_HZ` | StateManager.hpp | 15 | 2nd-order lowpass cutoff for blended u/v/w fed to the controllers (Hz). |
 | `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
 | `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
-| `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
-| `STATEMGR_LP_PQRDOT_EXTRA_HZ` | StateManager.hpp | 15 | Optional extra 1st-order stage on p_dot/q_dot (Hz); 0 disables it. |
+| `ang_accel_filt.lpf_hz` | configs/&lt;Drone&gt;/drone_config.cpp | 20 | 2nd-order lowpass cutoff for p_dot/q_dot **and** motor RPM into the Unmixer (Hz) — one setting so INDI's feedback signals stay delay-matched. |
+| `ang_accel_filt.lpf_extra_hz` | configs/&lt;Drone&gt;/drone_config.cpp | 15 (Drone3: 0) | Optional extra 1st-order stage on the same two signals (Hz); 0 disables it. |
+| `STATEMGR_LP_RDOT_HZ` | StateManager.hpp | 20 | 1st-order lowpass cutoff for r_dot (Hz). |
 | `STATEMGR_GRAVACC_AVG_S` | StateManager.hpp | 0.2 | Window the accel is averaged over before each gravity-vector update (s). |
 | `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
 | `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At the current 400 Hz that's ~192 Hz (~11,520 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |

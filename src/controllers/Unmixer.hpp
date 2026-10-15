@@ -7,13 +7,13 @@
 /*
  * Unmixer — converts per-motor RPM to physical roll/pitch torques (N·m).
  *
- * Gated RPM is 2nd-order (Butterworth) lowpass filtered per motor at
- * RPM_FILT_HZ before the motor model, to knock down eRPM telemetry
- * noise/quantization feeding current_torque (the baseline AttitudeINDI adds
- * delta_torque onto), then an optional 3rd (1st-order) stage at
- * RPM_FILT_EXTRA_HZ — a static A/B knob to test whether a 2+1 order cascade
- * helps INDI; <=0 disables it (lowpass_alpha() passthrough), leaving the
- * 2nd-order-only behaviour. dt is a fixed constant rather than measured,
+ * Gated RPM is lowpass filtered per motor before the motor model, to knock
+ * down eRPM telemetry noise/quantization feeding current_torque (the
+ * baseline AttitudeINDI adds delta_torque onto). The filter is the drone's
+ * AngAccelFilterConfig — 2nd-order Butterworth at lpf_hz, then an optional
+ * 1st-order stage at lpf_extra_hz (<=0 disables it) — the exact same
+ * setting StateManager uses for p_dot/q_dot, so the two INDI feedback
+ * signals stay delay-matched by construction. dt is a fixed constant rather than measured,
  * since compute() is only ever called from ControlThread's fixed 400 Hz
  * period (CONTROL_DT_S in src/threads.hpp) — no self-timing needed.
  *
@@ -46,8 +46,9 @@
  */
 class Unmixer {
 public:
-    explicit Unmixer(const UnmixerConfig &cfg)
+    Unmixer(const UnmixerConfig &cfg, const AngAccelFilterConfig &filt)
         : _cfg(cfg)
+        , _filt(filt)
         // T_MAX = 2*sin(45°) * arm_length_m * max_thrust_n
         , _t_max_nm(2.0f * 0.70710678f * cfg.arm_length_m * cfg.max_thrust_n)
     {}
@@ -69,8 +70,9 @@ private:
     static float motor_force_N(const UnmixerConfig &cfg, float rpm);
 
     UnmixerConfig _cfg;
+    AngAccelFilterConfig _filt;
     float         _t_max_nm;
 
     Biquad2pState _rpm_filt_state[4];
-    float _rpm_extra_filt[4] = {};  // 1st-order LPF memory for the rpm_filt_extra_hz stage
+    float _rpm_extra_filt[4] = {};  // 1st-order LPF memory for the lpf_extra_hz stage
 };

@@ -9,18 +9,18 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     : _phase(FlightPhase::DISARMED)
     , _mode(FlightMode::STABILIZE)
     , _pid(cfg.pid)
-    , _indi_jerk(cfg.indi_jerk)
     , _jindi(cfg.jindi)
     , _indi(cfg.indi)
+    , _pid_pi(cfg.pid_pi)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
     , _heading(cfg.heading)
     , _yaw_stick_rate(cfg.heading.stick_rate)
-    , _unmixer(cfg.unmixer)
+    , _unmixer(cfg.unmixer, cfg.ang_accel_filt)
     , _num_controllers(0)
     , _active_index(0)
     , _indi_index(-1)
-    , _jerk_index(-1)
+    , _pid_pi_index(-1)
     , _jindi_index(-1)
     , _pid_jerk_index(-1)
 {
@@ -36,9 +36,9 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
         _indi_index = _num_controllers;
         _controllers[_num_controllers++] = &_indi;
     }
-    if (used(AttCtrl::INDI_JERK)) {
-        _jerk_index = _num_controllers;
-        _controllers[_num_controllers++] = &_indi_jerk;
+    if (used(AttCtrl::PID_PI)) {
+        _pid_pi_index = _num_controllers;
+        _controllers[_num_controllers++] = &_pid_pi;
     }
     if (used(AttCtrl::PID_JERK)) {
         _pid_jerk_index = _num_controllers;
@@ -49,10 +49,11 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
         _controllers[_num_controllers++] = &_jindi;
     }
     for (int i = 0; i < 3; ++i) {
+        _slot_ctrl[i] = slots[i];
         switch (slots[i]) {
             case AttCtrl::PID:       _slot_index[i] = 0;               break;
             case AttCtrl::INDI:      _slot_index[i] = _indi_index;     break;
-            case AttCtrl::INDI_JERK: _slot_index[i] = _jerk_index;     break;
+            case AttCtrl::PID_PI:    _slot_index[i] = _pid_pi_index;   break;
             case AttCtrl::PID_JERK:  _slot_index[i] = _pid_jerk_index; break;
             case AttCtrl::JINDI:     _slot_index[i] = _jindi_index;    break;
             default:                 _slot_index[i] = 0;               break;
@@ -63,10 +64,10 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
 void FlightStateMachine::reset_all()
 {
     _pid.reset_all();
-    _indi_jerk.reset_all();
     _jindi.reset_all();
     _pid_jerk.reset_all();
     _indi.reset_all();
+    _pid_pi.reset_all();
     _alt.reset_all();
     _pos.reset_all();
     _heading.reset();
@@ -99,18 +100,9 @@ void FlightStateMachine::run_attitude(const float euler[],
     }
 
     // roll_jerk isn't part of the shared AttitudeController::update()
-    // signature (see class comment) — hand it to AttitudeINDIJerk directly
-    // before the generic dispatch below, same pattern as set_indi_active().
-    // AttitudeINDIJerk's own NLMS estimators (G1/G2) also need to know
-    // whether it's the controller actually driving out_cmds this tick, same
-    // reasoning as _indi.set_indi_active() above.
-    if (_jerk_index >= 0) {
-        _indi_jerk.set_roll_jerk(roll_jerk);
-        _indi_jerk.set_indi_active(_active_index == _jerk_index);
-    }
-
-    // Same reasoning as the Jerk block above — AttitudeJINDI also needs
-    // roll_jerk and its own active/shadow flag before the generic dispatch.
+    // signature (see class comment) — hand it to AttitudeJINDI directly
+    // before the generic dispatch below, along with its own active/shadow
+    // flag for its NLMS estimator (same reasoning as _indi above).
     if (_jindi_index >= 0) {
         _jindi.set_roll_jerk(roll_jerk);
         _jindi.set_indi_active(_active_index == _jindi_index);
@@ -132,8 +124,8 @@ void FlightStateMachine::run_attitude(const float euler[],
     }
 
     // _indi_index is INDI's list index when the drone's config enables it
-    // (see constructor), -1 otherwise — no longer assumable as "1" now that
-    // list index 1 may instead be Jerk on a drone with INDI disabled.
+    // (see constructor), -1 otherwise — list index 1 may be a different
+    // controller on a drone with INDI disabled.
     if (_indi_index >= 0) {
         float delta_torque[2], accel_cmd[2], g1[2];
         _indi.get_diag(delta_torque, accel_cmd);
@@ -150,26 +142,6 @@ void FlightStateMachine::run_attitude(const float euler[],
         _indi_diag[9] = g1[1];
     } else {
         memset(_indi_diag, 0, sizeof(_indi_diag));
-    }
-
-    if (_jerk_index >= 0) {
-        float delta_torque[2], accel_cmd[2], g1[2];
-        _indi_jerk.get_diag(delta_torque, accel_cmd);
-        _indi_jerk.get_g1(g1);
-        _indij_diag[0] = current_torque[0];
-        _indij_diag[1] = current_torque[1];
-        _indij_diag[2] = delta_torque[0];
-        _indij_diag[3] = delta_torque[1];
-        _indij_diag[4] = cmds[_jerk_index][0];
-        _indij_diag[5] = cmds[_jerk_index][1];
-        _indij_diag[6] = accel_cmd[0];
-        _indij_diag[7] = accel_cmd[1];
-        _indij_diag[8]  = g1[0];
-        _indij_diag[9]  = _indi_jerk.get_g2();
-        _indij_diag[10] = _indi_jerk.jerk_cmd_roll();
-        _indij_diag[11] = _indi_jerk.kappa2_roll();
-    } else {
-        memset(_indij_diag, 0, sizeof(_indij_diag));
     }
 
     if (_jindi_index >= 0) {

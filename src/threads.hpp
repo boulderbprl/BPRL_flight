@@ -65,7 +65,7 @@ extern float   g_traj_diag[8];       // [traj_state, ref_n, ref_e, ref_d, yaw_tg
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 extern int     g_radio_switch_pos;   // raw controller-select switch position (0/1/2, low/mid/high) — RadioThread writes; ControlThread reads to drive FlightStateMachine::set_active_controller()
-extern int     g_active_controller;  // FlightStateMachine's resolved active controller-list index (0=PID default) — ControlThread publishes after update(), for $TEL/logging
+extern int     g_active_controller;  // AttCtrl value (configs/DroneConfig.hpp) of the controller actually flying — ControlThread publishes after update(), for $TEL
 
 extern mutex_t imu_mtx;
 extern IMURaw  g_imu[3];     // [0]=primary, [1]=ext, [2]=backup — chip set is board-conditional (ICM-45686 x3 on Drone1/CubeOrangePlus, ICM-20948 x2 + ICM-20602 on Drone2/CubeBlueH7; see src/coms/SPI.hpp)

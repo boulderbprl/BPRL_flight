@@ -53,33 +53,9 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
-    // .indi_jerk — AttitudeIndiJerkGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, g2_seed_roll, indi_output_gain_roll, indi_output_gain_pitch, jerk_output_gain_roll, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Unused while no .controllers.switch_pos entry names AttCtrl::INDI_JERK; copied from .indi
-    // above (this drone's own values) only to keep the struct valid — see
-    // Drone1's .indi_jerk comment for the full rationale.
-    {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
-        0.0035f, // g1_seed_roll
-        0.0045f, // g1_seed_pitch
-        0.0035f, // g2_seed_roll
-        1.0f,    // indi_output_gain_roll (kappa)
-        1.0f,    // indi_output_gain_pitch (kappa)
-        0.1f,    // jerk_output_gain_roll (kappa2)
-        0.05f,   // nlms_mu_pid
-        0.005f,  // nlms_mu_indi
-        1.5f,    // yaw_gain
-    },
-
     // .jindi — AttitudeJindiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, g1_seed_roll, g1_seed_pitch, indi_output_gain_pitch, h_roll, alpha, nlms_mu_pid, nlms_mu_indi, yaw_gain }
     // Unused while no .controllers.switch_pos entry names AttCtrl::JINDI; copied from
-    // .indi_jerk above (this drone's own values) only to keep the struct
-    // valid — see Drone1's .jindi comment for the full rationale.
+    // this drone's .indi values only to keep the struct valid — see Drone1's .jindi comment for the full rationale.
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
@@ -148,7 +124,7 @@ const DroneConfig kDroneConfig = {
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
     },
     
-    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n, rpm_filt_hz, rpm_filt_extra_hz }
+    // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
     // PLACEHOLDER — these 12in motors/props haven't been on the thrust stand.
     // motor_c0..c3 are the Strain_Drone_Integration branch's normalised-RPM
     // cubic (C0=4.0396 C1=4.4596 C2=1.2797 C3=0.0244, center=4841 scale=2528)
@@ -158,8 +134,11 @@ const DroneConfig kDroneConfig = {
         0.3f,                                                   // arm_length_m
         0.021051f, -6.8474e-5f, 1.78308e-7f, 1.51028e-12f,      // motor_c0, motor_c1, motor_c2, motor_c3
         27.49f,                                                 // max_thrust_n
-        20.0f, 15.0f,                                           // rpm_filt_hz, rpm_filt_extra_hz
     },
+
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
+    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
+    { 20.0f, 15.0f },
     
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
@@ -201,7 +180,6 @@ const DroneConfig kDroneConfig = {
           false, // traj
           false, // mavl
           true, // strn (STN1..STN4)
-          false, // indij
           false, // jindi
           false }, // jpid
     },

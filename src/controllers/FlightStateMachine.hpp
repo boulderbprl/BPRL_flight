@@ -2,10 +2,10 @@
 #include <cstdint>
 #include <cstring>
 #include "Attitude_PID.hpp"
-#include "Attitude_INDI_Jerk.hpp"
 #include "Attitude_JINDI.hpp"
 #include "Attitude_PID_Jerk.hpp"
 #include "Attitude_INDI.hpp"
+#include "Attitude_PID_PI.hpp"
 #include "AttitudeController.hpp"
 #include "AltControl.hpp"
 #include "PosControl.hpp"
@@ -58,23 +58,22 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * Every controller in the drone's config list runs every tick (shadow mode —
  * see code_rework.md Section 3.4), so a controller not currently selected
  * stays live and its output is always directly comparable to whichever one
- * actually flew (see get_indi_diag() / get_indij_diag() / get_jindi_diag()
- * for INDI's/Jerk's/JINDI's shadow diagnostics specifically). Only the
+ * actually flew (see get_indi_diag() / get_jindi_diag() / get_pidj_diag()
+ * for INDI's/JINDI's/PIDJerk's shadow diagnostics specifically). Only the
  * controller at _active_index drives out_cmds. PID is always list index 0
  * and is the default; a drone's config (DroneConfig::controllers) decides
- * whether INDI/Jerk/JINDI are in the list. "Jerk" is AttitudeINDIJerk
- * (Attitude_INDI_Jerk.hpp) — the same accel-level INDI as AttitudeINDI for
- * pitch/yaw, but roll_jerk (the strain-fit jerk estimate) is a "D"-style
- * correction layered onto roll's accel-level INDI increment. "JINDI" is
- * AttitudeJINDI (Attitude_JINDI.hpp) — a different formulation of the same
- * idea: roll_jerk drives an independent second torque-reference path
- * (actuator-dynamics-aware), convex-combined with the accel path rather
- * than summed as P+D (see that class's comment). "PIDJerk" is
+ * whether INDI/PID+PI/PIDJerk/JINDI are in the list. "PID+PI" is
+ * AttitudePIDPI (Attitude_PID_PI.hpp) — angle→rate→accel cascade with a PI
+ * loop closed on measured angular acceleration. "JINDI" is AttitudeJINDI
+ * (Attitude_JINDI.hpp) — roll_jerk (the strain-fit jerk estimate) drives an
+ * independent second torque-reference path (actuator-dynamics-aware),
+ * convex-combined with roll's accel-level INDI path (see that class's
+ * comment). "PIDJerk" is
  * AttitudePIDJerk (Attitude_PID_Jerk.hpp) — no INDI at all: a plain
  * angle→rate→accel→jerk PID cascade on roll, the jerk loop's integrator
  * holding the torque. A controller is built into the list only if one of
  * ControllersConfig::switch_pos[low/mid/high] names it; list order is fixed
- * (PID, INDI, Jerk, PIDJerk, JINDI — whichever are used), and _slot_index[]
+ * (PID, INDI, PID+PI, PIDJerk, JINDI — whichever are used), and _slot_index[]
  * maps each switch position onto it.
  *
  * Two independent RC switches (RcChannelMap):
@@ -89,8 +88,8 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *
  * roll_jerk (the fitted roll-jerk estimate, see src/sensors/JerkFit.hpp)
  * isn't part of the shared AttitudeController::update() signature — it's
- * supplied by the caller each tick and handed to AttitudeINDIJerk/
- * AttitudeJINDI/AttitudePIDJerk via set_roll_jerk() right before the controller-list
+ * supplied by the caller each tick and handed to AttitudeJINDI/
+ * AttitudePIDJerk via set_roll_jerk() right before the controller-list
  * dispatch, whether or not either is currently the active (motor-driving)
  * controller.
  *
@@ -107,7 +106,7 @@ public:
     // pos_valid:      the N/E/D position in state_full is backed by a live
     //                 external position source (mocap link healthy)
     // rpm[4]:         per-motor mechanical RPM [FR, RL, FL, RR] (for INDI unmixer)
-    // roll_jerk:      fitted roll jerk estimate [rad/s^3] (JerkFit.hpp), fed to AttitudeINDIJerk (see set_roll_jerk())
+    // roll_jerk:      fitted roll jerk estimate [rad/s^3] (JerkFit.hpp), fed to AttitudeJINDI/AttitudePIDJerk (see set_roll_jerk())
     // out_cmds[3]:    normalised torque [roll, pitch, yaw] → MotorMixer
     // thrust_out:     throttle [0, 1] → MotorMixer
     void update(const float state_full[], const float euler[3],
@@ -119,23 +118,26 @@ public:
     // ctrl_select switch (0/1/2 = low/mid/high, see
     // ControllersConfig::switch_pos).
     //
-    // PID (list index 0) is the only controller whose output isn't anchored
-    // to the real current_torque measurement (unlike INDI/Jerk/JINDI, all of
-    // which seed from it every tick — see Attitude_INDI.cpp /
-    // Attitude_INDI_Jerk.cpp / Attitude_JINDI.cpp), so its shadow-mode integrators can drift
-    // arbitrarily far from whatever's actually being commanded while
-    // another controller flies. Reset it on the edge into PID so it starts
-    // from a clean P-only response instead of handing the motors a stale,
-    // possibly wound-up integrator.
+    // PID (list index 0) and PID+PI aren't anchored to the real
+    // current_torque measurement (unlike INDI/JINDI, which seed from it
+    // every tick — see Attitude_INDI.cpp / Attitude_JINDI.cpp), so their
+    // shadow-mode integrators can drift arbitrarily far from whatever's
+    // actually being commanded while another controller flies. Reset them
+    // on the edge in so they start from a clean P-only response instead of
+    // handing the motors a stale, possibly wound-up integrator.
     void set_active_controller(int radio_switch_pos)
     {
         const int prev_index = _active_index;
 
         const int pos = (radio_switch_pos < 0) ? 0 : (radio_switch_pos > 2) ? 2 : radio_switch_pos;
         _active_index = _slot_index[pos];
+        _active_ctrl  = _slot_ctrl[pos];
 
         if (_active_index == 0 && prev_index != 0) {
             _pid.reset_all();
+        }
+        if (_active_index == _pid_pi_index && prev_index != _pid_pi_index) {
+            _pid_pi.reset_all();
         }
 
         // AttitudePIDJerk isn't anchored to current_torque either — same
@@ -151,6 +153,10 @@ public:
     // enable a second controller) — for $TEL/logging.
     int active_index() const { return _active_index; }
 
+    // Which controller is actually driving out_cmds, as an AttCtrl value —
+    // unlike active_index(), means the same thing on every drone. For $TEL.
+    AttCtrl active_ctrl() const { return _active_ctrl; }
+
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
 
@@ -159,21 +165,8 @@ public:
     // g1_hat_roll/pitch are the live NLMS-adapted effectiveness estimate (see AttitudeINDI::get_g1()).
     void get_indi_diag(float diag[10]) const { memcpy(diag, _indi_diag, sizeof(_indi_diag)); }
 
-    // diag[12]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll]
-    // Same shape as get_indi_diag() (plus jerk_cmd_roll, kappa2_roll) — see
-    // AttitudeINDIJerk::get_diag()/get_g1()/get_g2()/jerk_cmd_roll()/kappa2_roll().
-    // Roll's delta_roll/cmd_roll are the combined P (g1_hat_roll-based) + D
-    // (g2_hat_roll-based) correction/output actually used; jerk_cmd_roll is
-    // the "D" term's target, for comparing against the actual measured
-    // roll_jerk (JKFT.Pdd in the log); kappa2_roll is the static config gain
-    // multiplying that D term (constant per flight, logged for reference).
-    // Populated when the drone's config enables Jerk
-    // (a ControllersConfig::switch_pos entry names AttCtrl::INDI_JERK), zeroed otherwise. May or may not be
-    // the controller actually driving out_cmds; see active_index().
-    void get_indij_diag(float diag[12]) const { memcpy(diag, _indij_diag, sizeof(_indij_diag)); }
-
     // diag[13]: [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll]
-    // Same shape as get_indij_diag(), plus tau_roll — see AttitudeJINDI::
+    // Same leading shape as get_indi_diag() — see AttitudeJINDI::
     // get_diag()/get_g1()/jerk_cmd_roll()/alpha_roll()/combined_torque_roll().
     // tau_accel_roll/tau_jerk_roll are roll's two independent path torque
     // references (N·m), pre-blend; tau_roll is the alpha-blended combination
@@ -282,9 +275,6 @@ private:
     // TEMP (CTUN tuning) — see get_ctun_diag()
     float _ctun_diag[12] = {};
 
-    // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — see get_indij_diag()
-    float _indij_diag[12] = {};
-
     // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — see get_jindi_diag()
     float _jindi_diag[13] = {};
 
@@ -297,10 +287,10 @@ private:
     bool _pos_valid = false;   // last update()'s pos_valid, for traj_command()
 
     AttitudePID     _pid;       // always present, always list index 0 (the default)
-    AttitudeINDIJerk _indi_jerk; // storage always exists (no heap allocation); only
-    AttitudeJINDI   _jindi;     // reachable via _controllers[] if the drone's
-    AttitudePIDJerk _pid_jerk;  //   (same — see constructor)
-    AttitudeINDI    _indi;      // config enables it (see constructor)
+    AttitudeJINDI   _jindi;     // storage always exists (no heap allocation); only
+    AttitudePIDJerk _pid_jerk;  //   reachable via _controllers[] if the drone's
+    AttitudeINDI    _indi;      //   config enables it (see constructor)
+    AttitudePIDPI   _pid_pi;
     AltControl      _alt;
     PosControl      _pos;
     HeadingControl    _heading;   // POS_HOLD only
@@ -309,14 +299,16 @@ private:
     Unmixer         _unmixer;
 
     // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────
-    static constexpr int MAX_ATTITUDE_CONTROLLERS = 5;  // PID + INDI + Jerk + JINDI + PIDJerk today
+    static constexpr int MAX_ATTITUDE_CONTROLLERS = 5;  // PID + INDI + PID+PI + PIDJerk + JINDI
     AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
     int _num_controllers;
     int _active_index;   // generalizes the old _use_indi bool
     int _indi_index;     // INDI's list index if any switch position uses it, else -1 (see constructor)
-    int _jerk_index;     // Jerk's list index if any switch position uses it, else -1 (see constructor)
+    int _pid_pi_index;   // PID+PI's list index if any switch position uses it, else -1 (see constructor)
     int _jindi_index;    // JINDI's list index if any switch position uses it, else -1 (see constructor)
     int _pid_jerk_index; // PIDJerk's list index if any switch position uses it, else -1 (see constructor)
     int _slot_index[3] = { 0, 0, 0 };  // ctrl_select switch position -> _controllers[] index
+    AttCtrl _slot_ctrl[3] = { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID };  // ctrl_select switch position -> AttCtrl (copy of ControllersConfig::switch_pos)
+    AttCtrl _active_ctrl  = AttCtrl::PID;  // _slot_ctrl[] entry for the current switch position, see active_ctrl()
     bool _pid_jerk_handover_pending = false;  // set on the switch edge into PIDJerk, consumed in run_attitude()
 };
