@@ -30,6 +30,7 @@
 #include "src/sensors/JerkFit.hpp"
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
+#include "src/coms/FRAM.hpp"
 #include "src/coms/MAVLink.hpp"
 #include "src/math/math.hpp"
 #include "src/diagnostics/ThreadTiming.hpp"
@@ -213,6 +214,11 @@ static THD_FUNCTION(SPIThread, arg)
     chRegSetThreadName("spi");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+#if defined(BPRL_HAS_FRAM)
+    // Cube boards keep the calibration in FRAM (CalFlash.cpp) — identify the
+    // chip first. A failed init just leaves cal_load() on internal flash.
+    fram_drv_init();
+#endif
     // Load persistent calibration biases before IMU init; zero biases if absent.
     g_cal_valid = cal_load(g_cal);
     if (!g_cal_valid) memset(&g_cal, 0, sizeof(g_cal));
@@ -1068,6 +1074,13 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+#if defined(BPRL_DEBUG) && defined(BPRL_HAS_FRAM)
+    } else if (strcmp(line, "FRAM,status") == 0) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "FRAM,STATUS,ready=%d,part=%s,size=%lu\r\n",
+                 (int)fram_ready(), fram_part_name(), (unsigned long)fram_size());
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strncmp(line, "CAL,", 4) == 0) {
 #ifdef BPRL_DEBUG
         const char *rest = line + 4;

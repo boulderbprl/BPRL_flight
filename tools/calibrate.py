@@ -274,9 +274,24 @@ def cmd_query(ser, args):
                                *[f"{accel[i][k]:+.5f}" for k in range(3)])
     console.print(tbl)
     if valid:
-        console.print("[green]Valid calibration in flash (magic/version/CRC OK).")
+        console.print("[green]Valid calibration stored (magic/version/CRC OK).")
     else:
-        console.print("[yellow]No valid calibration in flash — the flight controller is using zero bias.")
+        console.print("[yellow]No valid calibration stored — the flight controller is using zero bias.")
+
+    # Cube boards keep it in FRAM (survives firmware uploads); other boards,
+    # or a Cube whose FRAM didn't initialise, use internal flash, which
+    # `make flash` erases.
+    ser.reset_input_buffer()
+    send_cmd(ser, "FRAM,status")
+    fram, _ = _wait_for_line(ser, "FRAM,STATUS,", 1.0)
+    if fram and fram.startswith("FRAM,STATUS,"):
+        kv = dict(p.split("=", 1) for p in fram[len("FRAM,STATUS,"):].split(","))
+        if kv.get("ready") == "1":
+            console.print(f"Storage: FRAM ({kv.get('part')}, {kv.get('size')} B) — survives firmware uploads.")
+        else:
+            console.print("[yellow]Storage: FRAM not detected — using internal flash (erased by every upload).")
+    else:
+        console.print("Storage: internal flash (no FRAM on this board) — erased by every upload.")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

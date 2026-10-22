@@ -1,8 +1,24 @@
 #include "src/coms/CalFlash.hpp"
+#include "src/coms/FRAM.hpp"
 #include "hal.h"
 #include <cstring>
 
 /*
+ * Storage backends, in order:
+ *   1. FRAM (Cube boards, BPRL_HAS_FRAM) — the last 128 bytes of the chip.
+ *      Survives firmware uploads, like ArduPilot's parameter storage on the
+ *      same chip. The Cube bootloader's CHIP_ERASE wipes the whole app flash
+ *      including sector 7 below, so internal flash alone loses the
+ *      calibration on every `make flash`.
+ *      Placed at the END of the part: ArduPilot's StorageManager fills a
+ *      32 KB FRAM up to its last byte, and the tail is StorageParamBak (a
+ *      parameter backup, normally not full), so this is the least harmful
+ *      spot if the board is switched back and forth with ArduPilot.
+ *      ArduPilot may overwrite it in turn — the magic/CRC check then
+ *      rejects it and BPRL falls back to (2), i.e. recalibrate.
+ *   2. Internal flash, Bank 2 sector 7 — the only backend on boards without
+ *      FRAM (Orqa), and the fallback if the FRAM is absent/unresponsive.
+ *
  * STM32H743 Bank 2, sector 7 flash driver.
  *
  * Bank 2 registers (FLASH_TypeDef, stm32h743xx.h):
@@ -31,9 +47,39 @@ static uint32_t crc32(const uint8_t *data, size_t len)
     return crc ^ 0xFFFFFFFFUL;
 }
 
+// Magic/version/CRC check shared by both backends.
+static bool cal_valid(const CalibData &d)
+{
+    if (d.magic   != CAL_MAGIC)   return false;
+    if (d.version != CAL_VERSION) return false;
+    // CRC covers bytes [0 .. sizeof(CalibData) - 4 - 44) = [0 .. 80)
+    constexpr size_t crc_len = sizeof(CalibData) - sizeof(uint32_t) - 44;
+    return crc32(reinterpret_cast<const uint8_t *>(&d), crc_len) == d.crc32;
+}
+
+#if defined(BPRL_HAS_FRAM)
+static uint32_t fram_cal_offset()
+{
+    return fram_size() - sizeof(CalibData);
+}
+#endif
+
 bool cal_load(CalibData &out)
 {
     memset(&out, 0, sizeof(out));
+
+#if defined(BPRL_HAS_FRAM)
+    if (fram_ready()) {
+        CalibData d;
+        if (fram_read(fram_cal_offset(), reinterpret_cast<uint8_t *>(&d), sizeof(d))
+            && cal_valid(d)) {
+            memcpy(&out, &d, sizeof(out));
+            return true;
+        }
+        // Nothing valid in FRAM yet (first boot after this change, or
+        // overwritten by ArduPilot) — fall through to internal flash.
+    }
+#endif
 
     // The Cortex-M7 D-Cache is enabled at startup (crt1.c) and caches flash
     // reads like any other memory. Without invalidating here, a read that
@@ -45,13 +91,7 @@ bool cal_load(CalibData &out)
                                   static_cast<int32_t>(sizeof(CalibData)));
 
     const CalibData *flash = reinterpret_cast<const CalibData *>(CAL_ADDR);
-    if (flash->magic   != CAL_MAGIC)   return false;
-    if (flash->version != CAL_VERSION) return false;
-
-    // CRC covers bytes [0 .. sizeof(CalibData) - 4 - 44) = [0 .. 80)
-    constexpr size_t crc_len = sizeof(CalibData) - sizeof(uint32_t) - 44;
-    uint32_t computed = crc32(reinterpret_cast<const uint8_t *>(flash), crc_len);
-    if (computed != flash->crc32) return false;
+    if (!cal_valid(*flash)) return false;
 
     memcpy(&out, flash, sizeof(out));
     return true;
@@ -190,6 +230,22 @@ bool cal_save(const CalibData &d)
     constexpr size_t crc_len = sizeof(CalibData) - sizeof(uint32_t) - 44;
     buf.crc32 = crc32(reinterpret_cast<const uint8_t *>(&buf), crc_len);
 
+#if defined(BPRL_HAS_FRAM)
+    // FRAM present: it's the only copy written. A write needs no erase and
+    // doesn't disable interrupts, but is still verified by reading back.
+    if (fram_ready()) {
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            CalibData back;
+            if (fram_write(fram_cal_offset(), reinterpret_cast<const uint8_t *>(&buf), sizeof(buf))
+                && fram_read(fram_cal_offset(), reinterpret_cast<uint8_t *>(&back), sizeof(back))
+                && memcmp(&back, &buf, sizeof(buf)) == 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+#endif
+
     // SR2's error bits have proven unreliable as a completion signal on this
     // board — a word can pass the "no error" check yet never actually land
     // in flash (reproduced repeatedly, inconsistently, word-for-word
@@ -225,6 +281,15 @@ bool cal_save(const CalibData &d)
 
 void cal_clear()
 {
+#if defined(BPRL_HAS_FRAM)
+    // Invalidate the FRAM record, and still erase the flash copy below so an
+    // old flash calibration can't come back through cal_load()'s fallback.
+    if (fram_ready()) {
+        CalibData zero;
+        memset(&zero, 0, sizeof(zero));
+        fram_write(fram_cal_offset(), reinterpret_cast<const uint8_t *>(&zero), sizeof(zero));
+    }
+#endif
     b2_unlock();
     b2_erase_sector7();
     b2_lock();

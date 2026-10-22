@@ -225,6 +225,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \
+         src/coms/FRAM.cpp \
          src/coms/I2C.cpp \
          src/sensors/StrainRate.cpp \
          src/sensors/StrainGauge.cpp \
