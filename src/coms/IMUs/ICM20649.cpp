@@ -70,7 +70,10 @@ bool ICM20649::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
 
     set_bank(2);
     reg_write(B2_GYRO_SMPLRT,  0x00);                         // 1.125 kHz ODR
-    reg_write(B2_GYRO_CFG1,    GYRO_FS_2000DPS_20649 | 0x01); // ±2000 dps, DLPF on
+    // GYRO_DLPFCFG=2 (bits[5:3]) + FCHOICE=1: 119.5 Hz -3 dB (154 Hz NBW,
+    // ArduPilot's GYRO_DLPF_CFG_154HZ). Closest step to ~100 Hz — the next
+    // one down is 51.2 Hz. Was DLPFCFG=0 (196.6 Hz).
+    reg_write(B2_GYRO_CFG1,    (2 << 3) | GYRO_FS_2000DPS_20649 | 0x01); // ±2000 dps, DLPF 119.5 Hz
     reg_write(B2_ACCEL_SMPL_1, 0x00);
     reg_write(B2_ACCEL_SMPL_2, 0x00); // 1.125 kHz ODR
     // 0x1F = DLPFCFG(0b011=3)<<3 | ACCEL_FS_SEL(0b11)<<1 | FCHOICE(1) — same

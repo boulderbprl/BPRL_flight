@@ -134,7 +134,7 @@ const DroneConfig kDroneConfig = {
     // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
     RcTransmitter::TX2,  // RC controller 2
 
-    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
+    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min, thrust_expo }
     // Factor arrays are the standard [FR, RL, FL, RR] logical order — motor_map
     {
         { -1.0f, +1.0f, +1.0f, -1.0f },  // roll_factor  [FR, RL, FL, RR]
@@ -143,6 +143,7 @@ const DroneConfig kDroneConfig = {
         { 1, 2, 3, 0 },                  // motor_map [FR,RL,FL,RR] -> physical lane
         50, 150, 900,                    // pwm_min, pwm_idle, pwm_max
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
+        0.0f,                            // thrust_expo — 0 = linear PWM mixing (no thrust linearization)
     },
 
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }

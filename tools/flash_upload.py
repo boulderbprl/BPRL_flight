@@ -377,6 +377,123 @@ def _find_bootloader(port, baud=115200):
     return None
 
 
+# ── IMU calibration preservation ───────────────────────────────────────────────
+# The Cube's ArduPilot bootloader (CubeOrange hwdef-bl: no FLASH_RESERVE_END_KB)
+# erases the whole application flash on CHIP_ERASE — including Bank 2 sector 7
+# (0x081E0000), where CalFlash.cpp keeps the IMU calibration. So every upload
+# wipes it. Read it from the running firmware before rebooting into the
+# bootloader, then write it back once the new firmware is up. Both steps need
+# a -DBPRL_DEBUG build (CAL,* commands are debug-only); otherwise they're
+# skipped with a message.
+
+_CAL_FIELDS = 19   # 9 gyro + 9 accel biases + valid flag (see CAL,query in threads.cpp)
+
+
+def _cal_send(ser, cmd):
+    data = (cmd + "\n").encode()
+    # A write that's an exact multiple of the 64-byte USB packet size stalls
+    # in the firmware's USB buffer until more bytes arrive (no zero-length
+    # packet from Linux) — same fix as bprl_common.send_cmd.
+    if len(data) % 64 == 0:
+        data += b"\n"
+    ser.write(data)
+    ser.flush()
+
+
+def _cal_wait(ser, prefix, timeout):
+    deadline = time.monotonic() + timeout
+    buf = b""
+    while time.monotonic() < deadline:
+        buf += ser.read(4096)
+        while b"\n" in buf:
+            line_b, buf = buf.split(b"\n", 1)
+            line = line_b.decode("ascii", errors="replace").strip()
+            if line.startswith(prefix) or line.startswith("CAL,ERR"):
+                return line
+    return None
+
+
+def _cal_query(ser):
+    """Returns the 18 stored biases if the firmware holds a valid calibration,
+    [] if it answered but has none, or None if it didn't answer."""
+    ser.reset_input_buffer()
+    _cal_send(ser, "CAL,query")
+    resp = _cal_wait(ser, "CAL,DATA,", 2.0)
+    if resp is None or not resp.startswith("CAL,DATA,"):
+        return None
+    f = resp[len("CAL,DATA,"):].split(",")
+    if len(f) != _CAL_FIELDS:
+        return None
+    return [float(v) for v in f[:18]] if f[18].strip() == "1" else []
+
+
+def _open_app_port(port_arg, timeout):
+    """Open the first candidate port whose firmware answers CAL,query."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for port in _candidate_ports(port_arg):
+            try:
+                ser = serial.Serial(port, 115200, timeout=0.05)
+            except (serial.SerialException, OSError):
+                continue
+            time.sleep(0.5)   # let the stream settle after enumeration
+            cal = _cal_query(ser)
+            if cal is not None:
+                return ser, cal
+            ser.close()
+        time.sleep(0.5)
+    return None, None
+
+
+def backup_calibration(port_arg):
+    ser, cal = _open_app_port(port_arg, 3.0)
+    if ser is None:
+        print("Calibration: no answer to CAL,query (bootloader already running, or "
+              "not a DEBUG build) — can't preserve it across this upload.")
+        return None
+    ser.close()
+    if not cal:
+        print("Calibration: board has no stored calibration — nothing to preserve.")
+        return None
+    print("Calibration: read from board, will restore after upload.")
+    return cal
+
+
+def restore_calibration(port_arg, cal):
+    print("Calibration: waiting for the new firmware to restore it...")
+    ser, now = _open_app_port(port_arg, 20.0)
+    if ser is None:
+        print("Calibration: new firmware didn't answer CAL,query (not a DEBUG build?).\n"
+              "             NOT restored — the board now has no calibration. Saved values:")
+        for i in range(3):
+            print("               IMU%d gyro %s  accel %s" % (
+                i, " ".join("%+.6f" % v for v in cal[3*i:3*i+3]),
+                " ".join("%+.6f" % v for v in cal[9+3*i:9+3*i+3])))
+        return
+    try:
+        for i in range(3):
+            g, a = cal[3*i:3*i+3], cal[9+3*i:9+3*i+3]
+            ser.reset_input_buffer()
+            _cal_send(ser, "CAL,set,%d,%.6f,%.6f,%.6f,%.6f,%.6f,%.6f" % (i, *g, *a))
+            if _cal_wait(ser, "CAL,SET,%d,OK" % i, 2.0) != "CAL,SET,%d,OK" % i:
+                print("Calibration: CAL,set for IMU%d failed — NOT restored. Re-run "
+                      "tools/calibrate.py." % i)
+                return
+        ser.reset_input_buffer()
+        _cal_send(ser, "CAL,commit")
+        if _cal_wait(ser, "CAL,OK", 3.0) != "CAL,OK":
+            print("Calibration: CAL,commit failed — NOT restored. Re-run tools/calibrate.py.")
+            return
+        back = _cal_query(ser)
+        if back and all(abs(x - y) < 1e-5 for x, y in zip(back, cal)):
+            print("Calibration: restored and verified.")
+        else:
+            print("Calibration: written but read-back didn't match — check with "
+                  "tools/calibrate.py query.")
+    finally:
+        ser.close()
+
+
 # ── CLI entry point ────────────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser(
@@ -388,6 +505,9 @@ def main():
                              "Auto-detected if omitted.")
     parser.add_argument('--baud', type=int, default=115200,
                         help="Bootloader baud rate (default 115200)")
+    parser.add_argument('--no-cal-restore', action='store_true',
+                        help="Don't back up / restore the IMU calibration "
+                             "(the upload erases it — see backup_calibration)")
     args = parser.parse_args()
 
     # Warn about ModemManager on Linux (interferes with serial ports)
@@ -398,6 +518,7 @@ def main():
 
     fw = FirmwareImage(args.firmware)
     print("Loaded %s  (%d bytes)" % (args.firmware, fw.size))
+    cal = None if args.no_cal_restore else backup_calibration(args.port)
     print("Waiting for board on %s ..." % (args.port or "auto-detected port"))
     print("If no response within 5 s, unplug and re-plug the USB cable.\n")
 
@@ -411,6 +532,8 @@ def main():
                     up.upload(fw)
                 except RuntimeError as ex:
                     sys.exit("ERROR: %s" % ex)
+                if cal:
+                    restore_calibration(args.port, cal)
                 sys.exit(0)
             time.sleep(0.05)
     except KeyboardInterrupt:

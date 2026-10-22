@@ -664,6 +664,17 @@ void EKF::_update(int m, const float H[][N], const float R_diag[], const float i
             for (int k = 0; k < m; ++k)
                 K[i][j] += PHt[i][k] * Sinv[k][j];
 
+    // ── Freeze unobservable accel-bias axes (see BA_OBSERVABLE_MIN_VERT) ──
+    // Zeroing a gain row is still a valid (suboptimal) gain, so the Joseph
+    // form below keeps P consistent with it.
+    if (!_tilt_aided) {
+        float Rb[3][3];
+        quat_to_rot_body2ned(_get_quat(), Rb);
+        for (int a = 0; a < 3; ++a)
+            if (fabsf(Rb[2][a]) <= BA_OBSERVABLE_MIN_VERT)
+                for (int j = 0; j < m; ++j) K[iBax + a][j] = 0.0f;
+    }
+
     // ── x += K * innov ────────────────────────────────────────────────────
     for (int i = 0; i < N; ++i)
         for (int j = 0; j < m; ++j)

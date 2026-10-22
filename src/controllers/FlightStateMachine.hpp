@@ -219,6 +219,16 @@ public:
         _heading.yaw_frame_reset(delta_rad);
     }
 
+    // Mixer saturation from the tick just output, used by the next update().
+    // The flags describe the active controller's commands, so shadow
+    // controllers get "not limited" rather than another controller's limits.
+    void set_mixer_limits(const MixerLimits &limits)
+    {
+        for (int i = 0; i < _num_controllers; ++i)
+            _controllers[i]->set_mixer_limits(i == _active_index ? limits
+                                                                 : MixerLimits{ false, false, false });
+    }
+
 private:
     // ── Mode dispatch helpers ────────────────────────────────────────────────
     void run_attitude(const float euler[], const float state_full[],

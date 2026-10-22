@@ -25,7 +25,7 @@ float PID::_reinit(float target, float measurement, uint32_t now)
     return _kp * _error_filt;
 }
 
-float PID::update(float target, float measurement)
+float PID::update(float target, float measurement, bool limit)
 {
     const uint32_t now = now_us();
 
@@ -52,8 +52,13 @@ float PID::update(float target, float measurement)
     const float alpha_e    = lowpass_alpha(_filt_error_hz, dt);
     _error_filt = lowpass(raw_error, _error_filt, alpha_e);
 
-    _integrator += _ki * _error_filt * dt;
-    _integrator  = constrain_float(_integrator, -_imax, _imax);
+    // While saturated, only let the integrator unwind (error opposing it).
+    const bool unwinding = (_integrator > 0.0f && _error_filt < 0.0f)
+                        || (_integrator < 0.0f && _error_filt > 0.0f);
+    if (!limit || unwinding) {
+        _integrator += _ki * _error_filt * dt;
+        _integrator  = constrain_float(_integrator, -_imax, _imax);
+    }
 
     float output = _kp * _error_filt + _integrator;
     if (dt > 0.0f) {

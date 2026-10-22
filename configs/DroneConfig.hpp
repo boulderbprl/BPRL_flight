@@ -179,6 +179,9 @@ struct MotorMixerConfig {
     uint8_t motor_map[4];   // [FR, RL, FL, RR] -> physical DShot lane (0-3)
     int32_t pwm_min, pwm_idle, pwm_max;
     float   att_scale, yaw_scale, max_angle_rad, yaw_headroom_min;
+    // Thrust-curve expo for thrust linearization (ArduPilot MOT_THST_EXPO),
+    // 0..1. 0 = linear PWM mixing (no linearization). See MotorMixer.hpp.
+    float   thrust_expo;
 };
 
 // RPM-to-torque motor model + geometry (src/controllers/Unmixer.hpp).

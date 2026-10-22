@@ -7,12 +7,14 @@ static inline float clamp(float v, float lo, float hi) {
 
 void MotorMixer::update(const float cmds[3], float thrust,
                         bool armed, const float state[],
-                        int32_t out[4]) const
+                        int32_t out[4])
 {
     if (!armed || should_disarm(state)) {
         for (int i = 0; i < 4; i++) out[i] = 0;
+        _limits = MixerLimits{ true, true, true };
         return;
     }
+    _limits = MixerLimits{ false, false, false };
 
     // Motor order: FR, RL, FL, RR — logical, NOT physical lane order; see
     // MotorMixer.hpp / MotorMixerConfig.motor_map, applied at the end below.
@@ -24,7 +26,7 @@ void MotorMixer::update(const float cmds[3], float thrust,
     const float pwm_max  = (float)_cfg.pwm_max;
 
     const float span = pwm_max - pwm_min;
-    float thr     = pwm_idle + thrust * (pwm_max - pwm_idle);
+    float thr     = pwm_to_thrust(pwm_idle + thrust * (pwm_max - pwm_idle));
     const float r = cmds[0] * _cfg.att_scale;
     const float p = cmds[1] * _cfg.att_scale;
     float y       = cmds[2] * _cfg.yaw_scale;
@@ -46,6 +48,7 @@ void MotorMixer::update(const float cmds[3], float thrust,
         yaw_allowed = fminf(yaw_allowed, fmaxf(room, 0.0f) / fabsf(yaw_factor[i]));
     }
     yaw_allowed = fmaxf(yaw_allowed, _cfg.yaw_headroom_min * span);
+    if (fabsf(y) > yaw_allowed) _limits.yaw = true;
     y = clamp(y, -yaw_allowed, yaw_allowed);
 
     // Step 3: combine roll+pitch+yaw; if the combined spread still can't fit
@@ -61,12 +64,33 @@ void MotorMixer::update(const float cmds[3], float thrust,
         const float scale = span / (hi - lo);
         for (int i = 0; i < 4; i++) cmd[i] *= scale;
         lo *= scale; hi *= scale;
+        _limits = MixerLimits{ true, true, true };
     }
     thr = clamp(thr, pwm_min - lo, pwm_max - hi);
 
     // Logical [FR,RL,FL,RR] -> physical DShot lane, per motor_map.
     for (int i = 0; i < 4; i++)
-        out[_cfg.motor_map[i]] = (int32_t)clamp(thr + cmd[i], pwm_min, pwm_max);
+        out[_cfg.motor_map[i]] = (int32_t)thrust_to_pwm(clamp(thr + cmd[i], pwm_min, pwm_max));
+}
+
+float MotorMixer::pwm_to_thrust(float pwm) const
+{
+    const float e = _cfg.thrust_expo;
+    if (e <= 0.0f) return pwm;
+    const float lo = (float)_cfg.pwm_min, span = (float)(_cfg.pwm_max - _cfg.pwm_min);
+    const float a  = clamp((pwm - lo) / span, 0.0f, 1.0f);
+    return lo + span * ((1.0f - e) * a + e * a * a);
+}
+
+float MotorMixer::thrust_to_pwm(float thrust_pwm) const
+{
+    const float e = _cfg.thrust_expo;
+    if (e <= 0.0f) return thrust_pwm;
+    const float lo = (float)_cfg.pwm_min, span = (float)(_cfg.pwm_max - _cfg.pwm_min);
+    const float t  = clamp((thrust_pwm - lo) / span, 0.0f, 1.0f);
+    // Inverse of T = (1-e)a + e a^2 (ArduPilot apply_thrust_curve_and_volt_scaling).
+    const float a  = ((e - 1.0f) + sqrtf((1.0f - e) * (1.0f - e) + 4.0f * e * t)) / (2.0f * e);
+    return lo + span * a;
 }
 
 bool MotorMixer::should_disarm(const float state[]) const

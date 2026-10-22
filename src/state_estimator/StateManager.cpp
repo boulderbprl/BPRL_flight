@@ -114,7 +114,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     if (!_initialized) return;
 
     // ── 1. Predict: each lane uses its own IMU ─────────────────────────────
+    // External tilt/horizontal reference this tick (fresh IMX5 quaternion or
+    // mocap) — without one the EKF freezes non-vertical accel-bias axes
+    // (EKF::BA_OBSERVABLE_MIN_VERT), as nothing can observe them.
+    const bool tilt_aided = mocap.valid
+        || (can_imu.valid && (now_us - can_imu.quat_timestamp_us) <= STATEMGR_CAN_QUAT_STALE_US);
     for (int i = 0; i < NUM_LANES; ++i) {
+        _lanes[i].set_tilt_aided(tilt_aided);
         if (imu[i].valid)
             _lanes[i].predict(dt, imu[i].accel, imu[i].gyro);
         // A lane with no IMU behind it (e.g. imu3 on the two-IMU Orqa board)

@@ -112,9 +112,9 @@ const DroneConfig kDroneConfig = {
       0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
 
     // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
-    RcTransmitter::TX1,  // RC controller 1 — same channels this config had before the shared maps; TODO confirm on the bench which transmitter Drone2 flies with
+    RcTransmitter::TX2,  // RC controller 1 — same channels this config had before the shared maps; TODO confirm on the bench which transmitter Drone2 flies with
     
-    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min }
+    // .mixer — MotorMixerConfig { roll_factor[4], pitch_factor[4], yaw_factor[4], motor_map[4], pwm_min, pwm_idle, pwm_max, att_scale, yaw_scale, max_angle_rad, yaw_headroom_min, thrust_expo }
     {
         { -1.0f, +1.0f, +1.0f, -1.0f },  // roll_factor  [FR, RL, FL, RR]
         { +1.0f, -1.0f, +1.0f, -1.0f },  // pitch_factor
@@ -122,6 +122,7 @@ const DroneConfig kDroneConfig = {
         { 0, 1, 2, 3 },                  // motor_map — identity: ESC wired FR->MOT1..RR->MOT4
         150, 200, 950,                    // pwm_min, pwm_idle, pwm_max
         350.0f, 250.0f, 1.396f, 0.18f,   // att_scale, yaw_scale, max_angle_rad (~80deg), yaw_headroom_min
+        0.65f,                           // thrust_expo — ArduPilot's MOT_THST_EXPO default (the S500 ArduPilot logs ran 0.65/0.68); not measured for these 12in props
     },
     
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
@@ -164,15 +165,15 @@ const DroneConfig kDroneConfig = {
     // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
         100.0f, // log_rate_hz
-        { true, // att
+        { false, // att
           false, // lin
-          true, // rcin
+          false, // rcin
           false, // outp
-          false, // rpms
+          true, // rpms
           false, // strt
-          false, // imu1
-          false, // imu2
-          false, // imu3
+          true, // imu1
+          true, // imu2
+          true, // imu3
           false, // indi
           false, // baro
           false, // ctun

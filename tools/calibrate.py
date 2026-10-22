@@ -9,6 +9,7 @@ Usage:
     python3 tools/calibrate.py                        # default: calibrate (30 s collection)
     python3 tools/calibrate.py calibrate [--duration N]
     python3 tools/calibrate.py clear                  # clear stored calibration, leave at zero
+    python3 tools/calibrate.py query                  # print the calibration stored in flash
 
 Options:
     --port /dev/ttyACMx   Serial port (auto-detected if omitted)
@@ -20,7 +21,7 @@ import argparse
 import time
 
 from bprl_common import (
-    console, open_port, add_port_args,
+    console, open_port, add_port_args, send_cmd,
     parse_imu_line,
 )
 
@@ -198,8 +199,7 @@ def cmd_calibrate(ser, args):
         gx, gy, gz = gyro_bias[i]
         ax, ay, az = accel_bias[i]
         cmd = f"CAL,set,{i},{gx:.6f},{gy:.6f},{gz:.6f},{ax:.6f},{ay:.6f},{az:.6f}"
-        ser.write((cmd + "\n").encode())
-        ser.flush()
+        send_cmd(ser, cmd)   # pads 64-byte lines — see bprl_common.send_cmd
         resp, _ = _wait_for_line(ser, f"CAL,SET,{i},OK", 2.0)
         if resp != f"CAL,SET,{i},OK":
             if resp is None:
@@ -245,6 +245,40 @@ def cmd_clear(ser, args):
     console.print("[green]Calibration cleared — flight controller now uses zero bias for all IMUs.")
 
 
+def cmd_query(ser, args):
+    """Print the calibration currently stored in flash (CAL,query). This is
+    what the flight controller loads at boot and subtracts from every $IMU
+    sample — read-only, changes nothing."""
+    console.print("\n[bold]Stored IMU Calibration[/bold]")
+    ser.reset_input_buffer()   # skip the $TEL/$IMU backlog, as cmd_calibrate does
+    ser.write(b"CAL,query\n")
+    ser.flush()
+    resp, _ = _wait_for_line(ser, "CAL,DATA,", 2.0)
+    if resp is None or not resp.startswith("CAL,DATA,"):
+        console.print(f"[red]No CAL,DATA response ({resp}) — DEBUG build required.")
+        return
+    f = resp[len("CAL,DATA,"):].split(",")
+    if len(f) != 19:
+        console.print(f"[red]Malformed response: {resp}")
+        return
+    gyro  = [[float(f[i*3 + k])     for k in range(3)] for i in range(3)]
+    accel = [[float(f[9 + i*3 + k]) for k in range(3)] for i in range(3)]
+    valid = f[18].strip() == "1"
+
+    tbl = Table(title="Stored Biases (flash)", show_header=True)
+    tbl.add_column("IMU")
+    for col in ("gx (rad/s)", "gy (rad/s)", "gz (rad/s)", "ax (m/s²)", "ay (m/s²)", "az (m/s²)"):
+        tbl.add_column(col, justify="right")
+    for i in range(3):
+        tbl.add_row(f"IMU{i}", *[f"{gyro[i][k]:+.5f}" for k in range(3)],
+                               *[f"{accel[i][k]:+.5f}" for k in range(3)])
+    console.print(tbl)
+    if valid:
+        console.print("[green]Valid calibration in flash (magic/version/CRC OK).")
+    else:
+        console.print("[yellow]No valid calibration in flash — the flight controller is using zero bias.")
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -261,6 +295,9 @@ def main():
     sub.add_parser("clear",
                     help="Clear stored calibration (zero bias) without recalibrating (DEBUG build required)")
 
+    sub.add_parser("query",
+                    help="Print the calibration stored in flash (DEBUG build required)")
+
     args = parser.parse_args()
     if args.command is None:
         args.command = "calibrate"
@@ -270,6 +307,8 @@ def main():
     try:
         if args.command == "clear":
             cmd_clear(ser, args)
+        elif args.command == "query":
+            cmd_query(ser, args)
         else:
             cmd_calibrate(ser, args)
     finally:

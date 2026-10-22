@@ -63,8 +63,20 @@ def add_port_args(parser):
     parser.add_argument("--baud", type=int, default=115200)
 
 
+# USB full-speed bulk packet size. The firmware's ChibiOS serial-USB driver
+# only hands received bytes to USBCmdThread when an OUT transfer ends — on a
+# short packet (< 64 bytes) or once its 256-byte buffer fills. Linux sends no
+# zero-length packet after a write that is an exact multiple of 64 bytes, so
+# such a command sits unprocessed in the board's buffer until the next
+# command arrives (e.g. CAL,set with six positive biases is exactly 64).
+USB_PACKET_SIZE = 64
+
+
 def send_cmd(ser: serial.Serial, cmd: str):
-    ser.write((cmd + "\n").encode())
+    data = (cmd + "\n").encode()
+    if len(data) % USB_PACKET_SIZE == 0:
+        data += b"\n"   # forces a short final packet; firmware ignores empty lines
+    ser.write(data)
     ser.flush()
 
 

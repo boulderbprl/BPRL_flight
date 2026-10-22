@@ -779,6 +779,7 @@ static THD_FUNCTION(ControlThread, arg)
         int32_t motor_out[4];
         mixer.update(torque_cmds, thrust, armed, safety_state, motor_out);
         motor_output_write(motor_out);
+        flight_sm.set_mixer_limits(mixer.limits());  // anti-windup input for next tick
 
         chMtxLock(&state_mtx);
         memcpy(g_state, ctrl_full, sizeof(g_state));
