@@ -144,6 +144,13 @@ public:
         if (_active_index == _pid_jerk_index && prev_index != _pid_jerk_index) {
             _pid_jerk_handover_pending = true;
         }
+
+        // AttitudeJINDI winds up in shadow too (jerk-path stored torque and its
+        // outer integrators) — clear it on the edge into JINDI (no measured
+        // torque needed, so done here directly). See reset_jerk_path().
+        if (_jindi_index >= 0 && _active_index == _jindi_index && prev_index != _jindi_index) {
+            _jindi.reset_jerk_path();
+        }
     }
 
     // Resolved controller-list index actually driving out_cmds (may differ
@@ -249,6 +256,13 @@ private:
     // shadow-only, populating _ctun_diag / get_ctun_diag() for CTUN logging.
     // Flip to false to restore closed-loop pos-hold flight.
     static constexpr bool CTUN_POSHOLD_SHADOW = false;
+
+    // POS_HOLD position-feedback scale while JINDI is the active attitude
+    // controller (PID and the others use 1.0). LOG0076: JINDI reaches ~0.9 of
+    // commanded lean at 0.1-0.5 Hz vs PID's ~0.55 with similar phase, so the
+    // pos-hold loop ran ~1.6× hotter and swayed at ~0.4 Hz. 0.6 ≈ 0.55/0.9.
+    // Raise toward 0.7-0.8 if position hold feels too soft.
+    static constexpr float JINDI_POS_FB_SCALE = 0.85f;
 
     // Yaw stick [-1, 1] → turn rate for HeadingControl [rad/s]; zero inside
     // the deadband, rescaled outside it so there is no step at its edge.

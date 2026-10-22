@@ -59,6 +59,14 @@ public:
     float pos_tgt(int axis) const { return _pos_des[axis]; }
     float vel_tgt(int axis) const { return _vel_tgt[axis]; }
 
+    // Scales the feedback (position/velocity correction) part of the accel
+    // target only — the stick / trajectory feed-forward is untouched. Set per
+    // tick by FlightStateMachine from the active attitude controller: an
+    // attitude controller that tracks lean commands more fully (JINDI ≈ 0.9 vs
+    // PID ≈ 0.55 at 0.1-0.5 Hz, LOG0076) raises this loop's effective gain,
+    // which turned PID's slow drift into a ~0.4 Hz sway. 1.0 = unchanged.
+    void set_feedback_scale(float k) { _fb_scale = k; }
+
     // Stick frame. true: roll/pitch sticks command right/forward acceleration
     // relative to the nose, rotated by yaw into N/E (ArduPilot Loiter
     // behaviour). false: sticks command N/E directly, so "forward" only
@@ -95,8 +103,10 @@ private:
     Biquad2pState _accel_N_filt;
     Biquad2pState _accel_E_filt;
 
+    float _fb_scale = 1.0f;   // see set_feedback_scale()
+
     static constexpr float GRAVITY_MSS   = 9.80665f;
-    static constexpr float MAX_LEAN_deg  = 30.0f;   // limit on the total lean target (feed-forward + feedback)
+    static constexpr float MAX_LEAN_deg  = 40.0f;   // limit on the total lean target (feed-forward + feedback); was 30 — LOG0100: a strong gust pinned roll at 30° and carried the drone ~2.9 m into an obstacle
     static constexpr float ACCEL_FILT_HZ = 10.0f;   // feedback accel-target LPF cutoff
 
     // ── Stick / target-generator tuning ──────────────────────────────────────

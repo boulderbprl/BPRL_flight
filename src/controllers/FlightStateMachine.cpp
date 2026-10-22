@@ -311,6 +311,11 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
                      input[InputIdx::YAW_RATE], input[InputIdx::THRUST], ref);
 
     // ── N/E → lean angle commands, D → throttle, heading → yaw rate ──────────
+    // JINDI tracks lean commands ~1.6× more fully than PID at pos-hold
+    // frequencies, so its position-feedback gain is scaled down to match (see
+    // PosControl::set_feedback_scale(), JINDI_POS_FB_SCALE).
+    _pos.set_feedback_scale((_jindi_index >= 0 && _active_index == _jindi_index)
+                            ? JINDI_POS_FB_SCALE : 1.0f);
     float att_cmds[2];
     float alt_thrust;
     float yaw_rate_cmd;
