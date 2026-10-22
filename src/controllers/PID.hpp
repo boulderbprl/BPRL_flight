@@ -32,6 +32,7 @@ public:
     // Overwrite the integrator (clamped to ±imax) — for bumpless handover
     // into a controller whose integrator wound up while running in shadow.
     void  set_integrator(float value);
+    float integrator() const { return _integrator; }
 
 private:
     static constexpr float STALE_TIMEOUT_US = 200000.0f;

@@ -16,6 +16,8 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _pos(cfg.pos)
     , _heading(cfg.heading)
     , _yaw_stick_rate(cfg.heading.stick_rate)
+    // In double so 57.2958 deg lands on exactly 1.0f (the old fixed mapping).
+    , _stick_angle_scale((float)(cfg.controllers.stick_max_angle_deg * (M_PI / 180.0)))
     , _unmixer(cfg.unmixer, cfg.ang_accel_filt)
     , _num_controllers(0)
     , _active_index(0)
@@ -194,8 +196,17 @@ void FlightStateMachine::mode_stabilize(const float euler[],
                                         float roll_jerk,
                                         float out_cmds[3], float &thrust_out)
 {
-    run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
+    float att_input[InputIdx::N_INPUTS];
+    stick_to_attitude_input(input, att_input);
+    run_attitude(euler, state_full, att_input, rpm, roll_jerk, out_cmds);
     thrust_out = _alt.compute_throttle(euler[0], euler[1], input[InputIdx::THRUST]);
+}
+
+void FlightStateMachine::stick_to_attitude_input(const float input[], float out[]) const
+{
+    memcpy(out, input, InputIdx::N_INPUTS * sizeof(float));
+    out[InputIdx::ROLL_TGT]  = input[InputIdx::ROLL_TGT]  * _stick_angle_scale;
+    out[InputIdx::PITCH_TGT] = input[InputIdx::PITCH_TGT] * _stick_angle_scale;
 }
 
 // ── Mode: ALT_HOLD ──────────────────────────────────────────────────────────
@@ -216,7 +227,9 @@ void FlightStateMachine::mode_alt_hold(const float euler[],
                                        float roll_jerk,
                                        float out_cmds[3], float &thrust_out)
 {
-    run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
+    float att_input[InputIdx::N_INPUTS];
+    stick_to_attitude_input(input, att_input);
+    run_attitude(euler, state_full, att_input, rpm, roll_jerk, out_cmds);
 
     thrust_out = _alt.alt_hold(input[InputIdx::THRUST], state_full[StateIdx::Z_POS],
                                ned_vel_D(euler, state_full));
@@ -277,7 +290,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
 
     // ── Trajectory reference, if one is running ──────────────────────────────
     TrajRef ref;
-    const bool traj_active = !CTUN_POSHOLD_SHADOW &&
+    const bool traj_active = !PTUN_POSHOLD_SHADOW &&
         _traj.update(&pos_state9[0], &pos_state9[6], yaw,
                      input[InputIdx::ROLL_TGT], input[InputIdx::PITCH_TGT],
                      input[InputIdx::YAW_RATE], input[InputIdx::THRUST], ref);
@@ -297,7 +310,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
         alt_thrust = _alt.alt_hold(input[InputIdx::THRUST], cur_D, vD);
         // Skipped while POS_HOLD is flying as STABILIZE, so the heading
         // target doesn't integrate against a vehicle that isn't following it.
-        yaw_rate_cmd = CTUN_POSHOLD_SHADOW ? 0.0f
+        yaw_rate_cmd = PTUN_POSHOLD_SHADOW ? 0.0f
                      : _heading.update_rate(yaw, yaw_stick_to_rate(input[InputIdx::YAW_RATE]));
     }
     const float pos_tgt[2] = { _pos.pos_tgt(0), _pos.pos_tgt(1) };
@@ -312,27 +325,29 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     _traj_diag[6] = traj_active ? _traj.height_offset() : 0.0f;
     _traj_diag[7] = traj_active ? _traj.path_speed()    : 0.0f;
 
-    // ── CTUN shadow diagnostics: outer pos-loop + inner vel-loop targets/errors
+    // ── PTUN shadow diagnostics: outer pos-loop + inner vel-loop targets/errors
     // and the lean angle pos-hold would have sent to the attitude controller.
-    // Populated every tick regardless of CTUN_POSHOLD_SHADOW.
-    _ctun_diag[0] = pos_tgt[0];          // pos_n_tgt
-    _ctun_diag[1] = pos_tgt[0] - cur_N;  // pos_n_err
-    _ctun_diag[2] = pos_tgt[1];          // pos_e_tgt
-    _ctun_diag[3] = pos_tgt[1] - cur_E;  // pos_e_err
-    _ctun_diag[4] = vel_tgt[0];          // vel_n_tgt
-    _ctun_diag[5] = vel_tgt[0] - vN;     // vel_n_err
-    _ctun_diag[6] = vel_tgt[1];          // vel_e_tgt
-    _ctun_diag[7] = vel_tgt[1] - vE;     // vel_e_err
-    _ctun_diag[8]  = att_cmds[0];        // roll_tgt  (shadow)
-    _ctun_diag[9]  = att_cmds[1];        // pitch_tgt (shadow)
-    _ctun_diag[10] = _alt.climb_rate_tgt();       // climb_rate_tgt (shadow while CTUN_POSHOLD_SHADOW is set)
-    _ctun_diag[11] = _alt.climb_rate_tgt() - vD;  // climb_rate_err
+    // Populated every tick regardless of PTUN_POSHOLD_SHADOW.
+    _ptun_diag[0] = pos_tgt[0];          // pos_n_tgt
+    _ptun_diag[1] = pos_tgt[0] - cur_N;  // pos_n_err
+    _ptun_diag[2] = pos_tgt[1];          // pos_e_tgt
+    _ptun_diag[3] = pos_tgt[1] - cur_E;  // pos_e_err
+    _ptun_diag[4] = vel_tgt[0];          // vel_n_tgt
+    _ptun_diag[5] = vel_tgt[0] - vN;     // vel_n_err
+    _ptun_diag[6] = vel_tgt[1];          // vel_e_tgt
+    _ptun_diag[7] = vel_tgt[1] - vE;     // vel_e_err
+    _ptun_diag[8]  = att_cmds[0];        // roll_tgt  (shadow)
+    _ptun_diag[9]  = att_cmds[1];        // pitch_tgt (shadow)
+    _ptun_diag[10] = _alt.climb_rate_tgt();       // climb_rate_tgt (shadow while PTUN_POSHOLD_SHADOW is set)
+    _ptun_diag[11] = _alt.climb_rate_tgt() - vD;  // climb_rate_err
 
-    if (CTUN_POSHOLD_SHADOW) {
-        // TEMP (CTUN tuning): fly hands-off STABILIZE — direct stick to
+    if (PTUN_POSHOLD_SHADOW) {
+        // TEMP (PTUN tuning): fly hands-off STABILIZE — direct stick to
         // attitude and throttle — while the pos-hold cascade above runs
-        // shadow-only. See CTUN_POSHOLD_SHADOW.
-        run_attitude(euler, state_full, input, rpm, roll_jerk, out_cmds);
+        // shadow-only. See PTUN_POSHOLD_SHADOW.
+        float att_input[InputIdx::N_INPUTS];
+        stick_to_attitude_input(input, att_input);
+        run_attitude(euler, state_full, att_input, rpm, roll_jerk, out_cmds);
         thrust_out = _alt.compute_throttle(euler[0], euler[1], input[InputIdx::THRUST]);
         return;
     }
@@ -484,7 +499,7 @@ TrajResult FlightStateMachine::traj_command(const TrajCommand &cmd, const float 
 
         case TrajCmdType::POINT:
         case TrajCmdType::CIRCLE: {
-            const bool flying_pos_hold = (_mode == FlightMode::POS_HOLD) && !CTUN_POSHOLD_SHADOW &&
+            const bool flying_pos_hold = (_mode == FlightMode::POS_HOLD) && !PTUN_POSHOLD_SHADOW &&
                                          (_phase == FlightPhase::ACTIVE) && _pos_valid;
             if (!_traj.origin_set()) return TrajResult::NO_ORIGIN;
             if (!flying_pos_hold)    return TrajResult::NOT_READY;

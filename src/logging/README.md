@@ -78,7 +78,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g1_pitch |
 | 0x0F | BARO | time_us, pressure_pa, temp_c, alt_m, valid |
-| 0x10 | CTUN | time_us, pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err — POS_HOLD tuning diagnostics; temporary, compiled in only while `LOG_CTUN_ENABLED` is 1 |
+| 0x10 | PTUN | time_us, pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err — POS_HOLD tuning diagnostics; temporary, compiled in only while `LOG_PTUN_ENABLED` is 1 |
 | 0x11 | MOCP | time_us, x, y, z, vx, vy, vz, valid — raw mocap estimate, pre-EKF |
 | 0x12 | TRAJ | time_us, state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_off, path_speed — trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command |
 | 0x13 | MAVL | time_us, then totals since boot: bytes_rx, frames_ok, frames_bad_crc, heartbeat_rx, vision_pos_rx, vision_speed_rx, unknown_rx, mocap_timeouts, traj_cmd_rx, traj_cmd_rej; last_cmd, last_result — MAVLink receive counters (same as `MAV,diag`) and the latest trajectory command with its answer; ~5 Hz |
@@ -88,6 +88,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x1A | — | reserved (was INDJ, AttitudeINDIJerk — removed; old logs still carry it) |
 | 0x1B | JIND | time_us, unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll — AttitudeJINDI |
 | 0x1C | JPID | time_us, rate_tgt, accel_tgt, jerk_tgt, torque_pi, torque_d, torque_roll, cmd_roll, cmd_pitch, cmd_yaw — AttitudePIDJerk |
+| 0x1D | CTUN | time_us, roll_tgt, roll_err, roll_rate_tgt, roll_rate_err, pitch_tgt, pitch_err, pitch_rate_tgt, pitch_rate_err, roll_rate_i, pitch_rate_i — stock AttitudePID roll/pitch tuning (angle target rad, rate target rad/s, errors = target − measured, rate-PID integrators). Logs before 2026-10-22 used the name CTUN for 0x10 (now PTUN). |
 
 Naming: **STRT** is the strain-*rate* sensor (CAN 0x69, `LogEnableConfig::strt`); **STN1–STN4** are the strain-*gauge* array (`LogEnableConfig::strn`). INDI (0x0E) and the jerk-controller messages are logged whenever that controller is in the drone's list, selected or not (shadow mode).
 

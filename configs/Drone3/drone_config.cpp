@@ -165,10 +165,11 @@ const DroneConfig kDroneConfig = {
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
     { true, false, true, false, { -1, -1, -1, -1 } },
 
-    // .controllers — ControllersConfig { switch_pos[3] }
+    // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];
     // poshold_switch high runs POS_HOLD around it, low/mid flies it directly (STABILIZE).
-    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::INDI } },  // low/mid = PID, high = INDI (INDI not yet flight tested on this airframe)
+    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::INDI },  // low/mid = PID, high = INDI (INDI not yet flight tested on this airframe)
+      57.29578f },  // stick_max_angle_deg — 1 rad, unchanged from the old fixed mapping
 
     // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
@@ -184,12 +185,13 @@ const DroneConfig kDroneConfig = {
           false, // imu3
           true, // indi
           false, // baro
-          true, // ctun
+          true, // ptun
           true, // mocp
           true, // traj
           true, // mavl
           false, // strn (STN1..STN4)
           false, // jindi
-          false }, // jpid
+          false, // jpid
+          false }, // ctun (AttitudePID tuning)
     },
 };

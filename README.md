@@ -161,7 +161,8 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_armed` | `state_mtx` | Arm state |
 | `g_flight_mode` | `state_mtx` | `FlightStateMachine`'s current flight mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD) |
 | `g_indi_diag[10]` | `state_mtx` | INDI shadow diagnostics (unmixed torque, delta torque, command, commanded accel, `G1_hat`; roll/pitch each) — feeds the `INDI` log |
-| `g_ctun_diag[12]` | `state_mtx` | POS_HOLD tuning diagnostics (N/E position and velocity targets/errors, lean-angle targets, climb-rate target/error) — computed in `FlightStateMachine::mode_pos_hold()`, feeds the `CTUN` log; holds its last values outside active POS_HOLD |
+| `g_ptun_diag[12]` | `state_mtx` | POS_HOLD tuning diagnostics (N/E position and velocity targets/errors, lean-angle targets, climb-rate target/error) — computed in `FlightStateMachine::mode_pos_hold()`, feeds the `PTUN` log; holds its last values outside active POS_HOLD |
+| `g_ctun_diag[10]` | `state_mtx` | AttitudePID roll/pitch tuning diagnostics (angle/rate targets and errors, rate integrators) — from `AttitudePID::get_ctun_diag()` via `FlightStateMachine::get_ctun_diag()` |
 | `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
 | `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default; INDI and/or PID+PI follow, if the drone's config enables them — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)) — for `$TEL`/logging |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
@@ -489,7 +490,8 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 | `IMU1`/`IMU2`/`IMU3` | 0x0B/0x0C/0x0D | TimeUS, AccX, AccY, AccZ (m/s²), GyrX, GyrY, GyrZ (rad/s), Valid — one series per on-board IMU |
 | `INDI` | 0x0E | TimeUS, UnmixR, UnmixP (N·m measured), DeltaR, DeltaP (N·m INDI correction), CmdR, CmdP (normalized), AccR, AccP (rad/s² INDI-commanded accel), G1R, G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`, roll/pitch) |
 | `BARO` | 0x0F | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
-| `CTUN` | 0x10 | TimeUS, PNT, PNE, PET, PEE (N/E position target and error, m), VNT, VNE, VET, VEE (N/E velocity target and error, m/s), RolT, PitT (lean-angle targets, rad), ClbT, ClbE (climb-rate target and error, m/s, positive = descending) — POS_HOLD tuning diagnostics; only meaningful while POS_HOLD is active (values hold otherwise). Temporary: compiled in only while `LOG_CTUN_ENABLED` is 1 in `LogMessages.hpp` |
+| `PTUN` | 0x10 | TimeUS, PNT, PNE, PET, PEE (N/E position target and error, m), VNT, VNE, VET, VEE (N/E velocity target and error, m/s), RolT, PitT (lean-angle targets, rad), ClbT, ClbE (climb-rate target and error, m/s, positive = descending) — POS_HOLD tuning diagnostics; only meaningful while POS_HOLD is active (values hold otherwise). Temporary: compiled in only while `LOG_PTUN_ENABLED` is 1 in `LogMessages.hpp` |
+| `CTUN` | 0x1D | TimeUS, RolT, RolE (roll angle target/error, rad), RRT, RRE (roll rate target/error, rad/s), PitT, PitE, PRT, PRE (same for pitch), RI, PI (rate-PID integrators) — stock AttitudePID tuning. Before 2026-10-22, "CTUN" was the 0x10 pos-hold message now called PTUN |
 | `MOCP` | 0x11 | TimeUS, X, Y, Z (m NED), VX, VY, VZ (m/s), Valid — raw mocap estimate before the EKF |
 
 TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the `LogThread` period (50 Hz by default), so it would only ever record a constant.
@@ -506,7 +508,7 @@ python3 tools/logs.py logs decode LOG0042.BIN
 python3 tools/logs.py logs download --decode
 ```
 
-Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strt.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
+Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strt.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ptun.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
 
 Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
 

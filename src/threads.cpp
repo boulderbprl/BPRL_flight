@@ -53,7 +53,8 @@ float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — 
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever pid_jerk_enabled
 float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever jindi_enabled
-float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
+float   g_ctun_diag[10]      = {};   // AttitudePID tuning diagnostics, see threads.hpp
+float   g_ptun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 float   g_traj_diag[8]       = {};   // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed]
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
@@ -767,7 +768,10 @@ static THD_FUNCTION(ControlThread, arg)
         float indi_diag[10];
         flight_sm.get_indi_diag(indi_diag);
 
-        float ctun_diag[12];
+        float ptun_diag[12];
+        flight_sm.get_ptun_diag(ptun_diag);
+
+        float ctun_diag[10];
         flight_sm.get_ctun_diag(ctun_diag);
 
 
@@ -795,6 +799,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[2] = torque_cmds[2];
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
+        memcpy(g_ptun_diag, ptun_diag, sizeof(g_ptun_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
         memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
         memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
@@ -1916,7 +1921,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], traj_diag[8], jindi_diag[13], pidj_diag[9];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ptun_diag[12], ctun_diag[10], traj_diag[8], jindi_diag[13], pidj_diag[9];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -1924,6 +1929,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(inp,        g_input,      sizeof(inp));
         memcpy(ctrl,       g_ctrl,       sizeof(ctrl));
         memcpy(indi_diag,  g_indi_diag,  sizeof(indi_diag));
+        memcpy(ptun_diag,  g_ptun_diag,  sizeof(ptun_diag));
         memcpy(ctun_diag,  g_ctun_diag,  sizeof(ctun_diag));
         memcpy(traj_diag,  g_traj_diag,  sizeof(traj_diag));
         memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
@@ -2103,26 +2109,43 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_JPID, msg);
         }
 
-#if LOG_CTUN_ENABLED
-        /* ── CTUN — TEMP pos-hold NE tuning diagnostics ───────────────── */
-        if (log_en.ctun) {
-            LogMsgCTUN msg = {};
+#if LOG_PTUN_ENABLED
+        /* ── PTUN — TEMP pos-hold NE tuning diagnostics ───────────────── */
+        if (log_en.ptun) {
+            LogMsgPTUN msg = {};
             msg.time_us   = t_us;
-            msg.pos_n_tgt = ctun_diag[0];
-            msg.pos_n_err = ctun_diag[1];
-            msg.pos_e_tgt = ctun_diag[2];
-            msg.pos_e_err = ctun_diag[3];
-            msg.vel_n_tgt = ctun_diag[4];
-            msg.vel_n_err = ctun_diag[5];
-            msg.vel_e_tgt = ctun_diag[6];
-            msg.vel_e_err = ctun_diag[7];
-            msg.roll_tgt  = ctun_diag[8];
-            msg.pitch_tgt = ctun_diag[9];
-            msg.climb_rate_tgt = ctun_diag[10];
-            msg.climb_rate_err = ctun_diag[11];
-            logger.write(LOG_MSG_CTUN, msg);
+            msg.pos_n_tgt = ptun_diag[0];
+            msg.pos_n_err = ptun_diag[1];
+            msg.pos_e_tgt = ptun_diag[2];
+            msg.pos_e_err = ptun_diag[3];
+            msg.vel_n_tgt = ptun_diag[4];
+            msg.vel_n_err = ptun_diag[5];
+            msg.vel_e_tgt = ptun_diag[6];
+            msg.vel_e_err = ptun_diag[7];
+            msg.roll_tgt  = ptun_diag[8];
+            msg.pitch_tgt = ptun_diag[9];
+            msg.climb_rate_tgt = ptun_diag[10];
+            msg.climb_rate_err = ptun_diag[11];
+            logger.write(LOG_MSG_PTUN, msg);
         }
 #endif
+
+        /* ── CTUN — AttitudePID roll/pitch tuning diagnostics ────────── */
+        if (log_en.ctun) {
+            LogMsgCTUN msg = {};
+            msg.time_us        = t_us;
+            msg.roll_tgt       = ctun_diag[0];
+            msg.roll_err       = ctun_diag[1];
+            msg.roll_rate_tgt  = ctun_diag[2];
+            msg.roll_rate_err  = ctun_diag[3];
+            msg.pitch_tgt      = ctun_diag[4];
+            msg.pitch_err      = ctun_diag[5];
+            msg.pitch_rate_tgt = ctun_diag[6];
+            msg.pitch_rate_err = ctun_diag[7];
+            msg.roll_rate_i    = ctun_diag[8];
+            msg.pitch_rate_i   = ctun_diag[9];
+            logger.write(LOG_MSG_CTUN, msg);
+        }
 
         /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
         if (log_en.rpms) {

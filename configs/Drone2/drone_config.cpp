@@ -27,13 +27,13 @@
 const DroneConfig kDroneConfig = {
     // .pid — AttitudePidGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, yaw_stick_gain }
     {
-        { 4.50f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 4.50f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
         { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  — S500 ArduPilot-tuned (was Drone1's 0.08/0.05/0.002, filt_d 30)
         { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate — S500 ArduPilot-tuned (was Drone1's 0.09/0.06/0.002, filt_d 30)
-        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
-        { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
-        3.0f,  // yaw_stick_gain
+        { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
+        4.0f,  // yaw_stick_gain
     },
     
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
@@ -91,7 +91,7 @@ const DroneConfig kDroneConfig = {
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_D
         { 0.15f, 0.05f, 0.0f, 0.3f, 0.0f, 5.0f, 20.0f },  // climb_rate
-        0.40f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
+        0.50f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
     },
     
     // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
@@ -157,17 +157,18 @@ const DroneConfig kDroneConfig = {
         { 0, 3, 1, 2 }, // encoder_motor_map — [node0..node3] -> logical motor (FR=0/RL=1/FL=2/RR=3)
     },
 
-    // .controllers — ControllersConfig { switch_pos[3] }
+    // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];
     // poshold_switch high runs POS_HOLD around it, low/mid flies it directly (STABILIZE).
-    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID } },  // PID only — the others are not yet bench/flight tuned on this airframe
+    { { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID },  // PID only — the others are not yet bench/flight tuned on this airframe
+      30.0f },  // stick_max_angle_deg — ArduPilot ANGLE_MAX default (was 1 rad = 57°)
     
     // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
         100.0f, // log_rate_hz
         { false, // att
           false, // lin
-          false, // rcin
+          true, // rcin
           false, // outp
           true, // rpms
           false, // strt
@@ -176,12 +177,13 @@ const DroneConfig kDroneConfig = {
           true, // imu3
           false, // indi
           false, // baro
-          false, // ctun
+          false, // ptun
           false, // mocp
           false, // traj
           false, // mavl
           true, // strn (STN1..STN4)
           false, // jindi
-          false }, // jpid
+          false, // jpid
+          false }, // ctun (AttitudePID tuning)
     },
 };

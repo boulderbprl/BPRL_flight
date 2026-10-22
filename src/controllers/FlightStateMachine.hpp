@@ -50,9 +50,9 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * heading target). STABILIZE and ALT_HOLD leave yaw to each attitude
  * controller's own rate loop + heading-lock trim.
  *
- * TEMP (CTUN tuning, see CTUN_POSHOLD_SHADOW): while true, POS_HOLD actually
+ * TEMP (PTUN tuning, see PTUN_POSHOLD_SHADOW): while true, POS_HOLD actually
  * flies hands-off STABILIZE — the pos-hold NE cascade still runs every tick
- * but only in shadow, feeding get_ctun_diag() for the CTUN log. Flip that
+ * but only in shadow, feeding get_ptun_diag() for the PTUN log. Flip that
  * flag to false to restore closed-loop pos-hold flight.
  *
  * Every controller in the drone's config list runs every tick (shadow mode —
@@ -188,12 +188,17 @@ public:
     // be the controller actually driving out_cmds; see active_index().
     void get_pidj_diag(float diag[9]) const { memcpy(diag, _pidj_diag, sizeof(_pidj_diag)); }
 
-    // TEMP (CTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
+    // TEMP (PTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
     // vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt,
     // climb_rate_tgt, climb_rate_err].
     // Populated by mode_pos_hold's outer pos + inner vel + climb-rate loops
-    // every tick that mode is POS_HOLD, regardless of CTUN_POSHOLD_SHADOW.
-    void get_ctun_diag(float diag[12]) const { memcpy(diag, _ctun_diag, sizeof(_ctun_diag)); }
+    // every tick that mode is POS_HOLD, regardless of PTUN_POSHOLD_SHADOW.
+    void get_ptun_diag(float diag[12]) const { memcpy(diag, _ptun_diag, sizeof(_ptun_diag)); }
+
+    // CTUN: the stock AttitudePID's roll/pitch angle + rate targets, errors
+    // and rate integrators — see AttitudePID::get_ctun_diag(). AttitudePID
+    // always runs, so this is live even when another controller is flying.
+    void get_ctun_diag(float diag[10]) const { _pid.get_ctun_diag(diag); }
 
     // Trajectory command (set origin / point / circle / stop — see
     // TrajectoryTracker.hpp). Call from ControlThread after update(), with
@@ -247,11 +252,16 @@ private:
                        const float input[], const uint32_t rpm[],
                        float roll_jerk, float out_cmds[3], float &thrust_out);
 
-    // TEMP (CTUN tuning): while true, POS_HOLD flies hands-off like STABILIZE
+    // TEMP (PTUN tuning): while true, POS_HOLD flies hands-off like STABILIZE
     // (direct stick → attitude/throttle) and the pos-hold NE cascade runs
-    // shadow-only, populating _ctun_diag / get_ctun_diag() for CTUN logging.
+    // shadow-only, populating _ptun_diag / get_ptun_diag() for PTUN logging.
     // Flip to false to restore closed-loop pos-hold flight.
-    static constexpr bool CTUN_POSHOLD_SHADOW = false;
+    static constexpr bool PTUN_POSHOLD_SHADOW = false;
+
+    // Copy of input[] with the roll/pitch sticks [-1, 1] scaled to lean-angle
+    // targets [rad] (stick_max_angle_deg), for the paths where the stick
+    // drives the attitude controllers directly.
+    void stick_to_attitude_input(const float input[], float out[]) const;
 
     // Yaw stick [-1, 1] → turn rate for HeadingControl [rad/s]; zero inside
     // the deadband, rescaled outside it so there is no step at its edge.
@@ -268,7 +278,7 @@ private:
     // climb-rate command centered on a hold-altitude deadband, so intent-to-fly
     // means crossing past that center.
     static constexpr float    TAKEOFF_THR_THRESHOLD_STABILIZE = 0.10f;
-    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.50f;  // ALT_HOLD / POS_HOLD — drop to 0.10 if CTUN_POSHOLD_SHADOW is set back to true (POS_HOLD then flies as STABILIZE)
+    static constexpr float    TAKEOFF_THR_THRESHOLD_HOLD      = 0.50f;  // ALT_HOLD / POS_HOLD — drop to 0.10 if PTUN_POSHOLD_SHADOW is set back to true (POS_HOLD then flies as STABILIZE)
     static constexpr uint32_t TAKEOFF_DEBOUNCE_TICKS = 100;   // 0.25 s @ 400 Hz sustained push
     static constexpr float    LANDED_THR_THRESHOLD   = 0.15f; // commanded thrust considered "at rest"
     static constexpr float    LANDED_VEL_THRESHOLD   = 0.2f;  // m/s, vertical speed considered "at rest"
@@ -282,8 +292,8 @@ private:
     // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — see get_indi_diag()
     float _indi_diag[10] = {};
 
-    // TEMP (CTUN tuning) — see get_ctun_diag()
-    float _ctun_diag[12] = {};
+    // TEMP (PTUN tuning) — see get_ptun_diag()
+    float _ptun_diag[12] = {};
 
     // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — see get_jindi_diag()
     float _jindi_diag[13] = {};
@@ -306,6 +316,7 @@ private:
     HeadingControl    _heading;   // POS_HOLD only
     TrajectoryTracker _traj;      // POS_HOLD only
     float           _yaw_stick_rate; // from DroneConfig::heading.stick_rate
+    float           _stick_angle_scale; // rad of lean per unit roll/pitch stick, from DroneConfig::controllers.stick_max_angle_deg
     Unmixer         _unmixer;
 
     // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────

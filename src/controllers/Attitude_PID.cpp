@@ -42,6 +42,17 @@ void AttitudePID::update(const float euler[3], const float state_full[], const f
     out_cmds[0] = constrain_float(roll_raw,  -1.0f, 1.0f);
     out_cmds[1] = constrain_float(pitch_raw, -1.0f, 1.0f);
 
+    _ctun_diag[0] = input[1];
+    _ctun_diag[1] = input[1] - state6[0];
+    _ctun_diag[2] = roll_rate_tgt;
+    _ctun_diag[3] = roll_rate_tgt - state6[3];
+    _ctun_diag[4] = input[2];
+    _ctun_diag[5] = input[2] - state6[1];
+    _ctun_diag[6] = pitch_rate_tgt;
+    _ctun_diag[7] = pitch_rate_tgt - state6[4];
+    _ctun_diag[8] = _roll_rate.integrator();
+    _ctun_diag[9] = _pitch_rate.integrator();
+
     // ── Yaw: rate PID + heading-lock trim
     const float yaw_now = state6[2];
     float yaw_rate_tgt;
@@ -73,4 +84,5 @@ void AttitudePID::reset_all()
     _yaw_rate.reset();  _yaw_hold.reset();
     _yaw_target_valid = false;
     _out_clipped[0] = _out_clipped[1] = _out_clipped[2] = false;
+    memset(_ctun_diag, 0, sizeof(_ctun_diag));   // update() doesn't run while grounded/disarmed
 }

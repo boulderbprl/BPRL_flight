@@ -247,6 +247,13 @@ enum class AttCtrl : uint8_t {
 // selected controller either directly (STABILIZE) or under POS_HOLD.
 struct ControllersConfig {
     AttCtrl switch_pos[3];
+    // Lean angle commanded by full roll/pitch stick wherever the stick drives
+    // the attitude loop directly (STABILIZE, and POS_HOLD while
+    // PTUN_POSHOLD_SHADOW flies it as STABILIZE) — ArduPilot's ANGLE_MAX.
+    // POS_HOLD's stick→velocity path doesn't use it. 57.29578 = 1 rad
+    // (exactly 1.0f after conversion), the fixed mapping every drone flew
+    // before this was configurable.
+    float   stick_max_angle_deg;
 };
 
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
@@ -254,9 +261,10 @@ struct ControllersConfig {
 // Logger::write_schema_header(), which still emits every type's FMT record
 // regardless (Logger itself stays config-agnostic).
 struct LogEnableConfig {
-    bool att, lin, rcin, outp, rpms, strt, imu1, imu2, imu3, indi, baro, ctun, mocp, traj, mavl;
+    bool att, lin, rcin, outp, rpms, strt, imu1, imu2, imu3, indi, baro, ptun, mocp, traj, mavl;
     bool strn;                // strain gauge array — gates all four of STN1..STN4 together
     bool jindi, jpid;         // jerk-controller diagnostics (JIND / JPID)
+    bool ctun;                // AttitudePID roll/pitch tuning (CTUN); ptun above is POS_HOLD tuning (PTUN)
 };
 
 struct LoggingConfig {

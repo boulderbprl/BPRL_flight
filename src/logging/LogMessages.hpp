@@ -21,10 +21,10 @@
  *   3. Snapshot the data and call logger.write(LOG_MSG_*, msg) in LogThread.
  */
 
-/* ── Controller-tuning log (CTUN) ────────────────────────────────────────────
+/* ── Position-hold tuning log (PTUN) ─────────────────────────────────────────
  * Temporary, gain-tuning-only message. Flip to 0 to strip it out of the
  * schema header and LogThread writes entirely once tuning is done. */
-#define LOG_CTUN_ENABLED 1
+#define LOG_PTUN_ENABLED 1
 
 /* ── Message IDs ─────────────────────────────────────────────────────────── */
 constexpr uint8_t LOG_MSG_FMT  = 0x80U;  // schema header — written once at file open
@@ -39,7 +39,7 @@ constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (SPI4, CS=PC1
 constexpr uint8_t LOG_MSG_IMU3 = 0x0DU;  // raw accel + gyro, IMU3 (SPI4, CS=PC13) (board-conditional chip, see IMU1) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_INDI = 0x0EU;  // INDI shadow-controller diagnostics (always logged, regardless of FlightStateMachine's active controller)
 constexpr uint8_t LOG_MSG_BARO = 0x0FU;  // barometric pressure/temperature/altitude (MS5611, SPI1, CS=PD7)
-constexpr uint8_t LOG_MSG_CTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
+constexpr uint8_t LOG_MSG_PTUN = 0x10U;  // TEMP: pos-hold NE tuning — outer pos + inner vel loop targets/errors, shadow lean-angle target
 constexpr uint8_t LOG_MSG_MOCP = 0x11U;  // raw mocap position/velocity estimate, pre-EKF (MAVLink VISION_POSITION/SPEED_ESTIMATE)
 constexpr uint8_t LOG_MSG_TRAJ = 0x12U;  // trajectory tracker state + reference, and POS_HOLD's heading target / yaw-rate command
 constexpr uint8_t LOG_MSG_MAVL = 0x13U;  // MAVLink receive counters + last trajectory command and its result (5 Hz)
@@ -52,6 +52,7 @@ constexpr uint8_t LOG_MSG_PIDJ = 0x19U;  // original single-stage AttitudePIDJer
 // 0x1A reserved — was INDJ (AttitudeINDIJerk, removed). Don't reuse: old logs still carry it.
 constexpr uint8_t LOG_MSG_JINDI = 0x1BU; // AttitudeJINDI diagnostics — roll_jerk as an independent convex-combined path, see Attitude_JINDI.hpp
 constexpr uint8_t LOG_MSG_JPID = 0x1CU;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
+constexpr uint8_t LOG_MSG_CTUN = 0x1DU;  // AttitudePID roll/pitch tuning: angle + rate targets, errors, rate integrators (0x10 is PTUN — old logs' "CTUN" at 0x10 was today's PTUN)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -228,8 +229,8 @@ struct __attribute__((packed)) LogMsgBARO {
 };
 // Format: "QfffB"   Body: 8+3×4+1 = 21 B   Record: 24 B
 
-#if LOG_CTUN_ENABLED
-struct __attribute__((packed)) LogMsgCTUN {
+#if LOG_PTUN_ENABLED
+struct __attribute__((packed)) LogMsgPTUN {
     uint64_t time_us;
     float    pos_n_tgt;   // m    outer pos-hold loop N target (shadow — POS_HOLD flies as STABILIZE while tuning)
     float    pos_n_err;   // m    outer loop N error, target - measured
@@ -247,6 +248,21 @@ struct __attribute__((packed)) LogMsgCTUN {
 // Format: "Qffffffffffff"   Body: 8+12×4 = 56 B   Record: 59 B
 #endif
 
+struct __attribute__((packed)) LogMsgCTUN {
+    uint64_t time_us;
+    float    roll_tgt;       // rad    roll angle target into AttitudePID (scaled stick, or POS_HOLD's lean target)
+    float    roll_err;       // rad    roll_tgt - measured roll
+    float    roll_rate_tgt;  // rad/s  angle loop output = rate loop target (before the rate PID's target filter)
+    float    roll_rate_err;  // rad/s  roll_rate_tgt - measured p
+    float    pitch_tgt;      // rad
+    float    pitch_err;      // rad
+    float    pitch_rate_tgt; // rad/s
+    float    pitch_rate_err; // rad/s  pitch_rate_tgt - measured q
+    float    roll_rate_i;    // roll rate PID integrator (normalised output units, ±imax)
+    float    pitch_rate_i;   // pitch rate PID integrator
+};
+// Format: "Qffffffffff"   Body: 8+10×4 = 48 B   Record: 51 B
+
 struct __attribute__((packed)) LogMsgMOCP {
     uint64_t time_us;
     float    x;      // m    NED position, raw from VISION_POSITION_ESTIMATE
@@ -262,7 +278,7 @@ struct __attribute__((packed)) LogMsgMOCP {
 struct __attribute__((packed)) LogMsgTRAJ {
     uint64_t time_us;
     uint8_t  state;        // TrajState: 0 idle (POS_HOLD on the sticks), 1 moving to a point / to the circle, 2 holding a point, 3 on the circle
-    float    ref_n;        // m      reference position N the controllers are tracking (0 while idle — see CTUN for the stick targets)
+    float    ref_n;        // m      reference position N the controllers are tracking (0 while idle — see PTUN for the stick targets)
     float    ref_e;        // m
     float    ref_d;        // m      includes the pilot's height offset
     float    yaw_tgt;      // rad    HeadingControl's heading target (live whenever POS_HOLD is flying, trajectory or not)
@@ -339,7 +355,7 @@ struct LogDef {
     // string longer than its field's usable length is silently truncated by
     // strncpy, not rejected — UAV Log Viewer then shows the record with
     // fields missing past the cut, with no build or runtime error to flag it
-    // (this happened once already, see the CTUN entry below). The
+    // (this happened once already, see the PTUN entry below). The
     // static_assert after kLogDefs[] below catches this at compile time for
     // every entry, so the exact limits only need to be correct here, not
     // re-verified by hand per entry.
@@ -422,9 +438,9 @@ constexpr LogDef kLogDefs[] = {
       "TimeUS,Press,Temp,Alt,Valid",
       sizeof(LogMsgBARO) },
 
-#if LOG_CTUN_ENABLED
-    { LOG_MSG_CTUN,
-      "CTUN",
+#if LOG_PTUN_ENABLED
+    { LOG_MSG_PTUN,
+      "PTUN",
       "Qffffffffffff",
       // labels[] is a fixed 64-byte FMT field (63 usable chars after the null
       // terminator, see Logger.cpp's LogFmtHdr) — the descriptive names used
@@ -432,8 +448,14 @@ constexpr LogDef kLogDefs[] = {
       // past the limit, which is why UAV Log Viewer previously only showed
       // fields up to VelETgt. Keep this under 63 chars.
       "TimeUS,PNT,PNE,PET,PEE,VNT,VNE,VET,VEE,RolT,PitT,ClbT,ClbE",
-      sizeof(LogMsgCTUN) },
+      sizeof(LogMsgPTUN) },
 #endif
+
+    { LOG_MSG_CTUN,
+      "CTUN",
+      "Qffffffffff",
+      "TimeUS,RolT,RolE,RRT,RRE,PitT,PitE,PRT,PRE,RI,PI",
+      sizeof(LogMsgCTUN) },
 
     { LOG_MSG_MOCP,
       "MOCP",

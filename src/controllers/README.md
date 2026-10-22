@@ -465,7 +465,7 @@ D axis: `AltControl::alt_hold()`, exactly as in ALT_HOLD — the throttle stick 
 
 **Stick frame** — `PosControl::STICKS_BODY_FRAME` (`PosControl.hpp`, currently `true`): the pitch/roll sticks command forward/right acceleration relative to the nose and are rotated by yaw into N/E (ArduPilot Loiter behaviour). Set it to `false` for the sticks to command N/E directly.
 
-**Shadow mode** — `FlightStateMachine::CTUN_POSHOLD_SHADOW` (`FlightStateMachine.hpp`, currently `false`): when `true`, POS_HOLD flies as hands-off STABILIZE while the whole cascade above still runs every tick and feeds the `CTUN` log message, for tuning without closing the loop. If you turn it on, also drop `TAKEOFF_THR_THRESHOLD_HOLD` back to 0.10 (see the comment next to it).
+**Shadow mode** — `FlightStateMachine::PTUN_POSHOLD_SHADOW` (`FlightStateMachine.hpp`, currently `false`): when `true`, POS_HOLD flies as hands-off STABILIZE while the whole cascade above still runs every tick and feeds the `PTUN` log message, for tuning without closing the loop. If you turn it on, also drop `TAKEOFF_THR_THRESHOLD_HOLD` back to 0.10 (see the comment next to it).
 
 ---
 

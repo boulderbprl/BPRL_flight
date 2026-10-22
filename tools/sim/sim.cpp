@@ -112,7 +112,7 @@ struct Sim {
     float thr = 0.0f, roll_stick = 0, pitch_stick = 0, yaw_stick = 0, mode_sw = 1.0f;   // +1 = POS_HOLD
     // Last tick
     float state_full[StateIdx::N], euler[3];
-    float ctun[12], traj[8];
+    float ptun[12], traj[8];
     float thrust_out = 0;
     FILE *csv = nullptr;
     // Optional degraded position/velocity measurement (0 = perfect): the
@@ -155,12 +155,12 @@ struct Sim {
         const uint32_t rpm[4] = { 0, 0, 0, 0 };
         float cmds[3];
         fsm.update(state_full, euler, input, armed, pos_valid, rpm, 0.0f, cmds, thrust_out);   // roll_jerk: no strain-rate sensor in the sim
-        fsm.get_ctun_diag(ctun);
+        fsm.get_ptun_diag(ptun);
         fsm.get_traj_diag(traj);
         if (csv) fprintf(csv, "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.4f,%.4f,%.5f,%.5f,"
                               "%d,%.4f,%.4f,%.4f,%.5f,%.5f,%.4f,%.4f,%.4f,%d\n",
                          t, plant.pos[0], plant.pos[1], plant.pos[2], plant.vel[0], plant.vel[1], plant.vel[2],
-                         plant.roll, plant.pitch, plant.yaw, ctun[0], ctun[2], ctun[8], ctun[9],
+                         plant.roll, plant.pitch, plant.yaw, ptun[0], ptun[2], ptun[8], ptun[9],
                          (int)traj[0], traj[1], traj[2], traj[3], traj[4], traj[5], traj[6], traj[7],
                          thrust_out, (int)fsm.phase());
         plant.step(cmds, thrust_out);
@@ -257,7 +257,7 @@ static void scenario_heading_stick()
     float after = 0;
     s.run(4.0f, [&] { after = fmaxf(after, fabsf(wrap_pi(s.plant.yaw - yaw_rest))); });
     check(after * RAD2DEG < 5.0f, "heading error after the turn stops [deg]", after * RAD2DEG, 5.0);
-    const float hold_n = s.ctun[0], hold_e = s.ctun[2];
+    const float hold_n = s.ptun[0], hold_e = s.ptun[2];
     const float perr = hypotf(s.plant.pos[0] - hold_n, s.plant.pos[1] - hold_e);
     check(perr < 0.15f, "position error after yawing [m]", perr, 0.15);
 }
@@ -351,10 +351,10 @@ static void scenario_point()
     // Override mid-move: roll stick tap → trajectory off, stays off, no lean step.
     s.cmd(TrajCmdType::POINT, 3.0f, 0.0f);
     s.run(3.0f);
-    const float roll_tgt_before = s.ctun[8], pitch_tgt_before = s.ctun[9];
+    const float roll_tgt_before = s.ptun[8], pitch_tgt_before = s.ptun[9];
     s.roll_stick = 0.3f;
     s.tick();
-    const float lean_step = fmaxf(fabsf(s.ctun[8] - roll_tgt_before), fabsf(s.ctun[9] - pitch_tgt_before));
+    const float lean_step = fmaxf(fabsf(s.ptun[8] - roll_tgt_before), fabsf(s.ptun[9] - pitch_tgt_before));
     check(s.traj_state() == TrajState::IDLE, "roll stick mid-move cancels the trajectory", (int)s.traj_state(), 0);
     check(lean_step * RAD2DEG < 2.0f, "  lean-target step at hand-back [deg]", lean_step * RAD2DEG, 2.0);
     s.run(0.3f); s.roll_stick = 0.0f;
@@ -398,12 +398,12 @@ static void run_orbit(const char *name, float r, float focus, float dir, float s
     check(s.cmd(TrajCmdType::CIRCLE, r, NANF, NANF, NANF, focus, dir, speed) == TrajResult::ACCEPTED, "circle accepted", 1, 1);
 
     // Approach: wait for ORBIT, watching for any jump in the position target.
-    float max_tgt_step = 0, prev_tn = s.ctun[0], prev_te = s.ctun[2], t_orbit = -1;
+    float max_tgt_step = 0, prev_tn = s.ptun[0], prev_te = s.ptun[2], t_orbit = -1;
     const float t_cmd = s.t;
     for (int i = 0; i < 400 * 40 && s.traj_state() != TrajState::ORBIT; ++i) {
         s.tick();
-        max_tgt_step = fmaxf(max_tgt_step, hypotf(s.ctun[0] - prev_tn, s.ctun[2] - prev_te));
-        prev_tn = s.ctun[0]; prev_te = s.ctun[2];
+        max_tgt_step = fmaxf(max_tgt_step, hypotf(s.ptun[0] - prev_tn, s.ptun[2] - prev_te));
+        prev_tn = s.ptun[0]; prev_te = s.ptun[2];
     }
     t_orbit = s.t - t_cmd;
     check(s.traj_state() == TrajState::ORBIT, "  reaches the path and starts the orbit after [s]", t_orbit, 40);
@@ -415,8 +415,8 @@ static void run_orbit(const char *name, float r, float focus, float dir, float s
     const float d0 = s.plant.pos[2];
     int k = 0;
     s.run(45.0f, [&] {
-        max_tgt_step = fmaxf(max_tgt_step, hypotf(s.ctun[0] - prev_tn, s.ctun[2] - prev_te));
-        prev_tn = s.ctun[0]; prev_te = s.ctun[2];
+        max_tgt_step = fmaxf(max_tgt_step, hypotf(s.ptun[0] - prev_tn, s.ptun[2] - prev_te));
+        prev_tn = s.ptun[0]; prev_te = s.ptun[2];
         turned += wrap_pi(s.plant.yaw - prev_yaw); prev_yaw = s.plant.yaw;
         if (++k < 400 * 8) return;
         if (k % 8 == 0) max_path = fmaxf(max_path, path_error(s, o[0], o[1], rN, rE));
@@ -438,9 +438,9 @@ static void run_orbit(const char *name, float r, float focus, float dir, float s
 
     // Stop command → plain position hold.
     check(s.cmd(TrajCmdType::STOP) == TrajResult::ACCEPTED, "  stop accepted", 1, 1);
-    const float roll_tgt_before = s.ctun[8], pitch_tgt_before = s.ctun[9];
+    const float roll_tgt_before = s.ptun[8], pitch_tgt_before = s.ptun[9];
     s.tick();
-    const float lean_step = fmaxf(fabsf(s.ctun[8] - roll_tgt_before), fabsf(s.ctun[9] - pitch_tgt_before));
+    const float lean_step = fmaxf(fabsf(s.ptun[8] - roll_tgt_before), fabsf(s.ptun[9] - pitch_tgt_before));
     check(lean_step * RAD2DEG < 2.0f, "  lean-target step at hand-back [deg]", lean_step * RAD2DEG, 2.0);
     s.run(6.0f);
     check(hypotf(s.plant.vel[0], s.plant.vel[1]) < 0.05f, "  stopped in position hold [m/s]", hypotf(s.plant.vel[0], s.plant.vel[1]), 0.05);

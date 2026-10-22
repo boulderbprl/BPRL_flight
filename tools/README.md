@@ -269,7 +269,8 @@ python3 tools/logs.py log-status
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
-| `<stem>_ctun.csv` | TimeUS, PNT/PNE/PET/PEE (N/E position target and error, m), VNT/VNE/VET/VEE (N/E velocity target and error, m/s), RolT/PitT (lean-angle targets, rad), ClbT/ClbE (climb-rate target and error, m/s) — POS_HOLD tuning diagnostics |
+| `<stem>_ptun.csv` | TimeUS, PNT/PNE/PET/PEE (N/E position target and error, m), VNT/VNE/VET/VEE (N/E velocity target and error, m/s), RolT/PitT (lean-angle targets, rad), ClbT/ClbE (climb-rate target and error, m/s) — POS_HOLD tuning diagnostics |
+| `<stem>_ctun.csv` | TimeUS, RolT/RolE (roll angle target/error, rad), RRT/RRE (roll rate target/error, rad/s), PitT/PitE/PRT/PRE (same for pitch), RI/PI (rate-PID integrators) — AttitudePID tuning |
 | `<stem>_mocp.csv` | TimeUS, X/Y/Z (m NED), VX/VY/VZ (m/s), Valid — raw mocap estimate, pre-EKF |
 
 Every enabled message type logs at the `LogThread` period (50 Hz by default, set per drone) — there's no per-record rate field. A message a drone's config disables has no data rows.

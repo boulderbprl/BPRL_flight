@@ -3,6 +3,7 @@
 #include "src/math/math.hpp"
 #include "AttitudeController.hpp"
 #include "configs/DroneConfig.hpp"
+#include <cstring>
 
 /*
  * Cascade attitude controller (PID) — outer attitude loop + inner rate loop.
@@ -25,7 +26,9 @@
  * inside update() to match the shared AttitudeController interface):
  *   state6[0..2]  roll, pitch, yaw in radians
  *   state6[3..5]  p, q, r body-frame rates in rad/s
- *   input[1..3]   roll_tgt, pitch_tgt, yaw_rate_tgt [-1, 1]
+ *   input[1..2]   roll_tgt, pitch_tgt lean angles [rad] (FlightStateMachine
+ *                 scales the stick by stick_max_angle_deg)
+ *   input[3]      yaw stick [-1, 1]
  *   out_cmds[3]   normalised torque [roll, pitch, yaw] in [-1, 1]
  *
  * current_torque/unmixer (from the shared interface) are unused here — this
@@ -41,6 +44,14 @@ public:
     void reset_all() override;
     void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
     void set_mixer_limits(const MixerLimits &limits) override { _mixer_limits = limits; }
+
+    // CTUN log, from the last update(): diag[10] = [roll_tgt, roll_err,
+    // roll_rate_tgt, roll_rate_err, pitch_tgt, pitch_err, pitch_rate_tgt,
+    // pitch_rate_err, roll_rate_i, pitch_rate_i]. Angles rad, rates rad/s,
+    // errors target - measured; *_rate_tgt is the angle loop's output before
+    // the rate PID's own target filter; *_rate_i is the rate PID integrator
+    // (normalised output units).
+    void get_ctun_diag(float diag[10]) const { memcpy(diag, _ctun_diag, sizeof(_ctun_diag)); }
 
 private:
     PID _roll_att;
@@ -59,6 +70,8 @@ private:
     // output clamp clipped it last tick.
     MixerLimits _mixer_limits;
     bool        _out_clipped[3] = { false, false, false };
+
+    float _ctun_diag[10] = {};   // see get_ctun_diag()
 
     static constexpr float YAW_STICK_DEADBAND = 0.10f;  // normalised stick [-1,1], matches PosControl::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE  = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
