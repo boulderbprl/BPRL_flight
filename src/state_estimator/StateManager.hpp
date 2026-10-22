@@ -2,16 +2,14 @@
 #include "EKF.hpp"
 #include "src/FlightState.hpp"
 #include "src/threads.hpp"   // IMURaw, CANIMURaw, MocapRaw
+#include "configs/DroneConfig.hpp"
 
 // Lowpass cutoff frequencies for derived derivative states (Hz)
 #define STATEMGR_LP_UVWDOT_HZ     20.0f   // cutoff for u_dot/v_dot/w_dot (2nd-order; matches ArduPilot INS_ACCEL_FILTER default)
 #define STATEMGR_LP_UVW_HZ        15.0f   // cutoff for blended u/v/w fed to the controllers (2nd-order)
-#define STATEMGR_LP_PQRDOT_HZ     20.0f   // cutoff for p_dot/q_dot/r_dot
-// Optional 3rd (1st-order) stage cascaded after STATEMGR_LP_PQRDOT_HZ on
-// p_dot/q_dot only — a static A/B knob to test whether a 2+1 order cascade
-// helps INDI over the 2nd-order-only filter above. <=0 disables it
-// (lowpass_alpha() passthrough), leaving p_dot/q_dot exactly as before.
-#define STATEMGR_LP_PQRDOT_EXTRA_HZ 15.0f
+// p_dot/q_dot filtering is per-drone: DroneConfig::ang_accel_filt (shared
+// with the Unmixer's RPM filter so INDI's two feedback signals stay matched).
+#define STATEMGR_LP_RDOT_HZ       20.0f   // 1st-order cutoff for r_dot (no INDI consumer)
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID
 // Window length (s) for the accel fed into EKF::update_gravity()'s
@@ -105,9 +103,9 @@
  * p_dot/q_dot: differentiated from the notch-filtered p/q — ahead of the
  * STATEMGR_LP_PQ_HZ 2nd-order Butterworth used for the rate PID's P-term, so
  * p_dot/q_dot (feeding the INDI law) don't inherit that stage's extra lag —
- * then 2nd-order (Butterworth) lowpass filtered at STATEMGR_LP_PQRDOT_HZ,
- * then an optional 3rd (1st-order) stage at STATEMGR_LP_PQRDOT_EXTRA_HZ
- * (test knob for a 2+1 order cascade; <=0 disables it).
+ * then filtered by the drone's AngAccelFilterConfig: 2nd-order Butterworth
+ * at lpf_hz, then an optional 1st-order stage at lpf_extra_hz (<=0 disables
+ * it) — the same setting the Unmixer applies to RPM.
  * r_dot differentiates the fully-filtered r (post STATEMGR_LP_R_HZ) and keeps
  * the original 1st-order lowpass, since yaw has no INDI consumer for it.
  *
@@ -169,7 +167,7 @@ public:
     static constexpr float R_MOCAP_YAW = 2.5e-3f;
     static constexpr float R_BARO_POS  = 0.5f;    // baro altitude variance (m²) — tune from bench log noise
 
-    StateManager();
+    explicit StateManager(const AngAccelFilterConfig &ang_accel_filt);
 
     void init();
 
@@ -275,6 +273,7 @@ private:
     float _prev_p,    _prev_q,    _prev_r;
     float _pdot_filt, _qdot_filt, _rdot_filt;
     Biquad2pState _pdot_filt_state, _qdot_filt_state;  // 2nd-order LPF state for p_dot/q_dot
+    AngAccelFilterConfig _ang_accel_filt;               // p_dot/q_dot filter, from DroneConfig (shared with Unmixer)
 
     // Motor vibration notch, applied to p/q/r before the lowpass below.
     // _notch_freq_hz is the slew-limited tracked center frequency (average

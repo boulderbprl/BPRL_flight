@@ -40,6 +40,7 @@ public:
                 float out_cmds[3]) override;
     void reset_all() override;
     void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
+    void set_mixer_limits(const MixerLimits &limits) override { _mixer_limits = limits; }
 
 private:
     PID _roll_att;
@@ -52,6 +53,12 @@ private:
     float _yaw_stick_gain;     // from DroneConfig; was YAW_STICK_GAIN
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
+
+    // Rate-integrator anti-windup: an axis counts as saturated if the mixer
+    // couldn't deliver it last tick, or if this controller's own [-1, 1]
+    // output clamp clipped it last tick.
+    MixerLimits _mixer_limits;
+    bool        _out_clipped[3] = { false, false, false };
 
     static constexpr float YAW_STICK_DEADBAND = 0.10f;  // normalised stick [-1,1], matches PosControl::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE  = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning

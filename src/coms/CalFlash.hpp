@@ -2,9 +2,11 @@
 #include <stdint.h>
 
 /*
- * Persistent IMU calibration stored in STM32H743 Bank 2 sector 7
- * (0x081E0000, 128 KB), programmed directly via Bank 2 registers
- * because HAL_USE_EFL = FALSE.
+ * Persistent IMU calibration. On the Cube boards it lives in the SPI FRAM
+ * (last 128 bytes of the chip, see FRAM.hpp) so it survives firmware
+ * uploads; internal flash Bank 2 sector 7 (0x081E0000, 128 KB) is the
+ * fallback, and the only store on boards without FRAM. Flash is programmed
+ * directly via Bank 2 registers because HAL_USE_EFL = FALSE.
  *
  * Layout: 128 bytes = 4 × 32-byte flash words.
  * Biases are in body frame (post-rotation-correction), subtracted from

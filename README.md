@@ -70,27 +70,12 @@ BPRL_flight/
 │   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
 │   │   ├── IOMCU.hpp/.cpp    UART link to the Cube carrier's IO co-processor — drives MAIN 1-4 PWM (Drone2, MOTOR_PROTO_IOMCU)
 │   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
-│   │   └── CalFlash.hpp/.cpp Persistent IMU calibration bias storage (STM32H743 flash Bank2 sector 7)
-│   │       ⚠️ DO NOT switch this to the external Ramtron/FM25 SPI FRAM chip
-│   │       without a lot more bench care than a first attempt got. Tried once
-│   │       (2026-09-14): added an SPI2/FRAM driver + repurposed the CalFlash
-│   │       backend for CubeOrangePlus/CubeBlueH7, and Cube Blue immediately
-│   │       started crash-looping (briefly enumerates as the PX4 bootloader,
-│   │       2dae:1017, then vanishes — repeating). Reverting every line of
-│   │       that change did NOT fix it — the exact pre-change binary
-│   │       (byte-identical build size to the last confirmed-good one) still
-│   │       crash-looped after reflashing. Only reflashing something entirely
-│   │       different (ArduPilot, then an older commit) got the board
-│   │       responding again; after that, this project's current code worked
-│   │       fine too. That points at some persistent hardware/peripheral
-│   │       state (GPIO/SPI2/RAM-adjacent) that the SPI2 pin config or FRAM
-│   │       transaction latched into a bad state and normal resets didn't
-│   │       clear — not a straightforward source-level bug reachable by
-│   │       reading the diff. The attempt (driver, board.c pin config,
-│   │       CalFlash dispatch) has been fully removed from the tree. If this
-│   │       gets revisited, do it on a board you can fully power-cycle
-│   │       (unplug, not just reset) between every single test, and suspect
-│   │       PD10/SPI2 specifically before anything else.
+│   │   ├── CalFlash.hpp/.cpp Persistent IMU calibration: FRAM on Cube boards (survives uploads), internal flash Bank2 sector 7 fallback / Orqa
+│   │   └── FRAM.hpp/.cpp     SPI2 Ramtron FM25 driver (Cube boards), port of ArduPilot AP_RAMTRON — the Cube bootloader's
+│   │       chip erase wipes internal-flash calibration on every upload, so (like ArduPilot's parameters) it lives here.
+│   │       ⚠️ A first FRAM attempt (2026-09-14) coincided with a Cube Blue crash loop that persisted even after
+│   │       reverting it, so the cause was never pinned down. Bring-up rule: full power cycle (unplug) between tests;
+│   │       a missing/unresponsive FRAM just falls back to internal flash (`FRAM,status` / `calibrate.py query`).
 │   │
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
 │   │   ├── PID.hpp/.cpp                 PID base class with derivative filter + anti-windup
@@ -388,8 +373,9 @@ All EKF tuning lives in `src/state_estimator/EKF.hpp` (private `static constexpr
 | `STATEMGR_LP_UVW_HZ` | StateManager.hpp | 15 | 2nd-order lowpass cutoff for blended u/v/w fed to the controllers (Hz). |
 | `STATEMGR_LP_UVWDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for u_dot/v_dot/w_dot (Hz). |
 | `STATEMGR_LP_PQ_HZ` / `STATEMGR_LP_R_HZ` | StateManager.hpp | 20 / 5 | Lowpass cutoff for blended roll/pitch vs. yaw rate fed to the rate PID (Hz). |
-| `STATEMGR_LP_PQRDOT_HZ` | StateManager.hpp | 20 | Lowpass cutoff for p_dot/q_dot/r_dot (Hz). |
-| `STATEMGR_LP_PQRDOT_EXTRA_HZ` | StateManager.hpp | 15 | Optional extra 1st-order stage on p_dot/q_dot (Hz); 0 disables it. |
+| `ang_accel_filt.lpf_hz` | configs/&lt;Drone&gt;/drone_config.cpp | 20 | 2nd-order lowpass cutoff for p_dot/q_dot **and** motor RPM into the Unmixer (Hz) — one setting so INDI's feedback signals stay delay-matched. |
+| `ang_accel_filt.lpf_extra_hz` | configs/&lt;Drone&gt;/drone_config.cpp | 15 (Drone3: 0) | Optional extra 1st-order stage on the same two signals (Hz); 0 disables it. |
+| `STATEMGR_LP_RDOT_HZ` | StateManager.hpp | 20 | 1st-order lowpass cutoff for r_dot (Hz). |
 | `STATEMGR_GRAVACC_AVG_S` | StateManager.hpp | 0.2 | Window the accel is averaged over before each gravity-vector update (s). |
 | `STATEMGR_LP_BLENDW_HZ` | StateManager.hpp | 3 | Lowpass cutoff for the lane-blend weight itself, before renormalizing (Hz). |
 | `STATEMGR_NOTCH_BW_HZ` | StateManager.hpp | 10 | Motor-vibration notch bandwidth (sets Q = center/bandwidth). The notch disables itself outright (rather than clamping to a wrong frequency) once the tracked center reaches `NOTCH_NYQUIST_CUTOFF` (0.48 × EKF rate — `math.hpp`), matching ArduPilot's `HarmonicNotchFilter` behavior. At the current 400 Hz that's ~192 Hz (~11,520 RPM); a high-KV motor cruising above that runs un-notched through this stage but still gets the 20/5 Hz lowpass below. |

@@ -63,8 +63,20 @@ def add_port_args(parser):
     parser.add_argument("--baud", type=int, default=115200)
 
 
+# USB full-speed bulk packet size. The firmware's ChibiOS serial-USB driver
+# only hands received bytes to USBCmdThread when an OUT transfer ends — on a
+# short packet (< 64 bytes) or once its 256-byte buffer fills. Linux sends no
+# zero-length packet after a write that is an exact multiple of 64 bytes, so
+# such a command sits unprocessed in the board's buffer until the next
+# command arrives (e.g. CAL,set with six positive biases is exactly 64).
+USB_PACKET_SIZE = 64
+
+
 def send_cmd(ser: serial.Serial, cmd: str):
-    ser.write((cmd + "\n").encode())
+    data = (cmd + "\n").encode()
+    if len(data) % USB_PACKET_SIZE == 0:
+        data += b"\n"   # forces a short final packet; firmware ignores empty lines
+    ser.write(data)
     ser.flush()
 
 
@@ -148,6 +160,7 @@ class TelState:
     rc_roll:      float = 0.0
     rc_pitch:     float = 0.0
     rc_yaw:       float = 0.0
+    rc_poshold:   Optional[float] = None  # raw pos-hold switch [-1,1]; None = firmware too old to send it
     armed:        bool  = False
     rpm:          list  = field(default_factory=lambda: [0, 0, 0, 0])
     rpm_valid:    list  = field(default_factory=lambda: [False] * 4)
@@ -172,7 +185,8 @@ def flight_mode_name(mode: int) -> str:
     return f"UNKNOWN({mode})"
 
 
-ATTITUDE_CONTROLLER_NAMES = ["PID", "INDI", "PID+PI"]  # matches FlightStateMachine's fixed list order
+# Indexed by the AttCtrl enum value $TEL sends (configs/DroneConfig.hpp) — keep in that order.
+ATTITUDE_CONTROLLER_NAMES = ["PID", "INDI", "PID+PI", "PID_JERK", "JINDI"]
 
 
 def attitude_ctrl_name(active_controller: int) -> str:
@@ -211,6 +225,7 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         state.can_rate_hz = int(parts[21])
         state.flight_mode = int(parts[22])
         state.active_controller = int(parts[23])
+        state.rc_poshold  = float(parts[24]) if len(parts) > 24 else None
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()

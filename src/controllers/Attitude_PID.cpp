@@ -35,8 +35,12 @@ void AttitudePID::update(const float euler[3], const float state_full[], const f
     const float roll_rate_tgt  = _roll_att.update(input[1], state6[0]);
     const float pitch_rate_tgt = _pitch_att.update(input[2], state6[1]);
 
-    out_cmds[0] = constrain_float(_roll_rate.update(roll_rate_tgt,   state6[3]), -1.0f, 1.0f);
-    out_cmds[1] = constrain_float(_pitch_rate.update(pitch_rate_tgt, state6[4]), -1.0f, 1.0f);
+    const float roll_raw  = _roll_rate.update(roll_rate_tgt,   state6[3], _mixer_limits.roll  || _out_clipped[0]);
+    const float pitch_raw = _pitch_rate.update(pitch_rate_tgt, state6[4], _mixer_limits.pitch || _out_clipped[1]);
+    _out_clipped[0] = fabsf(roll_raw)  > 1.0f;
+    _out_clipped[1] = fabsf(pitch_raw) > 1.0f;
+    out_cmds[0] = constrain_float(roll_raw,  -1.0f, 1.0f);
+    out_cmds[1] = constrain_float(pitch_raw, -1.0f, 1.0f);
 
     // ── Yaw: rate PID + heading-lock trim
     const float yaw_now = state6[2];
@@ -57,7 +61,9 @@ void AttitudePID::update(const float euler[3], const float state_full[], const f
         yaw_rate_tgt = _yaw_stick_gain * input[3] + yaw_hold_rate;
     }
 
-    out_cmds[2] = constrain_float(_yaw_rate.update(yaw_rate_tgt, state6[5]), -1.0f, 1.0f);
+    const float yaw_raw = _yaw_rate.update(yaw_rate_tgt, state6[5], _mixer_limits.yaw || _out_clipped[2]);
+    _out_clipped[2] = fabsf(yaw_raw) > 1.0f;
+    out_cmds[2] = constrain_float(yaw_raw, -1.0f, 1.0f);
 }
 
 void AttitudePID::reset_all()
@@ -66,4 +72,5 @@ void AttitudePID::reset_all()
     _roll_rate.reset(); _pitch_rate.reset();
     _yaw_rate.reset();  _yaw_hold.reset();
     _yaw_target_valid = false;
+    _out_clipped[0] = _out_clipped[1] = _out_clipped[2] = false;
 }

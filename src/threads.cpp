@@ -30,6 +30,7 @@
 #include "src/sensors/JerkFit.hpp"
 #include "src/usb_serial.hpp"
 #include "src/coms/CalFlash.hpp"
+#include "src/coms/FRAM.hpp"
 #include "src/coms/MAVLink.hpp"
 #include "src/math/math.hpp"
 #include "src/diagnostics/ThreadTiming.hpp"
@@ -50,7 +51,6 @@ float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
-float   g_indij_diag[12]     = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g2_hat_roll, jerk_cmd_roll, kappa2_roll] — AttitudeINDIJerk shadow diagnostics, populated whenever a switch_pos entry names AttCtrl::INDI_JERK
 float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever pid_jerk_enabled
 float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever jindi_enabled
 float   g_ctun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
@@ -58,7 +58,7 @@ float   g_traj_diag[8]       = {};   // [traj_state, ref_n, ref_e, ref_d, yaw_tg
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
-int     g_active_controller  = 0;    // FlightStateMachine's resolved active controller-list index (0=PID default)
+int     g_active_controller  = 0;    // AttCtrl value of the controller actually flying (0=PID)
 
 MUTEX_DECL(imu_mtx);
 IMURaw g_imu[3] = {};
@@ -112,7 +112,7 @@ static FlightStateMachine flight_sm(kDroneConfig);
 static MotorMixer         mixer(kDroneConfig.mixer);
 
 /* ── State estimator (ControlThread only) ────────────────────────────────── */
-static StateManager state_mgr;
+static StateManager state_mgr(kDroneConfig.ang_accel_filt);
 
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
@@ -214,6 +214,11 @@ static THD_FUNCTION(SPIThread, arg)
     chRegSetThreadName("spi");
     const sysinterval_t period = *static_cast<const sysinterval_t *>(arg);
 
+#if defined(BPRL_HAS_FRAM)
+    // Cube boards keep the calibration in FRAM (CalFlash.cpp) — identify the
+    // chip first. A failed init just leaves cal_load() on internal flash.
+    fram_drv_init();
+#endif
     // Load persistent calibration biases before IMU init; zero biases if absent.
     g_cal_valid = cal_load(g_cal);
     if (!g_cal_valid) memset(&g_cal, 0, sizeof(g_cal));
@@ -667,7 +672,7 @@ static THD_FUNCTION(ControlThread, arg)
 
         flight_sm.set_active_controller(radio_switch_pos);
 
-        // Strain-fit roll jerk estimate (AttitudeINDIJerk's roll inner loop, see JerkFit.hpp).
+        // Strain-fit roll jerk estimate (JINDI / PIDJerk roll jerk feedback, see JerkFit.hpp).
         StrainRateRaw strain_snap;
         float         strain_bias_snap[4];
         chMtxLock(&strainRate_mtx);
@@ -681,8 +686,8 @@ static THD_FUNCTION(ControlThread, arg)
         // the new g_strain_bias, replacing whatever was there. Session-only —
         // resets to {0,0,0,0} on every boot, never written to flash. Honored
         // regardless of arm state, so don't trigger it mid-flight: the strain
-        // inputs feeding AttitudeINDIJerk's roll inner loop will drift for
-        // however long the switch is held — and if Jerk is the controller
+        // inputs feeding JINDI's/PIDJerk's roll jerk loop will drift for
+        // however long the switch is held — and if either is the controller
         // actually driving out_cmds[0] when you flip it, that's not just a
         // shadow-diagnostic drift, it's a real roll torque disturbance.
         {
@@ -765,8 +770,6 @@ static THD_FUNCTION(ControlThread, arg)
         float ctun_diag[12];
         flight_sm.get_ctun_diag(ctun_diag);
 
-        float indij_diag[12];
-        flight_sm.get_indij_diag(indij_diag);
 
         float jindi_diag[13];
         flight_sm.get_jindi_diag(jindi_diag);
@@ -782,6 +785,7 @@ static THD_FUNCTION(ControlThread, arg)
         int32_t motor_out[4];
         mixer.update(torque_cmds, thrust, armed, safety_state, motor_out);
         motor_output_write(motor_out);
+        flight_sm.set_mixer_limits(mixer.limits());  // anti-windup input for next tick
 
         chMtxLock(&state_mtx);
         memcpy(g_state, ctrl_full, sizeof(g_state));
@@ -792,13 +796,12 @@ static THD_FUNCTION(ControlThread, arg)
         g_ctrl[3] = thrust;
         memcpy(g_indi_diag, indi_diag, sizeof(g_indi_diag));
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
-        memcpy(g_indij_diag, indij_diag, sizeof(g_indij_diag));
         memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
         memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
         memcpy(g_traj_diag, traj_diag, sizeof(g_traj_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
-        g_active_controller = flight_sm.active_index();
+        g_active_controller = (int)flight_sm.active_ctrl();
 #ifdef BPRL_DEBUG
         memcpy(s_lane_roll,  dbg_lane_roll,  sizeof(s_lane_roll));
         memcpy(s_lane_pitch, dbg_lane_pitch, sizeof(s_lane_pitch));
@@ -1071,6 +1074,13 @@ static void usb_cmd_dispatch(const char *line)
             chprintf((BaseSequentialStream *)&SDU1, "LOG,ERR,unknown_cmd\r\n");
             chMtxUnlock(&s_usb_write_mtx);
         }
+#if defined(BPRL_DEBUG) && defined(BPRL_HAS_FRAM)
+    } else if (strcmp(line, "FRAM,status") == 0) {
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "FRAM,STATUS,ready=%d,part=%s,size=%lu\r\n",
+                 (int)fram_ready(), fram_part_name(), (unsigned long)fram_size());
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strncmp(line, "CAL,", 4) == 0) {
 #ifdef BPRL_DEBUG
         const char *rest = line + 4;
@@ -1496,7 +1506,8 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <rpm0>,<rpm1>,<rpm2>,<rpm3>,
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
  *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
- *        <active_controller>    ← resolved attitude-controller-list index (0=PID default, 1=INDI if enabled)
+ *        <active_controller>,   ← AttCtrl value of the controller flying (0=PID 1=INDI 2=PID_PI 3=PID_JERK 4=JINDI)
+ *        <poshold_sw>           ← raw pos-hold switch [-1,1] (RcChannelMap::poshold_switch; >0.33 = POS_HOLD)
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -1535,7 +1546,7 @@ static THD_FUNCTION(DebugThread, arg)
         }
 
         /* ── Snapshot flight state ──────────────────────────────────────── */
-        float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw;
+        float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw, rc_poshold;
         float p, q, r;
         float pos_x, pos_y, pos_z, vel_u, vel_v, vel_w;
         float lane_roll[3], lane_pitch[3], lane_yaw[3];
@@ -1561,6 +1572,7 @@ static THD_FUNCTION(DebugThread, arg)
         rc_roll  = g_input[InputIdx::ROLL_TGT];
         rc_pitch = g_input[InputIdx::PITCH_TGT];
         rc_yaw   = g_input[InputIdx::YAW_RATE];
+        rc_poshold = g_input[InputIdx::FLIGHT_MODE];
         armed    = g_armed;
         flight_mode = g_flight_mode;
         active_controller = g_active_controller;
@@ -1655,7 +1667,7 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.3f,%.3f,%.3f,%.3f,%d,"
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
-                "%d,%d\r\n",
+                "%d,%d,%.3f\r\n",
                 bprl_millis(),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
@@ -1668,7 +1680,7 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode, active_controller);
+                flight_mode, active_controller, (double)rc_poshold);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,
@@ -1904,7 +1916,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], traj_diag[8], indij_diag[12], jindi_diag[13], pidj_diag[9];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ctun_diag[12], traj_diag[8], jindi_diag[13], pidj_diag[9];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -1914,7 +1926,6 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(indi_diag,  g_indi_diag,  sizeof(indi_diag));
         memcpy(ctun_diag,  g_ctun_diag,  sizeof(ctun_diag));
         memcpy(traj_diag,  g_traj_diag,  sizeof(traj_diag));
-        memcpy(indij_diag, g_indij_diag, sizeof(indij_diag));
         memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
         memcpy(pidj_diag,  g_pidj_diag,  sizeof(pidj_diag));
         armed = g_armed;
@@ -2054,25 +2065,6 @@ static THD_FUNCTION(LogThread, arg)
             msg.g1_roll     = indi_diag[8];
             msg.g1_pitch    = indi_diag[9];
             logger.write(LOG_MSG_INDI, msg);
-        }
-
-        /* ── INDIJ — shadow AttitudeINDIJerk diagnostics ─────────────────── */
-        if (log_en.indij) {
-            LogMsgINDIJ msg = {};
-            msg.time_us     = t_us;
-            msg.unmix_roll  = indij_diag[0];
-            msg.unmix_pitch = indij_diag[1];
-            msg.delta_roll  = indij_diag[2];
-            msg.delta_pitch = indij_diag[3];
-            msg.cmd_roll    = indij_diag[4];
-            msg.cmd_pitch   = indij_diag[5];
-            msg.accel_roll  = indij_diag[6];
-            msg.accel_pitch = indij_diag[7];
-            msg.g1_roll       = indij_diag[8];
-            msg.g2_roll       = indij_diag[9];
-            msg.jerk_cmd_roll = indij_diag[10];
-            msg.kappa2_roll   = indij_diag[11];
-            logger.write(LOG_MSG_INDIJ, msg);
         }
 
         /* ── JINDI — shadow AttitudeJINDI diagnostics ────────────────────── */

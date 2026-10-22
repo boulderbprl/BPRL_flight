@@ -461,7 +461,12 @@
  * SPI driver system settings.
  */
 #define STM32_SPI_USE_SPI1                  TRUE
+// SPI2 = FRAM (src/coms/FRAM.hpp) on the Cube boards only.
+#if defined(BPRL_BOARD_CUBEBLUE) || defined(BPRL_BOARD_CUBEORANGEPLUS)
+#define STM32_SPI_USE_SPI2                  TRUE
+#else
 #define STM32_SPI_USE_SPI2                  FALSE
+#endif
 #define STM32_SPI_USE_SPI3                  FALSE
 #define STM32_SPI_USE_SPI4                  TRUE
 #define STM32_SPI_USE_SPI5                  FALSE

@@ -4,16 +4,13 @@
 #include "AttitudeController.hpp"
 #include "configs/DroneConfig.hpp"
 #include "src/math/math.hpp"
-#include "src/state_estimator/StateManager.hpp"   // STATEMGR_LP_PQRDOT_HZ / _EXTRA_HZ — shared with the tau_f matched filter below
 
 /*
- * JINDI — like AttitudeINDIJerk, roll_jerk (the strain-fit jerk estimate,
- * see src/sensors/JerkFit.hpp) gives roll a second control path beyond the
- * usual accel-level INDI. The formulation is different, though:
- * AttitudeINDIJerk treats the jerk term as a "D" correction layered onto the
- * accel-level ("P") increment (delta = P*kappa*G1 + D*kappa2*G2, both
- * anchored to the same current_torque measurement). JINDI instead assumes
- * the jerk path has its own actuator dynamics — torque isn't applied
+ * JINDI — roll_jerk (the strain-fit jerk estimate, see
+ * src/sensors/JerkFit.hpp) gives roll a second control path beyond the
+ * usual accel-level INDI. Rather than a "D" correction layered onto the
+ * accel-level ("P") increment (the old, removed AttitudeINDIJerk approach),
+ * JINDI assumes the jerk path has its own actuator dynamics — torque isn't applied
  * instantly, unlike the accel path's instant-actuation assumption — so each
  * path computes its own full torque reference independently, and the two
  * are blended with a convex combination instead of summed increments.
@@ -54,13 +51,13 @@
  *
  * G1_hat (both roll and pitch) is the exact same live NLMS estimator
  * AttitudeINDI uses, identified against the real measured current_torque —
- * JINDI has no separate "G2" estimator at all, unlike AttitudeINDIJerk,
+ * JINDI has no separate "G2" estimator at all,
  * since both of roll's paths share one G. Adaptation rate (mu) is
  * configured at 0 for now (not yet characterized) — the machinery stays
  * wired, same convention as every other not-yet-tuned gain in this
  * codebase, so it can be turned on later without a code change.
  *
- * Pitch and yaw: unchanged from AttitudeINDIJerk/AttitudeINDI — plain
+ * Pitch and yaw: unchanged from AttitudeINDI — plain
  * accel-level INDI for pitch (its own kappa, DroneConfig::AttitudeJindiGains
  * ::indi_output_gain_pitch — there's no jerk sensor on pitch, so nothing to
  * convex-combine there), rate-PID + heading-lock trim for yaw.
@@ -68,7 +65,7 @@
  * roll_jerk isn't part of the shared AttitudeController::update() signature
  * — set_roll_jerk() is called once per tick by FlightStateMachine::
  * run_attitude() before the generic update() dispatch, same pattern as
- * AttitudeINDIJerk::set_roll_jerk().
+ * AttitudePIDJerk::set_roll_jerk().
  *
  * Conventions:
  *   euler[3]          roll, pitch, yaw (rad)
@@ -94,7 +91,7 @@ public:
     // [tau_accel_roll, tau_jerk_roll]: roll's two independent path torque
     // references (N·m), pre-blend — see class comment. accel_cmd[2] =
     // [accel_cmd_roll, accel_cmd_pitch], same shape/meaning as
-    // AttitudeINDIJerk::get_diag()'s second output.
+    // AttitudeINDI::get_diag()'s second output.
     void get_diag(float tau_paths_roll[2], float accel_cmd[2]) const
     {
         tau_paths_roll[0] = _tau_accel_roll;
@@ -121,13 +118,12 @@ public:
 
     // jerk_cmd_roll from the most recent update() — the target fed to the
     // jerk path's increment, for logging/comparison against the actual
-    // measured roll_jerk. Same meaning as AttitudeINDIJerk::jerk_cmd_roll().
+    // measured roll_jerk.
     float jerk_cmd_roll() const { return _jerk_cmd_roll; }
 
     // Convex-combination weight, roll — static per-drone config value
     // (DroneConfig::AttitudeJindiGains::alpha). For logging: since it never
-    // changes at runtime, this repeats the same value every tick — same
-    // rationale as AttitudeINDIJerk::kappa2_roll().
+    // changes at runtime, this repeats the same value every tick.
     float alpha_roll() const { return _alpha; }
 
     // Measured roll jerk after the JERK_MEAS_LPF_HZ lowpass and the
@@ -263,11 +259,8 @@ private:
     // ── Live NLMS G1 estimator state — roll + pitch only, identical
     // mechanism/shape to AttitudeINDI's own (no third "G2" instance — see
     // class comment).
-    Biquad2pState _tau_filt_state[2];
-    float         _tau_extra_filt[2] = {};
-
-    float _prev_tau_f[2]        = {};
-    float _prev_omegadot_f[2]   = {};
+    float _prev_tau[2]          = {};
+    float _prev_omegadot[2]     = {};
     bool  _nlms_initialized     = false;
 
     int _nlms_tick_count = 0;
@@ -277,8 +270,8 @@ private:
 
     static constexpr float JERK_CMD_FILT_HZ = 30.0f;  // 2nd-order Butterworth cutoff applied to jerk_cmd_roll in update()
 
-    static constexpr float NLMS_EPS               = 1.0e-6f;
-    static constexpr float NLMS_EXCITATION_MIN_NM  = 0.02f;
+    static constexpr float NLMS_EPS               = 1.0e-6f;  // (rad/s²)², see AttitudeINDI
+    static constexpr float NLMS_EXCITATION_MIN_NM  = 0.02f;    // |Delta_Omega_dot| * |seed|, see AttitudeINDI
     static constexpr float NLMS_MAX_STEP_FRAC      = 0.10f;
     static constexpr float NLMS_MAX_DRIFT_FRAC     = 0.50f;
 
@@ -286,8 +279,7 @@ private:
     static constexpr float YAW_HOLD_MAX_RATE  = 0.3f;
 
     // One NLMS update step for a single estimator — identical algorithm to
-    // AttitudeINDI::_nlms_update_axis()/AttitudeINDIJerk's.
+    // AttitudeINDI::_nlms_update_axis().
     void _nlms_update_axis(float tau_now, float omegadot_now, float &g1, float seed,
-                            Biquad2pState &filt_state, float &extra_filt,
-                            float &prev_tau_f, float &prev_omegadot_f, bool do_step);
+                            float &prev_tau, float &prev_omegadot);
 };

@@ -4,7 +4,6 @@
 #include "AttitudeController.hpp"
 #include "configs/DroneConfig.hpp"
 #include "src/math/math.hpp"
-#include "src/state_estimator/StateManager.hpp"   // STATEMGR_LP_PQRDOT_HZ / _EXTRA_HZ — shared with the tau_f matched filter below
 
 /*
  * INDI (Incremental Nonlinear Dynamic Inversion) attitude controller.
@@ -20,7 +19,7 @@
  *     total_torque = current_torque_Nm + delta_torque
  *     out_cmds[i]  = unmixer.normalize_torque(total_torque)
  *
- * G1_hat (~1/Ixx, 1/Iyy) is a live NLMS estimate seeded from the offline-
+ * G1_hat (~Ixx, Iyy, N·m per rad/s²) is a live NLMS estimate seeded from the offline-
  * identified config value and continuously adapted (see the NLMS block in
  * update() below, and src/controllers/README.md's AttitudeINDI "Live G(x)
  * adaptation" section for the full write-up). kappa is a separate, static,
@@ -30,7 +29,7 @@
  * drone's config (per FlightStateMachine's shadow-mode dispatch), regardless
  * of whether INDI is the currently active controller — but the NLMS
  * regressor/step itself is decimated (NLMS_DECIMATION ticks) rather than
- * formed every tick, since the regressor is filtered well below the 400 Hz
+ * formed every tick, since its inputs are filtered well below the 400 Hz
  * tick rate (see the comment on NLMS_DECIMATION below). Only the adaptation
  * rate mu changes with mode (see set_indi_active()).
  *
@@ -102,8 +101,8 @@ private:
     PID _yaw_rate;
     PID _yaw_hold;   // heading-lock trim: heading error [rad] -> corrective rate [rad/s]
 
-    // G1_hat^-1 : N·m per rad/s² — live NLMS estimate of airframe effectiveness
-    // (~1/Ixx, 1/Iyy), seeded from _g1_seed_roll/_g1_seed_pitch and adapted
+    // G1_hat : N·m per rad/s² — live NLMS estimate of airframe effectiveness
+    // (~Ixx, Iyy), seeded from _g1_seed_roll/_g1_seed_pitch and adapted
     // every update() call (see the NLMS block in Attitude_INDI.cpp).
     float _g1_roll;
     float _g1_pitch;
@@ -131,31 +130,23 @@ private:
     // ── Live NLMS G(x) estimator state ──────────────────────────────────────
     bool _indi_active = false;   // set via set_indi_active(); selects _mu_pid vs _mu_indi
 
-    // tau_f: current_torque passed through the same filter chain (type/
-    // order/cutoff) StateManager applies to p_dot/q_dot, so the NLMS
-    // regressor and Omega_dot_f are delay-matched. Reuses
-    // STATEMGR_LP_PQRDOT_HZ/_EXTRA_HZ from StateManager.hpp rather than
-    // redefining them, so the two filters can't silently drift apart.
-    Biquad2pState _tau_filt_state[2];   // [roll, pitch] 2nd-order stage
-    float         _tau_extra_filt[2] = {};  // [roll, pitch] optional 1st-order stage memory
-
-    // Previous-step filtered values, for the incremental NLMS regressor
-    // (Delta_tau_f, Delta_Omega_dot_f). Only refreshed every NLMS_DECIMATION
-    // ticks (see below), so this is a Delta across the decimated window, not
-    // a single 400 Hz tick.
-    float _prev_tau_f[2]        = {};  // [roll, pitch]
-    float _prev_omegadot_f[2]   = {};  // [roll, pitch]
+    // Previous decimated-step current_torque / p_dot,q_dot, for the
+    // incremental NLMS regression (Delta_tau, Delta_Omega_dot). Only
+    // refreshed every NLMS_DECIMATION ticks (see below), so this is a Delta
+    // across the decimated window, not a single 400 Hz tick. No extra
+    // filtering here: current_torque is already delay-matched to p_dot/q_dot
+    // by the Unmixer's own filter (see _nlms_update_axis()).
+    float _prev_tau[2]          = {};  // [roll, pitch]
+    float _prev_omegadot[2]     = {};  // [roll, pitch]
     bool  _nlms_initialized     = false;  // false until the first post-reset decimated step seeds _prev_*
 
     // Counts ticks since the last decimated NLMS step; shared by both axes
     // since they're always evaluated together in the same update() call.
     int _nlms_tick_count = 0;
 
-    // The tau_f/omegadot_f low-pass filters below still run every tick (they
-    // need a continuous 400 Hz feed to hold their designed cutoff), but the
-    // NLMS Delta_tau_f/Delta_Omega_dot_f regressor is only formed and stepped
-    // once every NLMS_DECIMATION ticks. A per-tick (2.5 ms) Delta of a signal
-    // filtered at STATEMGR_LP_PQRDOT_HZ/_EXTRA_HZ (20/15 Hz) is dominated by
+    // The NLMS Delta_tau/Delta_Omega_dot regression is only formed and
+    // stepped once every NLMS_DECIMATION ticks. A per-tick (2.5 ms) Delta of
+    // a signal filtered at DroneConfig::ang_accel_filt (~20 Hz) is dominated by
     // filter ripple/measurement noise rather than real excitation — flight
     // data showed doublet excitation visible at 50 Hz (20 ms) resolution but
     // not at 400 Hz (2.5 ms) resolution. 8 ticks = 20 ms, roughly matching
@@ -168,20 +159,18 @@ private:
     // as flight-tuning constants here rather than DroneConfig fields (same
     // convention as YAW_HOLD_MAX_RATE below); promote to DroneConfig later
     // only if the two airframes need different values.
-    static constexpr float NLMS_EPS                 = 1.0e-6f;  // division-blowup guard near zero excitation
-    static constexpr float NLMS_EXCITATION_MIN_NM    = 0.02f;   // |Delta_tau_f| (over the decimated window) below this: freeze the update — was tuned against per-tick deltas, needs re-checking against the new window
+    static constexpr float NLMS_EPS                 = 1.0e-6f;  // (rad/s²)² — division-blowup guard near zero excitation
+    static constexpr float NLMS_EXCITATION_MIN_NM    = 0.02f;   // |Delta_Omega_dot| * |seed| (torque-equivalent excitation over the decimated window) below this: freeze the update — needs flight re-checking
     static constexpr float NLMS_MAX_STEP_FRAC        = 0.10f;   // max |G1_hat step| per update, as a fraction of the seed — needs bench tuning
     static constexpr float NLMS_MAX_DRIFT_FRAC       = 0.50f;   // max total drift of G1_hat from its seed — needs bench tuning
 
     static constexpr float YAW_STICK_DEADBAND   = 0.10f;  // normalised stick [-1,1], matches PosControl::STICK_DEADBAND
     static constexpr float YAW_HOLD_MAX_RATE    = 0.3f;   // rad/s cap on the heading-hold trim — needs flight tuning
 
-    // One NLMS update step for a single axis. tau_now/omegadot_now are this
-    // tick's raw current_torque[axis] and measured p_dot/q_dot; g1 is the
-    // live estimate to update in place; seed is its drift-clamp reference;
-    // filt_state/extra_filt/prev_tau_f/prev_omegadot_f are that axis's
-    // filter/differencing memory.
+    // One decimated NLMS update step for a single axis. tau_now/omegadot_now
+    // are this tick's current_torque[axis] and measured p_dot/q_dot; g1 is
+    // the live estimate to update in place; seed is its drift-clamp
+    // reference; prev_tau/prev_omegadot are that axis's differencing memory.
     void _nlms_update_axis(float tau_now, float omegadot_now, float &g1, float seed,
-                            Biquad2pState &filt_state, float &extra_filt,
-                            float &prev_tau_f, float &prev_omegadot_f, bool do_step);
+                            float &prev_tau, float &prev_omegadot);
 };

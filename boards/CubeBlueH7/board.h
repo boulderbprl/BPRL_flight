@@ -49,7 +49,7 @@
 
 /* ── IMU data-ready interrupts ─────────────────────────────────────────────── */
 #define LINE_IMU1_DRDY          PAL_LINE(GPIOD, 15U)
-#define LINE_IMU2_DRDY          PAL_LINE(GPIOD, 10U)
+#define LINE_FRAM_CS            PAL_LINE(GPIOD, 10U)   /* SPI2 FRAM chip select (ArduPilot FRAM_CS) — was mislabelled IMU2_DRDY, never used as one */
 
 /* ── FDCAN1 ─────────────────────────────────────────────────────────────────── */
 #define LINE_CAN1_TX            PAL_LINE(GPIOD, 1U)

@@ -1,4 +1,5 @@
 #pragma once
+#include "MotorMixer.hpp"
 
 class Unmixer;
 
@@ -29,6 +30,12 @@ public:
     // rotation (StateManager::consume_yaw_reset()). Shift the held heading
     // target by the same amount — ArduPilot's inertial_frame_reset().
     virtual void yaw_frame_reset(float delta_rad) = 0;
+
+    // Which axes the mixer saturated on last tick (MotorMixer::limits()),
+    // for integrator anti-windup. Only the controller actually flying gets
+    // the real flags — see FlightStateMachine::set_mixer_limits(). No-op
+    // for controllers that don't use it.
+    virtual void set_mixer_limits(const MixerLimits & /*limits*/) {}
 
     // POS_HOLD's heading controller (HeadingControl) supplies the yaw-rate
     // target directly. While enabled, a controller uses rate_rad_s as its

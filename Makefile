@@ -206,7 +206,6 @@ CPPSRC = $(ALLCPPSRC) \
          src/controllers/Attitude_PID.cpp \
          src/controllers/Attitude_PID_Jerk.cpp \
          src/controllers/Attitude_INDI.cpp \
-         src/controllers/Attitude_INDI_Jerk.cpp \
          src/controllers/Attitude_JINDI.cpp \
          src/controllers/Attitude_PID_PI.cpp \
          src/controllers/AltControl.cpp \
@@ -226,6 +225,7 @@ CPPSRC = $(ALLCPPSRC) \
          src/coms/SPI.cpp \
          src/coms/CAN.cpp \
          src/coms/CalFlash.cpp \
+         src/coms/FRAM.cpp \
          src/coms/I2C.cpp \
          src/sensors/StrainRate.cpp \
          src/sensors/StrainGauge.cpp \

@@ -15,6 +15,9 @@
  *
  * Other features:
  *   - Anti-windup integrator clamping (±imax)
+ *   - Saturation anti-windup: while `limit` is set (the output this PID
+ *     drives is saturated), the integrator may only shrink toward zero —
+ *     same rule as ArduPilot AC_PID::update_i()
  *   - Stale-input detection: resets integrator after 200 ms gap
  *   - First-sample derivative suppression
  */
@@ -23,7 +26,7 @@ public:
     PID(float kp, float ki, float kd, float imax,
         float filt_target_hz = 0.0f, float filt_error_hz = 0.0f, float filt_d_hz = 20.0f);
 
-    float update(float target, float measurement);
+    float update(float target, float measurement, bool limit = false);
     void  reset();
     void  set_gains(float kp, float ki, float kd);
     // Overwrite the integrator (clamped to ±imax) — for bumpless handover

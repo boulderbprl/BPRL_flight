@@ -85,7 +85,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x14–0x17 | STN1–STN4 | strain **gauge** array (not strain rate — that is STRT): time_us, then 9 raw int16 strain gauge channels (0.1 µV/count) per message, one message per arm: STN1 = front right (D0–D8), STN2 = back right (D9–D17), STN3 = back left (D18–D26), STN4 = front left (D27–D35). STN1 and STN3 also carry `hz` and `valid`: `hz` is how many times per second that I2C chunk (chunk 0 = STN1+STN2, chunk 1 = STN3+STN4) was actually received from the sensor, averaged over ~1 s. Gated together by `LogEnableConfig::strn` |
 | 0x18 | JKFT | time_us, jerk estimates (z and roll) fitted from roll rate and the four strain-rate channels — see `src/sensors/JerkFit.hpp` |
 | 0x19 | PIDJ | retired (original single-stage AttitudePIDJerk) — FMT still emitted, never written |
-| 0x1A | INDJ | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g2_roll, jerk_cmd_roll, kappa2_roll — AttitudeINDIJerk |
+| 0x1A | — | reserved (was INDJ, AttitudeINDIJerk — removed; old logs still carry it) |
 | 0x1B | JIND | time_us, unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll — AttitudeJINDI |
 | 0x1C | JPID | time_us, rate_tgt, accel_tgt, jerk_tgt, torque_pi, torque_d, torque_roll, cmd_roll, cmd_pitch, cmd_yaw — AttitudePIDJerk |
 

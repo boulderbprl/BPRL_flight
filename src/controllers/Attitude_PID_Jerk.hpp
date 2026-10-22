@@ -85,7 +85,7 @@
  *
  * roll_jerk isn't part of the shared AttitudeController::update()
  * signature — set_roll_jerk() must be called once per tick before the
- * generic update() dispatch (same pattern as AttitudeINDIJerk), so update()
+ * generic update() dispatch (same pattern as AttitudeJINDI), so update()
  * itself just reads the most recently set value.
  *
  * Conventions:

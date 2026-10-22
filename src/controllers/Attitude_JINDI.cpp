@@ -123,19 +123,12 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
     // ── Live G1 adaptation: roll + pitch only, decimated — identical
     // mechanism to AttitudeINDI's (no separate G2 — see class comment).
     // mu is configured at 0 for now (AttitudeJindiGains::nlms_mu_pid/indi).
-    ++_nlms_tick_count;
-    const bool do_nlms_step = (_nlms_tick_count >= NLMS_DECIMATION);
-    if (do_nlms_step) {
+    if (++_nlms_tick_count >= NLMS_DECIMATION) {
         _nlms_tick_count = 0;
-    }
-
-    _nlms_update_axis(current_torque[0], p_dot_meas, _g1_roll, _g1_seed_roll,
-                       _tau_filt_state[0], _tau_extra_filt[0],
-                       _prev_tau_f[0], _prev_omegadot_f[0], do_nlms_step);
-    _nlms_update_axis(current_torque[1], q_dot_meas, _g1_pitch, _g1_seed_pitch,
-                       _tau_filt_state[1], _tau_extra_filt[1],
-                       _prev_tau_f[1], _prev_omegadot_f[1], do_nlms_step);
-    if (do_nlms_step) {
+        _nlms_update_axis(current_torque[0], p_dot_meas, _g1_roll, _g1_seed_roll,
+                           _prev_tau[0], _prev_omegadot[0]);
+        _nlms_update_axis(current_torque[1], q_dot_meas, _g1_pitch, _g1_seed_pitch,
+                           _prev_tau[1], _prev_omegadot[1]);
         _nlms_initialized = true;
     }
 
@@ -177,41 +170,33 @@ void AttitudeJINDI::reset_all()
     _jerk_meas_hpf_valid    = false;
     _tau_cmd_jerk_prev_roll = 0.0f;
 
-    // Reset only the NLMS differencing/filter memory — G1_hat itself is
-    // deliberately left alone, same rationale as AttitudeINDI/AttitudeINDIJerk
+    // Reset only the NLMS differencing memory — G1_hat itself is
+    // deliberately left alone, same rationale as AttitudeINDI
     // (learned estimate persists across arm cycles within a boot, bounded at
     // all times by the drift clamp against its seed).
     for (int i = 0; i < 2; ++i) {
-        _tau_filt_state[i]  = Biquad2pState();
-        _tau_extra_filt[i]  = 0.0f;
-        _prev_tau_f[i]      = 0.0f;
-        _prev_omegadot_f[i] = 0.0f;
+        _prev_tau[i]      = 0.0f;
+        _prev_omegadot[i] = 0.0f;
     }
     _nlms_initialized = false;
     _nlms_tick_count  = 0;
 }
 
+// Identical algorithm to AttitudeINDI::_nlms_update_axis() — see the
+// comment there: Delta_tau = G1 * Delta_Omega_dot (G1 in N·m per rad/s²,
+// the units both of roll's paths use it in), current_torque used as-is
+// since the Unmixer's filter already delay-matches it to p_dot/q_dot.
 void AttitudeJINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &g1, float seed,
-                                      Biquad2pState &filt_state, float &extra_filt,
-                                      float &prev_tau_f, float &prev_omegadot_f, bool do_step)
+                                      float &prev_tau, float &prev_omegadot)
 {
-    const float stage2p = lowpass2p(tau_now, filt_state, STATEMGR_LP_PQRDOT_HZ, NLMS_DT_S);
-    const float alpha_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, NLMS_DT_S);
-    extra_filt = lowpass(stage2p, extra_filt, alpha_extra);
-    const float tau_f = extra_filt;
-
-    if (!do_step) {
-        return;
-    }
-
     if (_nlms_initialized) {
-        const float delta_tau_f      = tau_f - prev_tau_f;
-        const float delta_omegadot_f = omegadot_now - prev_omegadot_f;
+        const float delta_tau      = tau_now - prev_tau;
+        const float delta_omegadot = omegadot_now - prev_omegadot;
 
-        if (fabsf(delta_tau_f) >= NLMS_EXCITATION_MIN_NM) {
+        if (fabsf(delta_omegadot) * fabsf(seed) >= NLMS_EXCITATION_MIN_NM) {
             const float mu = _indi_active ? _mu_indi : _mu_pid;
-            const float e  = delta_omegadot_f - g1 * delta_tau_f;
-            float step = mu * e * delta_tau_f / (delta_tau_f * delta_tau_f + NLMS_EPS);
+            const float e  = delta_tau - g1 * delta_omegadot;
+            float step = mu * e * delta_omegadot / (delta_omegadot * delta_omegadot + NLMS_EPS);
 
             const float max_step = NLMS_MAX_STEP_FRAC * fabsf(seed);
             step = constrain_float(step, -max_step, max_step);
@@ -222,6 +207,6 @@ void AttitudeJINDI::_nlms_update_axis(float tau_now, float omegadot_now, float &
         }
     }
 
-    prev_tau_f      = tau_f;
-    prev_omegadot_f = omegadot_now;
+    prev_tau      = tau_now;
+    prev_omegadot = omegadot_now;
 }

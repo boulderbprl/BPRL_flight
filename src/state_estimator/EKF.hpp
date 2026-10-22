@@ -66,6 +66,11 @@ public:
     // (NOT NED — the sign flip to NED-down happens inside this method).
     void update_altitude(float alt_up_m, float R_var);
 
+    // Whether this lane has an external tilt / horizontal reference right now
+    // (IMX5 quaternion or mocap). Without one, an accel-bias axis is only
+    // learned while it points along gravity — see BA_OBSERVABLE_MIN_VERT.
+    void set_tilt_aided(bool aided) { _tilt_aided = aided; }
+
     // Accessors
     const float* state()          const { return _x; }
     float        innovation_norm() const { return _innov_norm; }
@@ -173,6 +178,17 @@ private:
     // insufficient rather than chasing exact consistency.
     static constexpr float GRAV_MAX_CORR_RAD = 0.04f;
 
+    // Accel-bias observability gate, from ArduPilot EKF3's
+    // dvelBiasAxisInhibit (NavEKF3_core.cpp CovariancePrediction): a bias on
+    // a body axis that isn't near-vertical can't be told apart from tilt
+    // using gravity alone — a 0.17 m/s² X/Y bias and a 1° tilt look
+    // identical. With no external tilt reference (_tilt_aided false), the
+    // Kalman gain on an axis's accel-bias state is zeroed unless
+    // |R_b2n[2][axis]| > this, so bench handling / unaided flight can't
+    // push a fake horizontal bias in and leave the lane tilted. Same 0.8
+    // threshold as EKF3.
+    static constexpr float BA_OBSERVABLE_MIN_VERT = 0.8f;
+
     // ── Mocap position/velocity measurement update parameters ─────────────
     // Chi-squared innovation gate — same pattern as GRAV_CHI2_GATE. H is
     // diagonal here (each row observes exactly one state directly), so
@@ -212,6 +228,7 @@ private:
     bool  _initialized;
     float _innov_norm;    // exponentially-smoothed innovation magnitude
     float _vibe_filt;     // IIR estimate of (|a| - g)² — drives adaptive R_gravity
+    bool  _tilt_aided = false;  // see set_tilt_aided()
 
     float _x[N];          // state vector
     float _P[N][N];       // error covariance

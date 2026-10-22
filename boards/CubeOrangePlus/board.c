@@ -79,6 +79,17 @@ void boardInit(void)
     palSetPadMode(GPIOD, 5U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 6U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);
 
+    /* ── SPI2 — FRAM (Ramtron FM25) → AF5, CS=PD10 ───────────────────────
+     * ArduPilot CubeOrange hwdef.inc: PB13 SPI2_SCK, PB14 SPI2_MISO,
+     * PB15 SPI2_MOSI, PD10 FRAM_CS (CS SPEED_VERYLOW). CS driven high
+     * before it becomes an output so the chip is never selected by a
+     * glitch. See src/coms/FRAM.hpp. */
+    palSetPadMode(GPIOB, 13U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOB, 14U, PAL_MODE_ALTERNATE(5) | PAL_STM32_PUPDR_PULLUP);
+    palSetPadMode(GPIOB, 15U, PAL_MODE_ALTERNATE(5) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPad(GPIOD, 10U);
+    palSetPadMode(GPIOD, 10U, PAL_MODE_OUTPUT_PUSHPULL | PAL_STM32_OSPEED_LOWEST);
+
     /* ── USART3 — TELEM2 (PD8=TX, PD9=RX) → AF7  [future sensor] ───────── */
     palSetPadMode(GPIOD, 8U, PAL_MODE_ALTERNATE(7) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 9U, PAL_MODE_ALTERNATE(7) | PAL_STM32_PUPDR_PULLUP);

@@ -30,10 +30,10 @@ bool ICM20602::init(SPIDriver *spid, const SPIConfig *cfg_init, const SPIConfig 
     chThdSleepMilliseconds(5);
 
     reg_write(REG_SMPLRT_DIV, 0x00);  // 1 kHz ODR
-    reg_write(REG_CONFIG,     0x01);  // DLPF 184 Hz bandwidth
+    reg_write(REG_CONFIG,     0x02);  // gyro DLPF_CFG=2: 92 Hz -3 dB (was 0x01, 176 Hz)
     reg_write(REG_GYRO_CFG,   0x18);  // ±2000 dps
     reg_write(REG_ACCEL_CFG,  0x18);  // ±16 g
-    reg_write(REG_ACCEL_CFG2, 0x01);  // 99 Hz accel bandwidth
+    reg_write(REG_ACCEL_CFG2, 0x02);  // A_DLPF_CFG=2: 99 Hz (was 0x01 = 218 Hz despite the old 99 Hz comment)
 
     _ready = true;
     return true;

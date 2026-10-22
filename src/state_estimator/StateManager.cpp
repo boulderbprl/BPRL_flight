@@ -16,7 +16,7 @@ static constexpr int iBgx=13, iBgy=14, iBgz=15;
  * Construction / initialisation
  * ══════════════════════════════════════════════════════════════════════════ */
 
-StateManager::StateManager()
+StateManager::StateManager(const AngAccelFilterConfig &ang_accel_filt)
     : _primary(0), _initialized(false),
       _yaw_zero_captured(false), _yaw_offset_q{1.0f, 0.0f, 0.0f, 0.0f},
       _mocap_yaw_pending(false), _mocap_yaw_aligned(false),
@@ -31,7 +31,9 @@ StateManager::StateManager()
       _ud_filt(0.0f), _vd_filt(0.0f), _wd_filt(0.0f),
       _u_filt(0.0f), _v_filt(0.0f), _w_filt(0.0f),
       _lane_p{}, _lane_q{}, _lane_r{}, _lane_weight_filt{}
-{}
+{
+    _ang_accel_filt = ang_accel_filt;
+}
 
 void StateManager::init()
 {
@@ -112,7 +114,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     if (!_initialized) return;
 
     // ── 1. Predict: each lane uses its own IMU ─────────────────────────────
+    // External tilt/horizontal reference this tick (fresh IMX5 quaternion or
+    // mocap) — without one the EKF freezes non-vertical accel-bias axes
+    // (EKF::BA_OBSERVABLE_MIN_VERT), as nothing can observe them.
+    const bool tilt_aided = mocap.valid
+        || (can_imu.valid && (now_us - can_imu.quat_timestamp_us) <= STATEMGR_CAN_QUAT_STALE_US);
     for (int i = 0; i < NUM_LANES; ++i) {
+        _lanes[i].set_tilt_aided(tilt_aided);
         if (imu[i].valid)
             _lanes[i].predict(dt, imu[i].accel, imu[i].gyro);
         // A lane with no IMU behind it (e.g. imu3 on the two-IMU Orqa board)
@@ -423,18 +431,20 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
 
     // ── 9. Angular acceleration: differentiate notch-filtered p/q (ahead of
     // the STATEMGR_LP_PQ_HZ 2nd-order LPF above, so p_dot/q_dot don't inherit
-    // its lag) then 2nd-order lowpass at STATEMGR_LP_PQRDOT_HZ, then an
-    // optional 3rd (1st-order) stage at STATEMGR_LP_PQRDOT_EXTRA_HZ — set it
-    // to 0 to A/B test against the 2nd-order-only filter. r_dot is
+    // its lag) then the drone's AngAccelFilterConfig — 2nd-order lowpass at
+    // lpf_hz, then an optional 1st-order stage at lpf_extra_hz — the same
+    // filter, at the same fixed CONTROL_DT_S, the Unmixer applies to RPM, so
+    // INDI's measured torque and measured angular acceleration stay
+    // delay-matched. r_dot is
     // unchanged — differentiates the fully-filtered r with the original
     // 1st-order lowpass, since yaw has no INDI path consuming it.
-    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, STATEMGR_LP_PQRDOT_HZ, CONTROL_DT_S);
-    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, STATEMGR_LP_PQRDOT_HZ, CONTROL_DT_S);
-    const float alpha_pqdot_extra = lowpass_alpha(STATEMGR_LP_PQRDOT_EXTRA_HZ, dt);
+    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, _ang_accel_filt.lpf_hz, CONTROL_DT_S);
+    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, _ang_accel_filt.lpf_hz, CONTROL_DT_S);
+    const float alpha_pqdot_extra = lowpass_alpha(_ang_accel_filt.lpf_extra_hz, CONTROL_DT_S);
     _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
     _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
 
-    const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_PQRDOT_HZ, dt);
+    const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_RDOT_HZ, dt);
     _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_r_dot);
 
     _prev_p = p_notched;
