@@ -27,7 +27,7 @@ mavlink_system_t mavlink_system = { 1, 1 }; // sysid=1, compid=1 (autopilot)
 #include "common/mavlink.h"  // header-only; include path: third_party/mavlink
 
 static const SerialConfig telem2_cfg = {
-    115200,
+    230400,
     0,
     USART_CR2_STOP1_BITS,
     0,

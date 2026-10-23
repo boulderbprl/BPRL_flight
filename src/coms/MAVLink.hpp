@@ -1,7 +1,7 @@
 #pragma once
 
 /*
- * Slimmed-down MAVLink handler, 115200 baud, on BPRL_MAVLINK_SD:
+ * Slimmed-down MAVLink handler, 230400 baud, on BPRL_MAVLINK_SD:
  *   Cube boards:      TELEM2  — USART3 / SD3
  *   BPRL_BOARD_ORQA:  TX7/RX7 — UART7 / SD7 (PE8 TX, PE7 RX; pin mux in
  *                     boards/OrqaH7QuadCore/board.c, driver enable in

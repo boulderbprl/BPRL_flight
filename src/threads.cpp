@@ -1847,7 +1847,7 @@ static THD_FUNCTION(DebugThread, arg)
 
 /* ══════════════════════════════════════════════════════════════════════════
  * MAVLinkThread — 100 Hz, NORMALPRIO-8
- * Slimmed-down MAVLink at 115200 baud on TELEM2/USART3 (Cube boards) or
+ * Slimmed-down MAVLink at 230400 baud on TELEM2/USART3 (Cube boards) or
  * TX7/RX7/UART7 (BPRL_BOARD_ORQA) — see BPRL_MAVLINK_SD in MAVLink.hpp.
  * Sends heartbeat at 1 Hz; receives VISION_POSITION_ESTIMATE and
  * VISION_SPEED_ESTIMATE and writes them into g_mocap for the EKF.
@@ -1865,7 +1865,7 @@ static THD_FUNCTION(MAVLinkThread, arg)
         TIMING_TICK_BEGIN(tid);
         mavlink_comms_update();
         TIMING_TICK_END(tid);
-        chThdSleepMilliseconds(10);  // 100 Hz poll — sufficient to drain 115200 baud
+        chThdSleepMilliseconds(10);  // 100 Hz poll — drains up to SERIAL_BUFFERS_SIZE bytes per poll
     }
 }
 
