@@ -19,7 +19,7 @@
  *   src/sensors/EncoderRPM.*  Shaft-angle encoder RPM nodes, CAN 0x70-0x73 (Feather M4 + AS5047P).
  *   src/coms/PWM.*, DShot.* Motor output — bidirectional DShot 600 by default (MOTOR_PROTOCOL in PWM.hpp).
  *   src/coms/Radio.*       RC radio input (SBUS on SBUSo / CRSF on TELEM1).
- *   src/controllers/       PID, AttitudeController, MotorMixer.
+ *   src/controllers/       FlightStateMachine; attitude/, position/, extras/ (PID, SysId, Unmixer, MotorMixer).
  *
  * ── Adding a CAN device ─────────────────────────────────────────────────────
  *   1. Write: void my_cb(const CANRxFrame &f, void *ctx) in src/coms/CAN.cpp

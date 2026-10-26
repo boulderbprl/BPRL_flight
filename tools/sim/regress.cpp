@@ -3,8 +3,8 @@
 // plant and prints every output at full precision. Built once against a
 // snapshot of the sources and once against the working tree; the two outputs
 // must be identical. See tools/sim/run.sh.
-#include "src/controllers/PosControl.hpp"
-#include "src/controllers/AltControl.hpp"
+#include "src/controllers/position/PosControl.hpp"
+#include "src/controllers/position/AltControl.hpp"
 #include "configs/DroneConfig.hpp"
 #include "src/uptime.hpp"
 #include "src/threads.hpp"

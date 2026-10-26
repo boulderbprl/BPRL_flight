@@ -1,6 +1,6 @@
 #pragma once
-#include "PID.hpp"
-#include "Unmixer.hpp"
+#include "src/controllers/extras/PID.hpp"
+#include "src/controllers/extras/Unmixer.hpp"
 #include "AttitudeController.hpp"
 #include "configs/DroneConfig.hpp"
 #include "src/math/math.hpp"
@@ -52,10 +52,8 @@
  * G1_hat (both roll and pitch) is the exact same live NLMS estimator
  * AttitudeINDI uses, identified against the real measured current_torque —
  * JINDI has no separate "G2" estimator at all,
- * since both of roll's paths share one G. Adaptation rate (mu) is
- * configured at 0 for now (not yet characterized) — the machinery stays
- * wired, same convention as every other not-yet-tuned gain in this
- * codebase, so it can be turned on later without a code change.
+ * since both of roll's paths share one G. Adaptation rate (mu) is per
+ * drone (AttitudeJindiGains::nlms_mu_*; 0 = adaptation off, as on Drone1).
  *
  * Pitch and yaw: unchanged from AttitudeINDI — plain
  * accel-level INDI for pitch (its own kappa, DroneConfig::AttitudeJindiGains

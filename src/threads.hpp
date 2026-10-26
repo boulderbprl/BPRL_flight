@@ -6,7 +6,7 @@
 #include "src/sensors/StrainRate.hpp"
 #include "src/sensors/StrainGauge.hpp"
 #include "src/sensors/EncoderRPM.hpp"
-#include "src/controllers/TrajectoryTracker.hpp"   // TrajCommand, TrajResult
+#include "src/controllers/position/TrajectoryTracker.hpp"   // TrajCommand, TrajResult
 
 /* ── Shared raw sensor data types ────────────────────────────────────────── */
 
@@ -58,11 +58,13 @@ extern float   g_state[StateIdx::N]; // full 19-element EKF state (StateIdx::*)
 extern float   g_euler[3];           // [roll, pitch, yaw] (rad) derived from quaternion
 extern float   g_input[InputIdx::N_INPUTS]; // InputIdx::*  (thrust, roll/pitch/yaw targets, flight_mode, controller-select switch)
 extern int32_t g_output[4];          // normalized motor commands 0–1000 [FR, RL, FL, RR] (0=disarm; protocol conversion in motor_output_write())
-extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs entering MotorMixer
+extern float   g_ctrl[4];            // [roll_tq, pitch_tq, yaw_tq, thrust] — commands entering MotorMixer (active controller + any SysId chirp)
 extern float   g_indi_diag[10];      // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
 extern float   g_ctun_diag[10];      // [roll_tgt, roll_err, roll_rate_tgt, roll_rate_err, pitch_tgt, pitch_err, pitch_rate_tgt, pitch_rate_err, roll_rate_i, pitch_rate_i] — AttitudePID tuning diagnostics (CTUN)
 extern float   g_ptun_diag[12];      // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 extern float   g_traj_diag[8];       // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed] — see FlightStateMachine::get_traj_diag()
+extern float   g_sysid_diag[5];      // [state (SysIdState), axis (SysIdAxis), time_s, freq_hz, chirp output] — see FlightStateMachine::sysid_diag()
+extern bool    g_sysid_sw;           // sysid switch level (radio_sysid()) — RadioThread writes; ControlThread hands it to FlightStateMachine::set_sysid_switch()
 extern bool    g_armed;
 extern int     g_flight_mode;        // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 extern int     g_radio_switch_pos;   // raw controller-select switch position (0/1/2, low/mid/high) — RadioThread writes; ControlThread reads to drive FlightStateMachine::set_active_controller()

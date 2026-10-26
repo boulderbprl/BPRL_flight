@@ -143,7 +143,7 @@ const DroneConfig kDroneConfig = {
     { { AttCtrl::PID, AttCtrl::PID_JERK, AttCtrl::JINDI },  // low = PID, mid = PID_Jerk, high = JINDI (same as before the switch rework)
       57.29578f },  // stick_max_angle_deg — 1 rad, unchanged from the old fixed mapping
    
-    // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
+    // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
     {
         70.0f, // log_rate_hz
         { true, // att
@@ -164,6 +164,18 @@ const DroneConfig kDroneConfig = {
           false, // strn (STN1..STN4 — no strain gauge array on this airframe)
           true, // jindi
           true, // jpid
-          false }, // ctun (AttitudePID tuning)
+          false, // ctun (AttitudePID tuning)
+          true }, // sidd (system-ID sweep)
     },
+
+    // .sysid — SysIdConfig { rc_channel, axes[4], f_start_hz, f_stop_hz, duration_s, magnitude[4], fade_in_s, fade_out_s }
+    // Each flip of rc_channel sweeps the next axis in axes[] (wraps); flipping back
+    // down mid-sweep cancels it and keeps the same axis. See src/controllers/extras/SysId.hpp.
+    // Magnitudes are untested placeholders — start small and work up.
+    { 8,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
+      { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
+      0.5f, 20.0f,                          // f_start_hz, f_stop_hz — 0.5-20 Hz: this airframe's ~0-10 Hz bandwidth with margin
+      60.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
+      { 0.05f, 0.05f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
+      5.0f, 2.0f },                         // fade_in_s, fade_out_s
 };

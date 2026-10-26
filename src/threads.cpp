@@ -23,7 +23,7 @@
 #include "src/coms/IOMCU.hpp"
 #include "src/coms/Radio.hpp"
 #include "src/controllers/FlightStateMachine.hpp"
-#include "src/controllers/MotorMixer.hpp"
+#include "src/controllers/extras/MotorMixer.hpp"
 #include "src/state_estimator/StateManager.hpp"
 #include "src/logging/Logger.hpp"
 #include "src/logging/LogMessages.hpp"
@@ -51,11 +51,13 @@ float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
 float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
-float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever pid_jerk_enabled
-float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever jindi_enabled
+float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever a ControllersConfig::switch_pos names AttCtrl::PID_JERK
+float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever a ControllersConfig::switch_pos names AttCtrl::JINDI
 float   g_ctun_diag[10]      = {};   // AttitudePID tuning diagnostics, see threads.hpp
 float   g_ptun_diag[12]      = {};   // TEMP: [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err, vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt, climb_rate_tgt, climb_rate_err] — pos-hold NE + alt-hold shadow tuning diagnostics
 float   g_traj_diag[8]       = {};   // [traj_state, ref_n, ref_e, ref_d, yaw_tgt, yaw_rate_cmd, height_offset, path_speed]
+float   g_sysid_diag[5]      = {};   // [state, axis, time_s, freq_hz, chirp output] — see threads.hpp
+bool    g_sysid_sw           = false;
 bool    g_armed              = false;
 int     g_flight_mode        = 0;    // FlightMode enum value (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
 int     g_radio_switch_pos   = 1;    // raw controller-select switch position (0/1/2, low/mid/high); 1=mid=PID
@@ -70,7 +72,7 @@ CANIMURaw g_can_imu = {1.0f};  // q0=1: identity quaternion so angles show 0/0/0
 MUTEX_DECL(strainRate_mtx);
 StrainRateRaw g_strain_rate = {};
 float         g_strain_bias[4] = {};  // per-channel zero-offset, live-calibrated by ControlThread — see JerkFit.hpp
-bool          g_strain_cal_active = false;  // raw channel-6 cal switch state this tick — see radio_strain_cal()
+bool          g_strain_cal_active = false;  // raw strain-cal switch state this tick (RcChannelMap::strain_cal_switch) — see radio_strain_cal()
 
 MUTEX_DECL(encoderRpm_mtx);
 EncoderRPMRaw g_encoder_rpm[ENCODER_RPM_NUM_NODES] = {};
@@ -466,7 +468,7 @@ static THD_FUNCTION(I2CThread, arg)
  * Formerly split across StateEstThread (625 Hz) + ControlThread (400 Hz),
  * two independent free-running timers with no integer-ratio relationship
  * (625:400 reduces to 25:16) — a structural source of jitter feeding the
- * control loop (see code_rework.md Section 1.3/2). Merged so the estimator
+ * control loop. Merged so the estimator
  * output the mixer consumes is always this exact tick's fresh value, never a
  * value handed across a cross-thread boundary.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -542,9 +544,7 @@ static THD_FUNCTION(ControlThread, arg)
         g_baro.has_new = false;
         chMtxUnlock(&baro_mtx);
 
-        // RPM telemetry — read once here (was previously duplicated: computed
-        // in ControlThread, published to g_rpm_gated, then re-read by
-        // StateEstThread next tick). Used directly below by both the EKF's
+        // RPM telemetry — read once here, then used directly below. Used directly below by both the EKF's
         // vibration-notch tracker and the INDI unmixer; still published to
         // g_rpm_gated under esc_mtx for DebugThread/LogThread readers.
         //
@@ -665,13 +665,16 @@ static THD_FUNCTION(ControlThread, arg)
         float input[InputIdx::N_INPUTS];
         bool  armed;
         int   radio_switch_pos;
+        bool  sysid_sw;
         chMtxLock(&state_mtx);
         memcpy(input,     g_input,  sizeof(input));
         armed            = g_armed;
         radio_switch_pos = g_radio_switch_pos;
+        sysid_sw         = g_sysid_sw;
         chMtxUnlock(&state_mtx);
 
         flight_sm.set_active_controller(radio_switch_pos);
+        flight_sm.set_sysid_switch(sysid_sw);
 
         // Strain-fit roll jerk estimate (JINDI / PIDJerk roll jerk feedback, see JerkFit.hpp).
         StrainRateRaw strain_snap;
@@ -681,7 +684,7 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(strain_bias_snap, g_strain_bias, sizeof(strain_bias_snap));
         chMtxUnlock(&strainRate_mtx);
 
-        // ── Per-channel strain bias calibration (channel-6 momentary switch) ──
+        // ── Per-channel strain bias calibration (strain_cal_switch, momentary) ──
         // Holding the switch averages each raw strain channel; releasing (or
         // hitting the 5 s cap while still held) commits the running average as
         // the new g_strain_bias, replacing whatever was there. Session-only —
@@ -784,6 +787,10 @@ static THD_FUNCTION(ControlThread, arg)
         float traj_diag[8];
         flight_sm.get_traj_diag(traj_diag);
 
+        const SysIdDiag sysid = flight_sm.sysid_diag();
+        const float sysid_diag[5] = { (float)sysid.state, (float)sysid.axis,
+                                      sysid.time_s, sysid.freq_hz, sysid.output };
+
         // MotorMixer disarm check uses state[0]=roll, state[1]=pitch.
         const float safety_state[2] = { euler[0], euler[1] };
         int32_t motor_out[4];
@@ -804,6 +811,7 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
         memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
         memcpy(g_traj_diag, traj_diag, sizeof(g_traj_diag));
+        memcpy(g_sysid_diag, sysid_diag, sizeof(g_sysid_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
         g_flight_mode       = (int)flight_sm.mode();
         g_active_controller = (int)flight_sm.active_ctrl();
@@ -847,6 +855,7 @@ static THD_FUNCTION(RadioThread, arg)
         g_input[InputIdx::INDI_STK]    = radio_indi();
         g_armed           = radio_armed();
         g_radio_switch_pos = radio_switch_position();
+        g_sysid_sw         = radio_sysid();
         chMtxUnlock(&state_mtx);
 
         TIMING_TICK_END(tid);
@@ -855,7 +864,7 @@ static THD_FUNCTION(RadioThread, arg)
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
- * HeartbeatThread — 1 Hz  NORMALPRIO-5
+ * HeartbeatThread — 200 ms tick (5 Hz)  NORMALPRIO-5
  * ══════════════════════════════════════════════════════════════════════════ */
 static THD_FUNCTION(HeartbeatThread, arg)
 {
@@ -1843,9 +1852,10 @@ static THD_FUNCTION(DebugThread, arg)
 #endif // BPRL_DEBUG
 
 /* ══════════════════════════════════════════════════════════════════════════
- * LogThread — 50 Hz  NORMALPRIO-15
- * Logs 9 message types per tick: ATT, LIN, RCIN, OUTP, RPMS, STRT, IMU1, IMU2, IMU3
- * (plus STN1..STN4, the strain gauge array, where the drone's config enables it).
+ * LogThread — DroneConfig::logging.log_rate_hz  NORMALPRIO-15
+ * Writes one record per message type the drone's LoggingConfig::enable
+ * turns on (see LogMessages.hpp for the full list; JKFT is always written,
+ * MAVL at ~5 Hz).
  * Output files are compatible with UAV Log Viewer (plot.ardupilot.org).
  * Retries logger.init() every 5 s until an SD card is inserted.
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -1921,7 +1931,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ptun_diag[12], ctun_diag[10], traj_diag[8], jindi_diag[13], pidj_diag[9];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ptun_diag[12], ctun_diag[10], traj_diag[8], jindi_diag[13], pidj_diag[9], sysid_diag[5];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -1934,6 +1944,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(traj_diag,  g_traj_diag,  sizeof(traj_diag));
         memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
         memcpy(pidj_diag,  g_pidj_diag,  sizeof(pidj_diag));
+        memcpy(sysid_diag, g_sysid_diag, sizeof(sysid_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
 
@@ -2145,6 +2156,20 @@ static THD_FUNCTION(LogThread, arg)
             msg.roll_rate_i    = ctun_diag[8];
             msg.pitch_rate_i   = ctun_diag[9];
             logger.write(LOG_MSG_CTUN, msg);
+        }
+
+        /* ── SIDD — system-ID sweep state + chirp output ─────────────── */
+        /* The commands that actually reached the mixer (controller + chirp)
+         * are OUTP; this is just the chirp itself and where the sweep is. */
+        if (log_en.sidd) {
+            LogMsgSIDD msg = {};
+            msg.time_us = t_us;
+            msg.state   = (uint8_t)sysid_diag[0];
+            msg.axis    = (uint8_t)sysid_diag[1];
+            msg.time_s  = sysid_diag[2];
+            msg.freq_hz = sysid_diag[3];
+            msg.output  = sysid_diag[4];
+            logger.write(LOG_MSG_SIDD, msg);
         }
 
         /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */

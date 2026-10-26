@@ -65,7 +65,7 @@ python3 tools/telemetry.py strain
 
 > Works on any firmware build.
 
-Live per-subsystem connectivity monitor — polls the `HW,status` USB command (~2 Hz) and renders a panel showing whether each sensor/link is actually reporting valid data right now: all on-board IMUs, the CAN INS (IMX5), barometer, strain rate sensor, both encoder RPM nodes, RC link, and SD card, plus raw FDCAN1 RX/dispatch counters.
+Live per-subsystem connectivity monitor — polls the `HW,status` USB command (~2 Hz) and renders a panel showing whether each sensor/link is actually reporting valid data right now: all on-board IMUs, the CAN INS (IMX5), barometer, strain rate sensor, the four encoder RPM nodes, RC link, and SD card, plus raw FDCAN1 RX/dispatch counters.
 
 ```bash
 python3 tools/hw_status.py
@@ -108,13 +108,13 @@ Motor layout (top view): `FL[2]  FR[0]` / `RL[1]  RR[3]`
 
 > Requires `-DBPRL_DEBUG` firmware build (needs the `$IMU` stream).
 
-Collects static IMU data, computes gyro and accelerometer biases, and writes them to flash.
+Collects static IMU data, computes gyro and accelerometer biases, and stores them on the board — in FRAM on the Cube boards (survives firmware uploads), internal flash on Drone3/Orqa (see `src/coms/README.md`'s CalFlash section).
 
 ```bash
 python3 tools/calibrate.py calibrate [--duration 30]
 ```
 
-Place the drone level on a flat surface before running. The script collects `--duration` seconds of `$IMU` samples (default 30 s), prints the computed biases, and asks for confirmation before writing to flash via `CAL,set` and `CAL,commit`.
+Place the drone level on a flat surface before running. The script collects `--duration` seconds of `$IMU` samples (default 30 s), prints the computed biases, and asks for confirmation before writing them via `CAL,set` and `CAL,commit`.
 
 `python3 tools/calibrate.py clear` clears the stored calibration (zero bias) without recalibrating.
 
@@ -173,7 +173,7 @@ python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 -
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 stop
 ```
 
-`--master` is any pymavlink connection string — a MAVProxy `--out` port, or the serial adapter (`/dev/ttyUSB0,115200`). Point and circle are only accepted while flying in POS_HOLD with a valid mocap position and an origin set. See `src/controllers/README.md` (TrajectoryTracker).
+`--master` is any pymavlink connection string — a MAVProxy `--out` port, or the serial adapter (`/dev/ttyUSB0,230400` — the FC's MAVLink UART runs at 230400 baud). Point and circle are only accepted while flying in POS_HOLD with a valid mocap position and an origin set. See `src/controllers/README.md` (TrajectoryTracker).
 
 ---
 
@@ -265,15 +265,21 @@ python3 tools/logs.py log-status
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
 | `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
 | `<stem>_strt.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
-| `<stem>_str1.csv` … `_str4.csv` | TimeUS, 9 raw int16 strain gauge channels each (0.1 µV/count): `str1` front right (D0–D8), `str2` back right (D9–D17), `str3` back left (D18–D26), `str4` front left (D27–D35). `str1`/`str3` add Hz (measured I2C receive rate of that chunk, not the logging rate) and Valid |
+| `<stem>_stn1.csv` … `_stn4.csv` | TimeUS, 9 raw int16 strain gauge channels each (0.1 µV/count): `stn1` front right (D0–D8), `stn2` back right (D9–D17), `stn3` back left (D18–D26), `stn4` front left (D27–D35). `stn1`/`stn3` add Hz (measured I2C receive rate of that chunk, not the logging rate) and Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
 | `<stem>_indi.csv` | TimeUS, UnmixR/UnmixP (N·m), DeltaR/DeltaP (N·m), CmdR/CmdP (normalized), AccR/AccP (rad/s² INDI-commanded accel), G1R/G1P (N·m per rad/s² — live NLMS-adapted `G1_hat`) |
 | `<stem>_baro.csv` | TimeUS, Press (Pa), Temp (°C), Alt (m, positive up), Valid |
 | `<stem>_ptun.csv` | TimeUS, PNT/PNE/PET/PEE (N/E position target and error, m), VNT/VNE/VET/VEE (N/E velocity target and error, m/s), RolT/PitT (lean-angle targets, rad), ClbT/ClbE (climb-rate target and error, m/s) — POS_HOLD tuning diagnostics |
 | `<stem>_ctun.csv` | TimeUS, RolT/RolE (roll angle target/error, rad), RRT/RRE (roll rate target/error, rad/s), PitT/PitE/PRT/PRE (same for pitch), RI/PI (rate-PID integrators) — AttitudePID tuning |
 | `<stem>_mocp.csv` | TimeUS, X/Y/Z (m NED), VX/VY/VZ (m/s), Valid — raw mocap estimate, pre-EKF |
+| `<stem>_traj.csv` | TimeUS, State, RefN/RefE/RefD, YawT/YawR, HOff, Spd — trajectory tracker and POS_HOLD heading |
+| `<stem>_mavl.csv` | TimeUS, MAVLink receive counters, last trajectory command and result (~5 Hz) |
+| `<stem>_jkft.csv` | TimeUS, JerkZ, Pdd (fitted z / roll jerk), Valid, CalAct |
+| `<stem>_jind.csv` | AttitudeJINDI diagnostics — see the root README's message table |
+| `<stem>_jpid.csv` | AttitudePIDJerk diagnostics — see the root README's message table |
+| `<stem>_sidd.csv` | TimeUS, State, Axis, T, Freq, Out — SysId sweep state and chirp value |
 
-Every enabled message type logs at the `LogThread` period (50 Hz by default, set per drone) — there's no per-record rate field. A message a drone's config disables has no data rows.
+The CSV name is always the lowercased log message name, so any message type added later gets its own file automatically. Every enabled message type logs at the `LogThread` period (`log_rate_hz`, set per drone; MAVL at ~5 Hz) — there's no per-record rate field. A message a drone's config disables has no data rows.
 
 The `.bin` files are also compatible with [UAV Log Viewer](https://plot.ardupilot.org) — open the file directly in the browser for interactive plots.
 

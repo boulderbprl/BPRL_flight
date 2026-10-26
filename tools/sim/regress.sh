@@ -14,10 +14,24 @@ TMP=$(mktemp -d)
 mkdir -p "$TMP/base"
 git -C "$REPO" archive "$REF" src configs | tar -x -C "$TMP/base"
 
+# A GIT_REF from before src/controllers/ was split into attitude/, position/
+# and extras/ has every controller directly in src/controllers/. Give it
+# forwarding headers at the paths regress.cpp includes, and find each .cpp
+# by name, so either layout builds.
+for h in position/PosControl.hpp position/AltControl.hpp; do
+    if [ ! -e "$TMP/base/src/controllers/$h" ]; then
+        mkdir -p "$TMP/base/src/controllers/$(dirname "$h")"
+        echo "#include \"../$(basename "$h")\"" > "$TMP/base/src/controllers/$h"
+    fi
+done
+ctrl_src() {   # $1 = source root, $2 = file name
+    find "$1/src/controllers" -name "$2" | head -n 1
+}
+
 build() {   # $1 = source root, $2 = output binary
     ${CXX:-g++} -std=gnu++14 -O1 -ffp-contract=off -I"$SIM/stubs" -I"$1" -o "$2" "$SIM/regress.cpp" \
-        "$1/src/controllers/PosControl.cpp" "$1/src/controllers/AltControl.cpp" \
-        "$1/src/controllers/PID.cpp" "$1/src/math/math.cpp" "$1/configs/$DRONE/drone_config.cpp"
+        "$(ctrl_src "$1" PosControl.cpp)" "$(ctrl_src "$1" AltControl.cpp)" \
+        "$(ctrl_src "$1" PID.cpp)" "$1/src/math/math.cpp" "$1/configs/$DRONE/drone_config.cpp"
 }
 build "$TMP/base" "$TMP/regress_base"
 build "$REPO"     "$TMP/regress_new"

@@ -7,7 +7,6 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 ## TODO
 
 - Add voltage feedback from the analog input on Power1 port (CubePilot Power Brick Mini).
-- Add trajectory tracking to the position hold controller.
 - Add more commands over the MAVLink connection.
 
 
@@ -31,7 +30,7 @@ Standalone ChibiOS flight controller firmware for the [CubePilot](https://docs.c
 
 ### What it does
 
-The firmware runs RTOS threads on the STM32H7 that together perform the flight control for a quadcopter. Sensor data is read from three on-board SPI IMUs and one external CAN IMU (Inertial Sense IMX5), fused into a flight state estimate, fed through the controller, and mixed to motor PWM outputs. A low-priority logging thread records IMU and state data to an SD card in binary format.
+The firmware runs RTOS threads on the STM32H7 that together perform the flight control for a quadcopter. Sensor data is read from two or three on-board SPI IMUs (board-dependent) and, where fitted, an external CAN INS (Inertial Sense IMX5) and a motion-capture link, fused into a flight state estimate, fed through the controller, and mixed to motor outputs. A low-priority logging thread records IMU and state data to an SD card in binary format.
 
 ### Directory layout
 
@@ -67,9 +66,9 @@ BPRL_flight/
 │   │   ├── I2C.hpp/.cpp      I2C2 driver (bus-recovery + reset), device table — strain-rate sensor fallback interface (Cube boards) or DPS310 barometer (Drone3/Orqa)
 │   │   ├── PWM.hpp/.cpp      Thin MOTOR_PROTOCOL-select wrapper (DShot vs. standard servo PWM) around motor_output_write() — the actual bidirectional-DShot timer/DMA driver is DShot.hpp/.cpp (see src/coms/README.md)
 │   │   ├── DShot.hpp/.cpp    Bidirectional DShot600 driver — Cube boards share TIM1 (3 motors, CC2 cross-capture rotation) + TIM4 (1 motor); Drone3/Orqa uses TIM4+TIM2, 2 motors time-multiplexed per timer (board has only 2 usable BIDIR timer pairs on its MOT1-4 ESC connector)
-│   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from DroneConfig::rc_map
+│   │   ├── Radio.hpp/.cpp    Receiver input dispatch (CRSF default; SBUS.hpp/.cpp, CRSF.hpp/.cpp both compiled, selected via RADIO_PROTOCOL); channel indices come from kRcMaps[DroneConfig::rc_tx] (per transmitter), plus SysIdConfig::rc_channel (per drone)
 │   │   ├── IOMCU.hpp/.cpp    UART link to the Cube carrier's IO co-processor — drives MAIN 1-4 PWM (Drone2, MOTOR_PROTO_IOMCU)
-│   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink parser — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap)
+│   │   ├── MAVLink.hpp/.cpp  TELEM2 MAVLink at 230400 baud — mocap ingestion (VISION_POSITION/SPEED_ESTIMATE → g_mocap) + trajectory commands
 │   │   ├── CalFlash.hpp/.cpp Persistent IMU calibration: FRAM on Cube boards (survives uploads), internal flash Bank2 sector 7 fallback / Orqa
 │   │   └── FRAM.hpp/.cpp     SPI2 Ramtron FM25 driver (Cube boards), port of ArduPilot AP_RAMTRON — the Cube bootloader's
 │   │       chip erase wipes internal-flash calibration on every upload, so (like ArduPilot's parameters) it lives here.
@@ -78,16 +77,24 @@ BPRL_flight/
 │   │       a missing/unresponsive FRAM just falls back to internal flash (`FRAM,status` / `calibrate.py query`).
 │   │
 │   ├── controllers/          Flight control algorithms (see src/controllers/README.md)
-│   │   ├── PID.hpp/.cpp                 PID base class with derivative filter + anti-windup
 │   │   ├── FlightStateMachine.hpp/.cpp   Top-level mode/phase dispatcher + config-driven controller list (400 Hz)
-│   │   ├── AttitudeController.hpp        Common interface implemented by AttitudePID/AttitudeINDI/AttitudePIDPI
-│   │   ├── Attitude_PID.hpp/.cpp     Cascaded P+PID attitude controller
-│   │   ├── Attitude_INDI.hpp/.cpp    Incremental NDI roll/pitch controller
-│   │   ├── Attitude_PID_PI.hpp/.cpp  Outer P + rate-PID ("SLC") + inner PI on measured angular acceleration, ported from the BPRL ArduPilot fork
-│   │   ├── AltControl.hpp/.cpp     Throttle passthrough + altitude hold (stick→altitude target + climb rate→thrust), shared by ALT_HOLD and POS_HOLD
-│   │   ├── PosControl.hpp/.cpp     N/E position hold cascade (pos→vel→lean angles)
-│   │   ├── Unmixer.hpp/.cpp        RPM → physical torque (N·m) for INDI feedback
-│   │   └── MotorMixer.hpp/.cpp     X-frame quadcopter mixer (torque+thrust → motor cmds)
+│   │   ├── attitude/
+│   │   │   ├── AttitudeController.hpp    Common interface every attitude controller implements
+│   │   │   ├── Attitude_PID.hpp/.cpp     Cascaded P+PID attitude controller (the default)
+│   │   │   ├── Attitude_INDI.hpp/.cpp    Incremental NDI roll/pitch with live NLMS effectiveness estimate
+│   │   │   ├── Attitude_PID_PI.hpp/.cpp  Outer P + rate-PID ("SLC") + inner PI on measured angular acceleration, ported from the BPRL ArduPilot fork
+│   │   │   ├── Attitude_PID_Jerk.hpp/.cpp  angle→rate→accel PI cascade with a strain-jerk damping term on roll
+│   │   │   └── Attitude_JINDI.hpp/.cpp   INDI with roll_jerk as a second, convex-combined roll path
+│   │   ├── position/
+│   │   │   ├── PosControl.hpp/.cpp       N/E position hold cascade (pos→vel→lean angles)
+│   │   │   ├── AltControl.hpp/.cpp       Throttle passthrough (STABILIZE) + altitude hold (POS_HOLD)
+│   │   │   ├── HeadingControl.hpp/.cpp   POS_HOLD heading loop (heading target → yaw-rate command)
+│   │   │   └── TrajectoryTracker.hpp/.cpp  Point / circle / ellipse references for POS_HOLD (MAVLink commands)
+│   │   └── extras/
+│   │       ├── PID.hpp/.cpp              PID base class (AC_PID-style filters, anti-windup)
+│   │       ├── Unmixer.hpp/.cpp          RPM → physical torque (N·m) for INDI feedback
+│   │       ├── MotorMixer.hpp/.cpp       X-frame quadcopter mixer (torque+thrust → motor cmds)
+│   │       └── SysId.hpp/.cpp            RC-triggered chirp sweeps added on top of the mixer inputs
 │   │
 │   ├── state_estimator/      EKF state estimation
 │   │   ├── EKF.hpp/.cpp      16-state Extended Kalman Filter (one lane per IMU)
@@ -120,7 +127,7 @@ BPRL_flight/
 
 ### Per-drone configuration
 
-`configs/DroneConfig.hpp` declares one `DroneConfig` struct (controller gains, RC channel map, motor mixer/unmixer geometry, sensors equipped, attitude-controller list, logging rate + per-message enable) and `extern const DroneConfig kDroneConfig;`. Each physical drone gets its own directory under `configs/` supplying:
+`configs/DroneConfig.hpp` declares one `DroneConfig` struct (controller gains, which RC transmitter layout in `kRcMaps[]` it flies with, motor mixer/unmixer geometry, sensors equipped, attitude controller per switch position, logging rate + per-message enable, SysId sweep settings) and `extern const DroneConfig kDroneConfig;`. Each physical drone gets its own directory under `configs/` supplying:
 
 - `config.mk` — sets `BOARD_FULL`/`BOARD_UDEFS` (which flight-controller board this drone uses; same mechanism the old `BOARD=` selector used internally).
 - `drone_config.cpp` — defines `kDroneConfig` with every field spelled out (no defaults/override machinery — plain aggregate init, chosen because this toolchain builds with no explicit `-std=`, defaulting to `gnu++14`, where C++20 designated initializers aren't reliably available).
@@ -138,8 +145,8 @@ BPRL_flight/
 | IOMCUThread | NORMALPRIO+12 | ~400 Hz | FMU↔IO co-processor PWM writes — only built with `MOTOR_PROTO_IOMCU` (Drone2) |
 | RadioThread | NORMALPRIO+10 | 100 Hz | Read RC input → g_input[] |
 | HeartbeatThread | NORMALPRIO-5 | 200 ms tick | LED heartbeat (200 ms flash every 2 s) |
-| MAVLinkThread | NORMALPRIO-8 | 100 Hz | MAVLink on TELEM2 (TX7/RX7 on Orqa) — mocap ingestion |
-| LogThread | NORMALPRIO-15 | 50 Hz (configurable per drone) | Snapshot all state → SD card (13 message types per tick, each individually enable/disable-able per drone) |
+| MAVLinkThread | NORMALPRIO-8 | 100 Hz | MAVLink at 230400 baud on TELEM2 (TX7/RX7 on Orqa) — mocap ingestion, trajectory commands |
+| LogThread | NORMALPRIO-15 | `LoggingConfig::log_rate_hz` per drone (50–100 Hz today) | Snapshot all state → SD card (each message type enabled/disabled per drone — see [SD Card Logging](#5-sd-card-logging)) |
 | DebugThread | NORMALPRIO-10 | 10 Hz | USB $TEL/$EKFL/$IMU/$POS/$STRAIN streams (BPRL_DEBUG only) |
 | USBCmdThread | NORMALPRIO-20 | event-driven | USB command parser (motor test, log download, calibration, diagnostics) |
 
@@ -157,18 +164,22 @@ All inter-thread communication goes through mutex-protected globals defined in `
 | `g_euler[3]` | `state_mtx` | [roll, pitch, yaw] in radians, derived from quaternion |
 | `g_input[6]` | `state_mtx` | RC inputs (thrust, roll/pitch/yaw targets, flight mode switch, controller-select switch) |
 | `g_output[4]` | `state_mtx` | Normalized motor commands 0–1000, physical DShot lane order (0=disarm; protocol conversion in `motor_output_write()`) — `MotorMixer` computes these in logical [FR, RL, FL, RR] order and remaps to lane order via `MotorMixerConfig::motor_map` at the last step, see [MotorMixer](#motormixer) below |
-| `g_ctrl[4]` | `state_mtx` | Active controller's torque outputs entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] in [-1,1] |
+| `g_ctrl[4]` | `state_mtx` | Commands entering the mixer: [roll_tq, pitch_tq, yaw_tq, thrust] — the active controller's output plus any SysId chirp (torques in [-1,1], thrust in [0,1]); logged as `OUTP` |
 | `g_armed` | `state_mtx` | Arm state |
 | `g_flight_mode` | `state_mtx` | `FlightStateMachine`'s current flight mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD) |
 | `g_indi_diag[10]` | `state_mtx` | INDI shadow diagnostics (unmixed torque, delta torque, command, commanded accel, `G1_hat`; roll/pitch each) — feeds the `INDI` log |
 | `g_ptun_diag[12]` | `state_mtx` | POS_HOLD tuning diagnostics (N/E position and velocity targets/errors, lean-angle targets, climb-rate target/error) — computed in `FlightStateMachine::mode_pos_hold()`, feeds the `PTUN` log; holds its last values outside active POS_HOLD |
 | `g_ctun_diag[10]` | `state_mtx` | AttitudePID roll/pitch tuning diagnostics (angle/rate targets and errors, rate integrators) — from `AttitudePID::get_ctun_diag()` via `FlightStateMachine::get_ctun_diag()` |
+| `g_jindi_diag[13]` / `g_pidj_diag[9]` | `state_mtx` | AttitudeJINDI / AttitudePIDJerk diagnostics — feed the `JIND` / `JPID` logs; zero when that controller isn't in the drone's list |
+| `g_traj_diag[8]` | `state_mtx` | TrajectoryTracker state + reference and POS_HOLD's heading target / yaw-rate command — feeds the `TRAJ` log |
+| `g_sysid_diag[5]` | `state_mtx` | SysId state, axis, sweep time, chirp frequency and output — feeds the `SIDD` log |
+| `g_sysid_sw` | `state_mtx` | SysId RC switch level — `RadioThread` writes, `ControlThread` hands it to `FlightStateMachine::set_sysid_switch()` |
 | `g_radio_switch_pos` | `state_mtx` | Raw controller-select switch position (0/1/2, low/mid/high) — `RadioThread` writes, `ControlThread` reads to drive `FlightStateMachine::set_active_controller()` |
-| `g_active_controller` | `state_mtx` | `FlightStateMachine`'s resolved active controller-list index (0=PID default; INDI and/or PID+PI follow, if the drone's config enables them — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)) — for `$TEL`/logging |
+| `g_active_controller` | `state_mtx` | `AttCtrl` value of the controller actually flying (0=PID, 1=INDI, 2=PID_PI, 3=PID_JERK, 4=JINDI — see [Attitude controller selection](src/controllers/README.md#attitude-controller-selection)) — for `$TEL` |
 | `g_imu[3]` | `imu_mtx` | Raw accel/gyro from each on-board IMU |
 | `g_can_imu` | `can_imu_mtx` | Quaternion + rates from IMX5 over FDCAN1, each with an arrival timestamp for age-gating/forward-propagation in `StateManager` |
 | `g_mocap` | `mocap_mtx` | NED position + velocity from motion capture radio |
-| `g_baro` | `baro_mtx` | Pressure/temperature/altitude from the MS5611 barometer |
+| `g_baro` | `baro_mtx` | Pressure/temperature/altitude from the barometer (MS5611 on the Cube boards, DPS310 on Drone3) |
 | `g_rpm_gated[4]` | `esc_mtx` | Fault-gated per-motor mechanical RPM (holds last good value below 100 RPM after having seen a real reading) — published by `ControlThread`, read by `LogThread`/`DebugThread`/`StateManager`'s notch filter |
 
 ### Timing and Utilization
@@ -198,48 +209,50 @@ RC input[6]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
      │
      ▼
 FlightStateMachine
-     ├─ STABILIZE   — attitude PID/INDI + expo throttle passthrough
-     ├─ ALT_HOLD    — attitude PID/INDI + altitude hold (stick → altitude target + climb rate)
-     └─ POS_HOLD    — N/E position hold → lean angles + the same altitude hold as ALT_HOLD
+     ├─ STABILIZE   — attitude controller + expo throttle passthrough
+     └─ POS_HOLD    — N/E position hold → lean angles, altitude hold, heading hold
+                      (sticks, or a MAVLink trajectory via TrajectoryTracker)
      │
+     ├─ + SysId chirp (only while a sweep is running)
      ▼
-MotorMixer  →  DShot600 (4 motors)
+MotorMixer  →  DShot600 (Drone1/Drone3) or IOMCU PWM on MAIN 1-4 (Drone2)
 ```
 
-### Flight modes (3-position RC switch)
+### Flight modes
+
+The `poshold_switch` RC channel (`input[InputIdx::FLIGHT_MODE]`) picks the mode:
 
 | `input[4]` value | Mode | Attitude target | Throttle |
 |---|---|---|---|
-| < −0.33 | STABILIZE | Pilot stick [rad] | Expo + tilt boost passthrough |
-| −0.33 to +0.33 | ALT_HOLD | Pilot stick [rad] | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
-| > +0.33 | POS_HOLD | PosControl lean angles [rad] | `AltControl::alt_hold()` — identical to ALT_HOLD |
+| ≤ +0.33 | STABILIZE | Pilot stick × `stick_max_angle_deg` [rad] | Expo + tilt boost passthrough |
+| > +0.33 | POS_HOLD | PosControl lean angles [rad] | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
 
-Mode changes reset all controller integrators.
+Mode changes reset all controller integrators. ALT_HOLD (attitude from the sticks, throttle from `alt_hold()`) is still in the code (`FlightStateMachine::mode_alt_hold()`) but no switch position selects it.
 
 ### Attitude controller
 
-Attitude is independent of flight mode, selected at runtime by `FlightStateMachine::set_active_controller(int radio_switch_pos)`. `FlightStateMachine` holds a config-driven list of controllers (`configs/DroneConfig.hpp`'s `ControllersConfig`) behind a common `AttitudeController` interface — every controller in the list runs every tick (shadow mode), and only the one at the resolved list index drives the mixer:
+Attitude is independent of flight mode, selected at runtime by `FlightStateMachine::set_active_controller(int radio_switch_pos)` from the 3-position `ctrl_select` switch. Each drone's `ControllersConfig::switch_pos[low/mid/high]` (`configs/<Drone>/drone_config.cpp`) names the `AttCtrl` flown at each position; the same controller may appear more than once. Every controller named there is built into `FlightStateMachine`'s list and runs every tick (shadow mode, so its log stays live); only the selected one drives the mixer. Controllers no position names don't run at all.
 
-List indices are assigned in this fixed order — PID always 0; INDI, if enabled, always takes the next index; PID+PI, if enabled, always comes last — so a drone with only PID+PI enabled (INDI off) still has it at index 1, not 2:
-
-| List index | Controller | Description |
+| `AttCtrl` | Controller | Description |
 |---|---|---|
-| 0 (always present, default) | `AttitudePID` | Cascaded outer-P / inner-PID for roll, pitch, yaw |
-| next, if `indi_enabled` | `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration; yaw falls back to rate PID |
-| next, if `pid_pi_enabled` | `AttitudePIDPI` | Outer-P + rate-PID ("SLC") + inner PI closed on measured angular acceleration for roll/pitch, ported from the BPRL ArduPilot fork; yaw falls back to rate PID |
+| `PID` (always built) | `AttitudePID` | Cascaded outer-P / inner-PID for roll, pitch, yaw |
+| `INDI` | `AttitudeINDI` | Incremental NDI for roll/pitch using measured angular acceleration and a live NLMS effectiveness estimate; yaw falls back to rate PID |
+| `PID_PI` | `AttitudePIDPI` | Outer-P + rate-PID ("SLC") + inner PI closed on measured angular acceleration for roll/pitch, ported from the BPRL ArduPilot fork |
+| `PID_JERK` | `AttitudePIDJerk` | angle → rate → accel PI cascade on roll, with the strain-fit roll jerk as a damping term; pitch/yaw as `AttitudePID` |
+| `JINDI` | `AttitudeJINDI` | INDI with roll jerk as a second, convex-combined roll path (`alpha`); pitch as INDI |
 
-With all three enabled, the 3-position controller-select switch maps one-to-one to list index (low/mid/high → 0/1/2); with only two controllers present it keeps the legacy mapping (low+mid → PID, high → the other one) — see `FlightStateMachine::set_active_controller()`.
+Switching onto PID, PID+PI, PIDJerk or JINDI resets (or, for PIDJerk, re-seeds) that controller's shadow integrators so it doesn't take over with a wound-up state. See [`src/controllers/README.md`](src/controllers/README.md#attitude-controller-selection) for details.
 
 ### AltControl — altitude hold
 
-`AltControl` owns the throttle output for all modes. In STABILIZE it applies expo shaping and a tilt-boost (`1/min(cos φ, cos θ)`) to the raw stick. ALT_HOLD and POS_HOLD both call the same `alt_hold()`:
+`AltControl` owns the throttle output. In STABILIZE it applies expo shaping and a tilt-boost (`1/min(cos φ, cos θ)`) to the raw stick. POS_HOLD calls `alt_hold()`:
 
 ```
 pilot stick [0,1]  ──►  stick_to_climb_rate  ──┬──►  altitude target += rate·dt  ──►  pos_P  ──┐
-                                               └──────────────── feed-forward ─────────────────┴──►  climb_rate_pid  ──►  thrust_out
+                                               └──────────────── feed-forward ─────────────────┴──►  climb_rate_pid  ──►  hover_thr − Δ  ──►  thrust_out
 ```
 
-Outside the stick's centre deadband the stick commands a climb rate (up to 3 m/s) and moves the altitude target with it; inside the deadband the target stops and the position loop holds that altitude (the same scheme as ArduPilot's `set_pos_target_z_from_climb_rate_cm()`). POS_HOLD differs from ALT_HOLD only in that it also runs the N/E cascade below.
+Outside the stick's centre deadband the stick commands a climb rate (scaling up to 3 m/s at full stick) and moves the altitude target with it; inside the deadband the target stops and the position loop holds that altitude (the same scheme as ArduPilot's `set_pos_target_z_from_climb_rate_cm()`). The loop works around each drone's `AltControlGains::hover_thr` — set it to the throttle the airframe actually hovers at (read `OUTP.Thr` in a steady hover).
 
 ### PosControl — position hold
 
@@ -262,7 +275,7 @@ A held stick settles at a steady speed (up to 5 m/s); releasing it ramps the vel
 
 ### MotorMixer
 
-Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor commands (0–1000) using an X-frame mixing matrix. All motors output 0 when disarmed or when attitude exceeds ~80°.
+Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor commands (0–1000) using an X-frame mixing matrix, with optional thrust linearisation (`MotorMixerConfig::thrust_expo`, ArduPilot's `MOT_THST_EXPO` — 0.65 on Drone2, off on Drone1/Drone3) and a guaranteed minimum share of yaw authority. It reports which axes saturated (`limits()`), which the attitude controllers use next tick for integrator anti-windup. All motors output 0 when disarmed or when roll or pitch exceeds `max_angle_rad` (~80° on every drone today).
 
 ```
     FL [2]       FR [0]
@@ -273,6 +286,10 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to per-motor com
 ```
 
 All mixer math (the factor tables, the diagram above) is in this logical `[FR, RL, FL, RR]` order — it never varies by drone. What *does* vary per drone is which physical DShot output lane each logical corner is actually wired to, captured in one place: `MotorMixerConfig::motor_map[FR/RL/FL/RR]` → physical lane (0–3). `MotorMixer::update()` applies it once, at the very last step, converting its logical output to physical lane order for `out[]`. The same map is applied in reverse for RPM telemetry (physical lane → logical, right after `dshot_get_telemetry()` in `ControlThread`) and forward for the USB `MT,<motor>,<pct>` test command, so every other consumer in the codebase — Unmixer/INDI geometry, EKF, `$TEL`, SD logs, `tools/motor_test.py`/`tools/telemetry.py` — only ever deals in logical FR/RL/FL/RR order and never needs to know the physical wiring. Drone1/Drone2 use the identity map (`{0,1,2,3}` — ESC wired FR→lane0..RR→lane3 directly); Drone3 doesn't (see `configs/Drone3/drone_config.cpp`'s `.mixer` comment for the bench-derived mapping).
+
+### SysId — frequency sweeps
+
+`SysId` (`src/controllers/extras/SysId.hpp`) adds an ArduPilot-style exponential chirp on top of the final mixer inputs (roll/pitch/yaw torque or heave thrust) after whichever controller is flying, so the sticks keep working during a sweep and the controller fights it as a disturbance — identify from `OUTP` (controller + chirp), with `SIDD` marking when and where the sweep ran. Each rising edge of the drone's `SysIdConfig::rc_channel` (`-1` disables it) sweeps the next axis in `SysIdConfig::axes` (the list wraps); switching back down mid-sweep cancels it and keeps the same axis for the next flip. Sweeps only run while flying (ACTIVE, past spool-up); disarm or ground idle aborts. Start/stop frequency, duration, fades and per-axis magnitude are all in `SysIdConfig`.
 
 ---
 
@@ -334,7 +351,7 @@ IMX5 angular rates (blended into StateManager's p/q/r output, not a formal EKF m
 
 The gravity-vector update (`update_gravity`) hard-rejects samples where `|accel|` is outside `[0.1g, 3g]`, then applies a joint chi-squared gate (`GRAV_CHI2_GATE = 5σ`) over an adaptive measurement noise that grows with a lowpass-filtered vibration estimate (`GRAV_R_VIBE`) — so it's trusted less, not switched off outright, under vibration. Only the Z-axis accel bias is corrected here (X/Y residuals are ambiguous between bias and genuine horizontal acceleration; those are only resolved via mocap velocity fusion's cross-covariance with u/v). Yaw is not observable from gravity alone and requires the IMX5.
 
-The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BARO_CHI2_GATE = 5σ`) fusion of altitude into Z — see the [MS5611 Barometer](#ms5611-barometer) section below for why it's disabled outright whenever mocap is connected rather than blended with it.
+The barometer update (`update_altitude`) is a single-row, chi-squared-gated (`BARO_CHI2_GATE = 5σ`) fusion of altitude into Z — see the [MS5611 Barometer](#ms5611-barometer--dronedrone1dronedrone2) section below for why it's disabled outright whenever mocap is connected rather than blended with it.
 
 ### StateManager output (19 states)
 
@@ -472,11 +489,11 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 
 ### How it works
 
-`LogThread` runs at the drone's `LoggingConfig::log_rate_hz` (50 Hz by default). Each tick it snapshots all shared state under their respective mutexes, builds up to thirteen packed records (each message type can be enabled or disabled per drone in `LoggingConfig::enable`), and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
+`LogThread` runs at the drone's `LoggingConfig::log_rate_hz` (50 Hz on Drone3, 70 Hz on Drone1, 100 Hz on Drone2 today). Each tick it snapshots all shared state under their respective mutexes, builds one packed record per enabled message type (each type is enabled or disabled per drone in `LoggingConfig::enable`), and pushes them into a 32 KB in-RAM ring buffer. A low-priority flush call drains the buffer to the SD card via FatFS without ever blocking flight-critical threads.
 
 **Log file location:** `/LOGS/LOG0001.BIN`, `LOG0002.BIN`, … auto-incremented on each boot.
 
-### Logged message types (50 Hz each)
+### Logged message types (each at the `LogThread` rate unless noted)
 
 | Name | ID | Fields |
 |---|---|---|
@@ -493,8 +510,16 @@ Binary log format is compatible with the [ArduPilot DataFlash standard](https://
 | `PTUN` | 0x10 | TimeUS, PNT, PNE, PET, PEE (N/E position target and error, m), VNT, VNE, VET, VEE (N/E velocity target and error, m/s), RolT, PitT (lean-angle targets, rad), ClbT, ClbE (climb-rate target and error, m/s, positive = descending) — POS_HOLD tuning diagnostics; only meaningful while POS_HOLD is active (values hold otherwise). Temporary: compiled in only while `LOG_PTUN_ENABLED` is 1 in `LogMessages.hpp` |
 | `CTUN` | 0x1D | TimeUS, RolT, RolE (roll angle target/error, rad), RRT, RRE (roll rate target/error, rad/s), PitT, PitE, PRT, PRE (same for pitch), RI, PI (rate-PID integrators) — stock AttitudePID tuning. Before 2026-10-22, "CTUN" was the 0x10 pos-hold message now called PTUN |
 | `MOCP` | 0x11 | TimeUS, X, Y, Z (m NED), VX, VY, VZ (m/s), Valid — raw mocap estimate before the EKF |
+| `TRAJ` | 0x12 | TimeUS, State, RefN, RefE, RefD (trajectory reference, m NED), YawT, YawR (POS_HOLD heading target / yaw-rate command), HOff (throttle height offset), Spd (path speed) |
+| `MAVL` | 0x13 | TimeUS, MAVLink receive totals since boot (Bytes, Ok, Bad, HB, VisP, VisV, Unk), MocTO (mocap timeouts), TrjRx, TrjRej, Cmd, Res (last trajectory command and its result) — ~5 Hz |
+| `JKFT` | 0x18 | TimeUS, JerkZ, Pdd (fitted z and roll jerk from the strain-rate sensor, `src/sensors/JerkFit.hpp`), Valid, CalAct (strain-bias calibration switch held) — always written |
+| `JIND` | 0x1B | TimeUS, UnR, UnP (measured torque), TAR, TJR (roll accel-path / jerk-path torque references), CmdR, CmdP, AccR, AccP, G1R, Pdd (filtered measured roll jerk), JCmdR (jerk target), AlR (alpha), TC (blended roll torque) — AttitudeJINDI |
+| `JPID` | 0x1C | TimeUS, RTgt, ATgt, JTgt (roll rate/accel/jerk targets), TqPI, TqD, TqR (accel-PI, jerk-D and total roll torque, N·m), CmdR, CmdP, CmdY — AttitudePIDJerk |
+| `SIDD` | 0x1E | TimeUS, State (0 idle, 1 running, 2 done, 3 aborted), Axis (0 none, 1 roll, 2 pitch, 3 yaw, 4 heave), T (time into sweep, s), Freq (Hz), Out (chirp value added this tick) — SysId |
 
-TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message here logs at the `LogThread` period (50 Hz by default), so it would only ever record a constant.
+`PIDJ` (0x19) is retired — its FMT record is still written but no data. 0x1A is reserved (the removed INDJ); don't reuse it. The JIND/JPID/INDI messages are populated whenever that controller is in the drone's list, flying or not (shadow mode), and read zero otherwise. See [`src/logging/README.md`](src/logging/README.md) for the full field list.
+
+TimeUS is a uint64 microsecond timestamp, always first. There is no per-record rate field — every message logs at the `LogThread` period (MAVL excepted), so it would only ever record a constant.
 
 ### Decoding log files
 
@@ -508,7 +533,7 @@ python3 tools/logs.py logs decode LOG0042.BIN
 python3 tools/logs.py logs download --decode
 ```
 
-Output files: `LOG0042_att.csv`, `LOG0042_lin.csv`, `LOG0042_rcin.csv`, `LOG0042_outp.csv`, `LOG0042_rpms.csv`, `LOG0042_strt.csv`, `LOG0042_imu1.csv`, `LOG0042_imu2.csv`, `LOG0042_imu3.csv`, `LOG0042_indi.csv`, `LOG0042_baro.csv`, `LOG0042_ptun.csv`, `LOG0042_ctun.csv`, `LOG0042_mocp.csv`.
+Output files: one `LOG0042_<name>.csv` per message type that has data, named by the lowercased message name — `LOG0042_att.csv`, `LOG0042_outp.csv`, `LOG0042_stn1.csv`, `LOG0042_sidd.csv`, and so on.
 
 Or open the `.bin` file directly in [UAV Log Viewer](https://plot.ardupilot.org) — all message types appear in the message list; use `ATT.Roll` vs `TimeUS` for attitude plots.
 
@@ -519,7 +544,7 @@ Three files, three steps (example below adds a hypothetical rangefinder):
 **Step 1 — Define the struct in `src/logging/LogMessages.hpp`**
 
 ```cpp
-constexpr uint8_t LOG_MSG_RNGF = 0x12U;   // next unused ID
+constexpr uint8_t LOG_MSG_RNGF = 0x1FU;   // next unused ID (check LogMessages.hpp)
 
 struct __attribute__((packed)) LogMsgRNGF {
     uint64_t time_us;    // always first — required by UAV Log Viewer
@@ -528,7 +553,7 @@ struct __attribute__((packed)) LogMsgRNGF {
 };
 ```
 
-Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first. There is no rate field — every message logs at whatever rate `LogThread` calls `logger.write()` for it (50 Hz, unless you add your own divisor counter).
+Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first. There is no rate field — every message logs at whatever rate `LogThread` calls `logger.write()` for it (the drone's `log_rate_hz`, unless you add your own divisor counter, as MAVL does).
 
 **Step 2 — Add a row to `kLogDefs[]` in the same file**
 
@@ -538,15 +563,19 @@ Rules: `__attribute__((packed))`, fixed-size types only, `time_us` first. There 
 
 Format codes: `Q`=uint64, `f`=float32, `i`=int32, `h`=int16, `B`=uint8. Name must be exactly 4 chars (space-pad). `fmt` must be ≤15 chars and `labels` ≤63 chars — these are the actual usable lengths of the FMT record's fixed `format[16]`/`labels[64]` fields once `Logger::write_schema_header()`'s `strncpy` reserves a byte for the null terminator. A `static_assert` right after `kLogDefs[]` in `LogMessages.hpp` checks every entry against these limits at build time, so a string that's too long fails the build instead of being silently truncated by `strncpy` (which happened once before this check existed — UAV Log Viewer showed a message with fields missing past the cut, with no error anywhere to explain why).
 
-**Step 3 — Snapshot and write in `LogThread` (`src/threads.cpp`)**
+**Step 3 — Add an enable flag and write it in `LogThread` (`src/threads.cpp`)**
+
+Add a `bool rngf;` to `LogEnableConfig` (`configs/DroneConfig.hpp`) and set it in every `configs/<Drone>/drone_config.cpp`, then gate the write on it:
 
 ```cpp
-{ LogMsgRNGF msg = {}; msg.time_us = t_us;
-  msg.range_m = rangefinder_distance(); msg.valid = rangefinder_valid();
-  logger.write(LOG_MSG_RNGF, msg); }
+if (log_en.rngf) {
+    LogMsgRNGF msg = {}; msg.time_us = t_us;
+    msg.range_m = rangefinder_distance(); msg.valid = rangefinder_valid();
+    logger.write(LOG_MSG_RNGF, msg);
+}
 ```
 
-If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter around the write call.
+If you need a different rate than `LogThread`'s, add a divisor counter around the write call (see MAVL's).
 
 ### Binary format reference
 
@@ -561,7 +590,7 @@ If you need a different rate than `LogThread`'s 50 Hz, add a divisor counter aro
 ```
 `length` = 3 + body_size (total record size including the 3-byte header). Files are self-describing: the decoder reads the schema entirely from the FMT records at the start of the file.
 
-**Write rate:** 50 Hz × ~480 B/tick ≈ 24 KB/s with all 13 records enabled (sum of body+header sizes; see `LogMessages.hpp`'s per-struct size comments). The 32 KB ring buffer holds several seconds of write-stall tolerance. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
+**Write rate:** `log_rate_hz` × the sum of the enabled records' sizes (body + 3-byte header; see `LogMessages.hpp`'s per-struct size comments) — e.g. 50 Hz × ~480 B ≈ 24 KB/s for the original 13-message set. The 32 KB ring buffer is roughly a second of stall tolerance at that rate; enabling more messages or a higher rate shrinks it proportionally. `f_sync()` is called every 5 flushes (~100 ms) to limit data loss on unexpected power loss.
 
 **File pre-allocation:** `Logger::init()` calls `f_expand()` right after creating the file (10 MB, `PRE_ALLOC_SIZE` in `Logger.hpp`) — a one-time contiguous cluster-chain reservation while a stall is harmless (motors aren't spinning yet), instead of letting `f_write()` grow the FAT chain incrementally during flight. That incremental growth (plus `f_sync()`'s directory/FAT write) was causing `LogThread` periodic multi-ms-to-hundreds-of-ms stalls on the SD card's internal metadata writes — profiling with `BPRL_TIMING` (see [Timing and Utilization](#timing-and-utilization)) is what surfaced this. `Logger::close()` calls `f_truncate()` to trim the file back to the actual bytes written before the final `f_sync()`. Pre-allocation is best-effort: `expand_err()` (surfaced via `LOG,status`'s `expand_err=` field) reports the FatFS `FRESULT` — `0` means it succeeded, nonzero means the card couldn't offer a contiguous 10 MB run and logging fell back to normal incremental growth. Even with pre-allocation confirmed working, some residual stall rate remains — SD cards don't have a bounded worst-case write latency (internal wear-leveling/GC), so this is a mitigated-not-eliminated I/O-latency tail rather than a fixable software bug; see [Timing and Utilization](#timing-and-utilization).
 
@@ -650,7 +679,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits five CSV streams at 10 Hz over the **US
 
 | Prefix | Content |
 |---|---|
-| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode, active_controller (resolved controller-list index, 0=PID default; INDI/PID+PI follow if enabled) |
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD), active_controller (`AttCtrl`: 0=PID, 1=INDI, 2=PID_PI, 3=PID_JERK, 4=JINDI), poshold_sw (raw switch value) |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 | `$POS` | time_ms, x, y, z (EKF position), u, v, w (EKF body velocity), mocap x, y, z, mocap vx, vy, vz, mocap_valid |
@@ -675,7 +704,7 @@ IMU chip set and CS pins are board-conditional (`DRONE=Drone1`/CubeOrangePlus, t
 | FDCAN1 | `CAN.hpp/.cpp` | IMX5 INS (0x01–0x04), shaft-encoder RPM nodes (0x70–0x73), strain rate sensor (0x69, override interface only — I2C is its default) | Working |
 | TIM1/TIM4 | `DShot.hpp/.cpp` | DShot600 bidirectional (4 motors) | Working |
 | UART (TELEM1) | `Radio.hpp/.cpp` | CRSF receiver (default; SBUS also compiled, `RADIO_PROTOCOL` selects) | Working |
-| UART (TELEM2; TX7/RX7 on Orqa) | `MAVLink.hpp/.cpp` | MAVLink — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`) | Working |
+| UART (TELEM2; TX7/RX7 on Orqa) | `MAVLink.hpp/.cpp` | MAVLink at 230400 baud — mocap ingestion (`VISION_POSITION/SPEED_ESTIMATE` → `g_mocap`), trajectory commands | Working |
 | I2C2 | `I2C.hpp/.cpp` | Strain rate sensor (default interface; `STRAIN_RATE_INTERFACE` selects CAN instead) | Working |
 
 `DRONE=Drone2` (CubeBlueH7) differs in two channels: motor output goes through the carrier's IO co-processor on MAIN 1-4 (`IOMCU.hpp/.cpp`, USART6, `MOTOR_PROTO_IOMCU`) instead of DShot on the AUX pins, and I2C2 hosts the strain gauge array (`src/sensors/StrainGauge.hpp`, address 0x09) instead of the strain rate sensor — the two strain sensors are mutually exclusive, see `main.cpp`.
@@ -720,7 +749,7 @@ Classic InvenSense MPU-9250-family parts — register-based digital low-pass fil
 - **SPI mode:** MODE3 (CPOL=1, CPHA=1) for all three — confirmed against ArduPilot's `hwdef.dat` for this exact chip pairing on Cube-family hardware (ICM-45686 above uses MODE0).
 
 
-**Board bring-up status:** as of this writing, Drone2 is confirmed booting, enumerating its own USB CDC identity, and reading all three IMUs valid (`python3 tools/hw_status.py`). The root cause of it never booting at all was a linker script bug — the app was linked at flash address 0, colliding with the board's own bootloader (see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld)) — not a USB or sensor bug. `ControlThread`, `motor_output_init()`, and now `i2c_drv_init()`/`I2CThread`/`strain_gauge_init()` (`main.cpp`, `src/threads.cpp`) are all re-enabled (stages 2-3), and IMU calibration (`tools/calibrate.py`) is confirmed working end-to-end. I2C was a suspect during that calibration debugging (disabling it lined up with `CAL,set` failures) but was cleared — the real bug was in `tools/calibrate.py` itself, unrelated to I2C. None of motor output, axis rotation, or I2C/the strain gauge array have had their own dedicated bench pass yet — confirm each before trusting this board in flight.
+**Board bring-up status:** Drone2 flies (first flights 2026-10-22, on IOMCU motor output and CAN shaft-encoder RPM). The root cause of it originally never booting at all was a linker script bug — the app was linked at flash address 0, colliding with the board's own bootloader (see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld)) — not a USB or sensor bug. `main.cpp` still carries Cube Blue's staged peripheral init from that bring-up; IMU calibration (`tools/calibrate.py`) works end-to-end and is stored in FRAM, so it survives firmware uploads.
 
 ### ICM-42688 (`src/coms/IMUs/ICM42688.hpp/.cpp`) — `DRONE=Drone3`
 

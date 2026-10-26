@@ -11,13 +11,13 @@ the FC's telemetry UART, so point --master at whatever reaches that link
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
-    python3 tools/traj_cmd.py --master /dev/ttyUSB0,115200 stop
+    python3 tools/traj_cmd.py --master /dev/ttyUSB0,230400 stop
 
 All positions are NED offsets in metres from the origin (D positive down, so
 1 m above the origin is --d -1). Anything left out is sent as NaN = "not
 given" and takes the firmware's default: N/E 0, D the current altitude, a
 plain circle, positive direction (clockwise seen from above), default speed.
-See src/controllers/TrajectoryTracker.hpp and src/coms/MAVLink.hpp.
+See src/controllers/position/TrajectoryTracker.hpp and src/coms/MAVLink.hpp.
 
 The vehicle only acts on point/circle while flying in POS_HOLD with a valid
 mocap position and an origin set; moving the roll, pitch or yaw stick cancels.
@@ -51,7 +51,7 @@ def opt(value):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--master", required=True, help="pymavlink connection string, e.g. udp:127.0.0.1:14551 or /dev/ttyUSB0,115200")
+    ap.add_argument("--master", required=True, help="pymavlink connection string, e.g. udp:127.0.0.1:14551 or /dev/ttyUSB0,230400")
     ap.add_argument("--timeout", type=float, default=2.0, help="seconds to wait for the heartbeat and for the answer")
     sub = ap.add_subparsers(dest="command", required=True)
 

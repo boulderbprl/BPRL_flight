@@ -53,6 +53,7 @@ constexpr uint8_t LOG_MSG_PIDJ = 0x19U;  // original single-stage AttitudePIDJer
 constexpr uint8_t LOG_MSG_JINDI = 0x1BU; // AttitudeJINDI diagnostics — roll_jerk as an independent convex-combined path, see Attitude_JINDI.hpp
 constexpr uint8_t LOG_MSG_JPID = 0x1CU;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
 constexpr uint8_t LOG_MSG_CTUN = 0x1DU;  // AttitudePID roll/pitch tuning: angle + rate targets, errors, rate integrators (0x10 is PTUN — old logs' "CTUN" at 0x10 was today's PTUN)
+constexpr uint8_t LOG_MSG_SIDD = 0x1EU;  // system-ID sweep: state, axis, sweep time, chirp frequency + output (SysId.hpp)
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -213,6 +214,19 @@ struct __attribute__((packed)) LogMsgJPID {
     float    cmd_yaw;    // [-1, 1]  normalised yaw torque commanded by AttitudePIDJerk (same as AttitudePID)
 };
 // Format: "Qfffffffff"   Body: 8+9×4 = 44 B   Record: 47 B
+
+// System-ID sweep (src/controllers/extras/SysId.hpp). Output is only the chirp
+// added this tick — OUTP is the full command (controller + chirp) and is
+// the input to identify against.
+struct __attribute__((packed)) LogMsgSIDD {
+    uint64_t time_us;
+    uint8_t  state;     // SysIdState: 0 idle, 1 running, 2 done, 3 aborted (stopped flying)
+    uint8_t  axis;      // SysIdAxis being swept, or next up: 0 none, 1 roll, 2 pitch, 3 yaw, 4 heave
+    float    time_s;    // s   time into the sweep (0 unless running)
+    float    freq_hz;   // Hz  instantaneous chirp frequency (0 unless running)
+    float    output;    // chirp added this tick — normalised torque (roll/pitch/yaw) or throttle (heave)
+};
+// Format: "QBBfff"   Body: 8+2+3×4 = 22 B   Record: 25 B
 // Measured roll rate / P_DOT / strain jerk are not repeated here — see
 // ATT.P, ATT.Pdot and JKFT.Pdd.
 // Gated by DroneConfig::LoggingConfig::enable.jpid — always populated while
@@ -521,6 +535,12 @@ constexpr LogDef kLogDefs[] = {
       "Qfffffffff",
       "TimeUS,RTgt,ATgt,JTgt,TqPI,TqD,TqR,CmdR,CmdP,CmdY",
       sizeof(LogMsgJPID) },
+
+    { LOG_MSG_SIDD,
+      "SIDD",
+      "QBBfff",
+      "TimeUS,State,Axis,T,Freq,Out",
+      sizeof(LogMsgSIDD) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

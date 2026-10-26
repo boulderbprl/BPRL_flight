@@ -164,13 +164,13 @@ Two SPI buses drive the on-board IMUs plus (on the Cube boards) the barometer. *
 
 `spi_drv_init()` must run inside `SPIThread` (power-on/reset sequences use `chThdSleepMilliseconds`). `imu2`/`imu3` share SPI4, and `imu1`/`baro1` share SPI1, each with `spiAcquireBus`/`spiReleaseBus` for mutual exclusion.
 
-SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider, across the Cube boards). On `DRONE=Drone1` the ICM-45686 runs at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). `DRONE=Drone2`'s ICM-20649/20948/20602 have no equivalent FIFO-averaging step — one sample per `SPIThread` tick. It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer) section for the fusion/mocap-priority behavior.
+SPI clock: ~781 kHz for init, 6.25–12.5 MHz for burst reads/conversions (per-device divider, across the Cube boards). On `DRONE=Drone1` the ICM-45686 runs at ~1.6kHz fast-sampling ODR (2x its 800Hz base rate) and drains/averages every FIFO packet queued since the last `SPIThread` tick (capped at 8) — a real oversample-then-decimate step, not just a faster poll. This rate is a deliberate middle ground between the 800Hz base rate (no oversampling) and ArduPilot's own 3.2kHz default for this chip — noise reduction scales with `1/√N` averaged samples, so the first doubling captures roughly the first ~21% of the available reduction for about half the `SPIThread` cost of going all the way to 3.2kHz (measured ~9% vs. ~20% utilization of `SPIThread`'s 1kHz budget). `DRONE=Drone2`'s ICM-20649/20948/20602 have no equivalent FIFO-averaging step — one sample per `SPIThread` tick. It uses 32-byte aligned DMA buffers with `cacheBufferFlush`/`cacheBufferInvalidate` for H7 D-cache coherency; the MS5611 driver is register/command based rather than FIFO-burst, since each pressure/temperature conversion takes multiple milliseconds — `MS5611::read()` is a small state machine called once per `SPIThread` tick, returning a completed sample roughly every 6 ticks. See `src/coms/Baro/MS5611.hpp` and the root README's [MS5611 Barometer](../../README.md#ms5611-barometer--dronedrone1dronedrone2) section for the fusion/mocap-priority behavior.
 
 ---
 
 ## I2C — I2C2 (`I2C.hpp/.cpp`)
 
-**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices at 200 Hz via `i2c_poll_all()`.
+**Pins:** PB10 (SCL) / PB11 (SDA), AF4, 400 kHz Fast Mode. `I2CThread` polls all registered devices via `i2c_poll_all()` at 200 Hz — 400 Hz on Drone2 (CubeBlueH7), where it reads the strain gauge array and runs at `NORMALPRIO+24`, above `ControlThread` (see `main.cpp`'s `kRates` and `threads_start()`).
 
 **Bus recovery:** `i2c_drv_init()` bit-bangs up to 9 SCL clocks (plus a STOP condition) as plain GPIO before starting `I2CD2` — this unsticks a slave left holding SDA low mid-transaction (e.g. after a reset during a live transfer), which otherwise leaves the peripheral seeing `BUSY` forever with SCL never toggling. `i2c_drv_reset()` runs the same recovery sequence and restarts `I2CD2` after a timeout-induced locked state; `STM32_I2C_DMA_ERROR_HOOK` is non-fatal (`cfg/mcuconf.h`) so a DMA error lets the 5 ms software timeout expire and `i2c_drv_reset()` recover cleanly instead of halting the system.
 
@@ -187,9 +187,21 @@ bprl_i2c_register(MY_ADDR, my_poll, nullptr);
 
 ## PWM / Radio (`Radio.hpp/.cpp`)
 
-`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`); channel indices come from `DroneConfig::rc_map` (see `configs/DroneConfig.hpp`) rather than being hardcoded. `radio_armed()` reads the dedicated arm-switch channel (threshold at center). `radio_switch_position()` buckets `radio_indi()` into 0/1/2 (low/mid/high) — a thresholded int built on top of the raw accessor, same pattern as `radio_flight_mode()`'s raw value vs. `FlightStateMachine`'s thresholded mode selection; `FlightStateMachine::set_active_controller()` maps that to a controller-list index. `AttitudePIDJerk` is pure shadow (see `FlightStateMachine.hpp`) — nothing on the radio selects it.
+`radio_thr()`, `radio_roll()`, `radio_pitch()`, `radio_yaw()`, `radio_flight_mode()`, and `radio_indi()` return normalized RC channel values (`[0,1]` or `[-1,1]`, see `Radio.hpp`). Channel indices come from `kRcMaps[DroneConfig::rc_tx]` (`configs/DroneConfig.hpp`) — one `RcChannelMap` per physical transmitter (TX1, TX2), shared by every drone that flies with it:
 
-Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (default: CRSF). CRSF reads TELEM1 (USART2) on the Cube boards and USART6 (PC6/PC7, full-duplex) on the Orqa QuadCore H7.
+| `RcChannelMap` field | Accessor | Use |
+|---|---|---|
+| `thr`, `roll`, `pitch`, `yaw` | `radio_thr()` … `radio_yaw()` | Sticks |
+| `arm` | `radio_armed()` | Arm switch (`> 992` = armed) |
+| `ctrl_select` | `radio_indi()`, `radio_switch_position()` | 3-position: which attitude controller flies (`ControllersConfig::switch_pos[low/mid/high]`) |
+| `poshold_switch` | `radio_flight_mode()` | High = POS_HOLD, otherwise STABILIZE |
+| `strain_cal_switch` | `radio_strain_cal()` | Momentary strain-bias calibration (see `src/sensors/JerkFit.hpp`) |
+
+The SysId switch is per drone instead: `radio_sysid()` reads `SysIdConfig::rc_channel` (0-based, `> 992` = on, always false when `-1`) — see `src/controllers/README.md`'s SysId section.
+
+`radio_switch_position()` buckets `radio_indi()` into 0/1/2 (low/mid/high); `FlightStateMachine::set_active_controller()` maps that to a controller-list index.
+
+Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are compiled; the active one is selected at compile time via `RADIO_PROTOCOL` in `Radio.hpp` (CRSF on every drone today). CRSF reads TELEM1 (USART2) on the Cube boards and USART6 (PC6/PC7, full-duplex) on the Orqa QuadCore H7.
 
 `motor_output_write()` selects DShot 600, standard servo PWM (1000–2000 µs) or the IOMCU path (see above) based on the `MOTOR_PROTOCOL` define in `PWM.hpp`. The MotorMixer and ControlThread always produce 0–1000 normalized commands and are unaffected by this choice.
 
@@ -197,7 +209,7 @@ Both `SBUS.hpp/.cpp` and `CRSF.hpp/.cpp` receiver protocol drivers exist and are
 
 ## MAVLink — TELEM2 (`MAVLink.hpp/.cpp`)
 
-Parses MAVLink at 115200 baud on TELEM2 (USART3) on the Cube boards and on the TX7/RX7 pads (UART7, PE8 TX / PE7 RX) on the Orqa QuadCore H7 — selected by `BPRL_MAVLINK_SD` in `MAVLink.hpp`. Its main job is ingesting motion-capture position/velocity into `g_mocap`:
+Parses MAVLink at 230400 baud on TELEM2 (USART3) on the Cube boards and on the TX7/RX7 pads (UART7, PE8 TX / PE7 RX) on the Orqa QuadCore H7 — selected by `BPRL_MAVLINK_SD` in `MAVLink.hpp`. Its main job is ingesting motion-capture position/velocity into `g_mocap`:
 
 | Message | Writes | Flag set |
 |---|---|---|
@@ -230,6 +242,11 @@ It also receives the trajectory commands as `COMMAND_LONG` and answers each with
 
 ---
 
-## CalFlash (`CalFlash.hpp/.cpp`)
+## CalFlash (`CalFlash.hpp/.cpp`) and FRAM (`FRAM.hpp/.cpp`)
 
-Persistent IMU calibration storage — per-IMU gyro and accelerometer bias, written to STM32H743 internal flash Bank2 sector 7 (`0x081E0000`) via a direct register-level flash driver (bypasses ChibiOS's `HAL_USE_EFL`). Validated with a magic number, version field, and CRC32 on load; `cal_load()`/`cal_save()`/`cal_clear()` are the public entry points. `SPIThread` loads this at boot (before IMU init) and falls back to zero biases if the stored data is absent or fails validation.
+Persistent IMU calibration — per-IMU gyro and accelerometer bias, a 128-byte record validated with a magic number, version field and CRC32 on load. `SPIThread` loads it at boot (before IMU init) and falls back to zero biases if nothing valid is stored.
+
+- **Cube boards (Drone1, Drone2):** stored in the last 128 bytes of the carrier's SPI FRAM (Cypress/Fujitsu FM25, SPI2, CS=PD10 — `FRAM.hpp/.cpp`, a port of ArduPilot's `AP_RAMTRON`). The Cube bootloader chip-erases internal flash on every firmware upload, so this is what keeps the calibration across uploads (ArduPilot keeps its parameters there for the same reason). A missing or unresponsive FRAM fails `fram_drv_init()` and CalFlash falls back to internal flash rather than halting. `FRAM,status` (USB) reports what was detected.
+- **Fallback / Orqa (Drone3):** STM32H743 internal flash Bank 2 sector 7 (`0x081E0000`) via a direct register-level flash driver (bypasses ChibiOS's `HAL_USE_EFL`). On a Cube board this copy is erased by every upload.
+
+`cal_load()` is always built; `cal_save()`/`cal_clear()` (and the `CAL,*` USB commands that call them) are only compiled into `BPRL_DEBUG` builds, because the flash write path briefly disables interrupts board-wide — see `tools/calibrate.py`.

@@ -17,7 +17,7 @@
  *   - Receives COMMAND_LONG trajectory commands (table below), passes them
  *     to ControlThread through g_traj_mailbox, and answers with COMMAND_ACK
  *
- * Trajectory commands (see src/controllers/TrajectoryTracker.hpp for what
+ * Trajectory commands (see src/controllers/position/TrajectoryTracker.hpp for what
  * each does). All positions are NED offsets in metres from the origin.
  * A parameter that is "not given" must be sent as NaN — zero is a real
  * value (a D of 0 means "the origin's height", not "where I am now").

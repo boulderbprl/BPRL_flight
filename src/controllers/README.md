@@ -3,6 +3,15 @@
 Flight control algorithms for the BPRL quadcopter firmware.
 Called at 400 Hz from `ControlThread` in `src/threads.cpp`.
 
+Layout (file names in the sections below are relative to their folder):
+
+| Folder | Contents |
+|---|---|
+| `src/controllers/` | `FlightStateMachine` |
+| `attitude/` | `AttitudeController` interface, `Attitude_PID`, `Attitude_PID_PI`, `Attitude_PID_Jerk`, `Attitude_INDI`, `Attitude_JINDI` |
+| `position/` | `PosControl`, `TrajectoryTracker`, `AltControl`, `HeadingControl` (the POS_HOLD N/E, trajectory, altitude and heading loops) |
+| `extras/` | `PID`, `SysId`, `Unmixer`, `MotorMixer` |
+
 ---
 
 ## Architecture
@@ -13,14 +22,9 @@ RC input[6]  [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
      ▼
 FlightStateMachine  (400 Hz)
      │
-     ├─ FLIGHT_MODE < -0.33  ───► STABILIZE
+     ├─ FLIGHT_MODE ≤ +0.33  ───► STABILIZE
      │    Attitude ──────────────────────────────────────────────────────┐
      │    AltControl::compute_throttle()                                 │
-     │                                                                    │
-     ├─ -0.33 ≤ FLIGHT_MODE ≤ +0.33 ─► ALT_HOLD                        │
-     │    Attitude                                                        │
-     │    AltControl::alt_hold()                                         │
-     │      stick → alt target + climb rate → thrust_out                │
      │                                                                    │
      └─ FLIGHT_MODE > +0.33  ───► POS_HOLD                              │
           reference source — sticks (default) or TrajectoryTracker:      │
@@ -42,8 +46,13 @@ FlightStateMachine  (400 Hz)
          AttitudeJINDI::update()     (roll_jerk fed via set_roll_jerk())
      │
      ▼
+     SysId::apply()  — adds the chirp to one axis while a sweep runs (ACTIVE only)
+     │
+     ▼
 MotorMixer  [roll_tq, pitch_tq, yaw_tq, thrust] → motor commands [0..1000]
 ```
+
+ALT_HOLD (`mode_alt_hold()`: stick attitude + `AltControl::alt_hold()`) is still implemented but no switch position selects it.
 
 ---
 
@@ -70,15 +79,14 @@ Once past threshold, it must stay there for `TAKEOFF_DEBOUNCE_TICKS = 100` (0.25
 
 Transition to `DISARMED` (from any phase) resets all controller integrators and the position-hold targets.
 
-### Flight mode (3-position RC switch on `input[InputIdx::FLIGHT_MODE]`)
+### Flight mode (`poshold_switch` RC channel on `input[InputIdx::FLIGHT_MODE]`)
 
 | `input[4]` value | Mode | Attitude target | Throttle |
 |---|---|---|---|
-| < −0.33 | STABILIZE | Pilot stick (rad) | Expo passthrough with tilt boost |
-| −0.33 to +0.33 | ALT_HOLD | Pilot stick (rad) | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
-| > +0.33 | POS_HOLD | PosControl lean angles (rad) | `AltControl::alt_hold()` — identical to ALT_HOLD |
+| ≤ +0.33 | STABILIZE | Pilot stick × `ControllersConfig::stick_max_angle_deg` (rad) | Expo passthrough with tilt boost |
+| > +0.33 | POS_HOLD | PosControl lean angles (rad) | `AltControl::alt_hold()` — stick → climb rate, altitude held in the stick deadband |
 
-Mode changes reset all controllers.
+Mode changes reset all controllers. (ALT_HOLD — stick attitude with `alt_hold()` throttle — still exists as `mode_alt_hold()`, unreachable from the switches.)
 
 In POS_HOLD the three outer controllers (`PosControl`, `AltControl`, `HeadingControl`) track either the pilot's sticks or, after a MAVLink trajectory command, the reference from `TrajectoryTracker` — see [TrajectoryTracker](#trajectorytracker-trajectorytrackerhppcpp). There is no separate trajectory flight mode.
 
@@ -96,7 +104,11 @@ A controller is built into the list only if one of `ControllersConfig::switch_po
 | `PID_JERK` | `AttitudePIDJerk` — angle→rate→accel→jerk PID cascade on roll against the strain-fit roll-jerk estimate (`roll_jerk`, see `src/sensors/JerkFit.hpp`) |
 | `JINDI` | `AttitudeJINDI` — accel-level INDI with roll_jerk as a convex-combined second roll path |
 
-Each switch position maps to whichever list index its `AttCtrl` resolved to — see `FlightStateMachine::set_active_controller()`.
+Each switch position maps to whichever list index its `AttCtrl` resolved to; the same controller may sit on more than one position. `set_active_controller()` runs every tick from the `ctrl_select` switch (`radio_switch_position()`, 0/1/2).
+
+Handover on the switch edge into a controller: PID and PID+PI are reset (they aren't anchored to measured torque, so their shadow integrators may have drifted); PIDJerk calls `prepare_handover()`, which resets its loops and seeds the roll accel integrator with the measured roll torque; JINDI resets its jerk path (`reset_jerk_path()`). INDI needs nothing — it is anchored to `current_torque` every tick.
+
+Only the flying controller gets the mixer's real saturation flags (`set_mixer_limits()`); shadow controllers see "not limited".
 
 ---
 
@@ -112,9 +124,17 @@ yaw_rate_tgt ──────────────────────�
 
 Each loop's target/error/derivative filtering matches ArduPilot's `AC_PID` structure (target LPF → error = filtered target − measurement → error LPF → derivative of filtered error → D LPF); the rate loops' target-filter (`FLTT`) and yaw's error-filter (`FLTE`) are set to match `AC_AttitudeControl_Multi`'s actual defaults — see the D-filter/T-filter/E-filter columns below. Integrators are anti-windup clamped to `imax` (see table).
 
-Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGains`, see `configs/DroneConfig.hpp`) rather than hardcoded in `Attitude_PID.cpp` — the table below shows representative current values; check the relevant drone's `drone_config.cpp` for the authoritative numbers.
+The roll/pitch sticks arrive already scaled to lean angles by `FlightStateMachine` (`ControllersConfig::stick_max_angle_deg` at full stick — 30° on Drone2, 1 rad on Drone1/Drone3).
+
+**Anti-windup:** a rate integrator may only shrink toward zero on an axis that saturated last tick — either the mixer couldn't deliver it (`MotorMixer::limits()`, passed in via `set_mixer_limits()`) or this controller's own [-1, 1] output clamp clipped it. Same rule as ArduPilot's `AC_PID::update_i()` with `motors.limit`.
+
+The `CTUN` log message carries this controller's roll/pitch angle and rate targets, errors and rate integrators (`get_ctun_diag()`), whether or not it is the one flying.
+
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidGains`, see `configs/DroneConfig.hpp`) rather than hardcoded in `Attitude_PID.cpp`.
 
 ### Gains
+
+Drone1's values below. Drone2 (S500, ArduPilot-tuned): angle P 6.0, roll/pitch rate 0.135 / 0.135 / 0.0036 with a 20 Hz D-filter, yaw rate 0.2 / 0.05, yaw hold P 0.8, `yaw_stick_gain` 4.0. Drone3: angle P 7.0, roll rate 0.07 / 0.04 / 0.0015, pitch rate 0.08 / 0.05 / 0.0015, yaw rate Ki 0.05, yaw hold P 0.7. Check the drone's `drone_config.cpp` for the authoritative numbers.
 
 | Loop | Kp | Ki | Kd | T-filter | E-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|---|
@@ -183,11 +203,11 @@ Before 2026-10-14 the regression was written the other way round (Δω̇ = G1·�
 
 `get_g1(float g1[2])` exposes the live `G1_hat` estimate for comparison against its seed — logged in the `INDI` message's `G1R`/`G1P` fields (`LogMsgINDI::g1_roll/g1_pitch`, `src/logging/LogMessages.hpp`), alongside `UnmixR`/`UnmixP` (`current_torque`, a different quantity — don't conflate the two).
 
-`accel_cmd` (the rate-PID's output, before the INDI increment) and `delta_torque` are no longer separate `update()` output parameters — that would break the common `AttitudeController` interface every controller in `FlightStateMachine`'s list now shares (see `src/controllers/AttitudeController.hpp`). `AttitudeINDI::update()` stores them internally instead; `get_diag(delta_torque[2], accel_cmd[2])` reads them back for the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
+`accel_cmd` (the rate-PID's output, before the INDI increment) and `delta_torque` are no longer separate `update()` output parameters — that would break the common `AttitudeController` interface every controller in `FlightStateMachine`'s list now shares (see `src/controllers/attitude/AttitudeController.hpp`). `AttitudeINDI::update()` stores them internally instead; `get_diag(delta_torque[2], accel_cmd[2])` reads them back for the `INDI` log's `AccR`/`AccP` fields — see [SD Card Logging](../../README.md#5-sd-card-logging).
 
 ### Gains
 
-The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain and a much larger integrator clamp. Representative current values (roll/pitch rate gains are typically shared across drones; yaw-rate and the NLMS seed/output values below are tuned per-airframe — check the relevant drone's `drone_config.cpp` for authoritative numbers):
+The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rate loops do **not** match `AttitudePID`'s rate gains — INDI's rate loop output is a commanded acceleration (rad/s²), not a torque, so it runs much higher gain and a much larger integrator clamp. Drone1/Drone3 values below (Drone3's `.indi` is a copy of Drone1's). Drone2 differs in yaw rate (0.065 / 0.02, no T/E filter, 30 Hz D-filter) and its G1 seeds (0.0035 / 0.0045) — check the relevant drone's `drone_config.cpp` for authoritative numbers:
 
 | Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|
@@ -195,7 +215,7 @@ The outer angle-P loops match `AttitudePID`'s attitude gains (4.00/0/0). The rat
 | Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Roll rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
 | Pitch rate | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
-| Yaw rate | 0.065–0.18 | 0.018–0.02 | 0 | off–20 Hz | 5–30 Hz | 0.5 |
+| Yaw rate | 0.18 | 0.018 | 0 | 20 Hz (E-filter 2.5 Hz) | 5 Hz | 0.5 |
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | 30 Hz | 0.3 |
 
 `AttitudeIndiGains` fields beyond the PID loops (`configs/DroneConfig.hpp`, values per-drone in `configs/<Drone>/drone_config.cpp`):
@@ -232,6 +252,8 @@ Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's outp
 
 Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`) — The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination.** Select it with `AttCtrl::PID_PI` in a drone's `ControllersConfig::switch_pos`. Like PID, it isn't anchored to `current_torque`, so `set_active_controller()` resets it on the switch edge into it.
 
+Values below are Drone1/Drone3's (Drone2: angle P 4.5).
+
 | Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
 |---|---|---|---|---|---|---|
 | Roll attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
@@ -249,9 +271,40 @@ There is no shadow-diagnostics log for this controller yet (unlike INDI's `get_d
 
 ---
 
+## AttitudePIDJerk (`Attitude_PID_Jerk.hpp/.cpp`)
+
+The `AttitudePIDPI` cascade (angle → rate → accel → torque) with a jerk "D" term on roll's accel stage, using the strain-fit roll jerk (`roll_jerk`, `src/sensors/JerkFit.hpp`) as the measured derivative of acceleration. Pitch and yaw are as `AttitudePID`. Every stage is in physical units:
+
+```
+Angle:  angle_err [rad]   → rate_tgt  [rad/s]    (P)
+Rate:   rate_err  [rad/s] → accel_tgt [rad/s²]   (PI, "SLC")
+Accel:  torque [N·m] = Kp·(accel_tgt − p_dot) + Ki·∫(accel_tgt − p_dot)   (PI)
+                     − Kd·LPF_20Hz(roll_jerk)                              (jerk "D", on measurement)
+out_cmds[0] = unmixer.normalize_torque(torque)
+```
+
+The jerk term acts as damping (`Kp·a + Kd·jerk ≈ Kp·a(t + Kd/Kp)`), clawing back some of the `p_dot` filter lag; the accel integrator holds the steady roll torque (`imax` 1.2 N·m). An earlier version closed an inner loop *on* jerk and limit-cycled at the 40–60 Hz arm mode — see the class comment for the measurements behind the current gains. `prepare_handover()` seeds the accel integrator with the measured roll torque on the switch edge into it. Its gains are hardcoded in the constructor (`Attitude_PID_Jerk.cpp`), not in `DroneConfig` — the same on every drone, none bench/flight tuned. Logs as `JPID`.
+
+---
+
+## AttitudeJINDI (`Attitude_JINDI.hpp/.cpp`)
+
+INDI where roll gets a second, independent control path from the strain-fit roll jerk. Each path computes a full roll torque reference, and the two are blended:
+
+```
+tau_accel = current_torque + (accel_cmd − p_dot) · G1_hat                  (accel path, as AttitudeINDI)
+tau_jerk  = tau_roll[k−1] + (G1_hat / h_roll) · (jerk_cmd − roll_jerk)     (jerk path, actuator-dynamics assumption)
+tau_roll  = alpha · tau_accel + (1 − alpha) · tau_jerk
+out_cmds[0] = unmixer.normalize_torque(tau_roll)
+```
+
+`alpha` (`AttitudeJindiGains::alpha`) replaces roll's kappa: 1.0 is accel-path only, 0.0 is jerk-path only. Drone1 flies `alpha = 0` (full jerk reliance, since 2026-10-14); Drone2/Drone3 are at 1.0. Both roll paths share one live `G1_hat` (the same NLMS estimator as `AttitudeINDI`; `mu` is 0 on Drone1, 0.05/0.005 on Drone2/Drone3). Pitch is plain accel-level INDI with its own kappa; yaw is rate PID + heading-lock trim. Logs as `JIND`.
+
+---
+
 ## AltControl (`AltControl.hpp/.cpp`)
 
-Altitude and throttle controller. Used by all three flight modes.
+Altitude and throttle controller: the throttle for every flight mode.
 
 ### STABILIZE throttle passthrough
 
@@ -264,10 +317,9 @@ thrust    = constrain(thr_exp × boost, 0, 1)
 
 The boost compensates for reduced vertical thrust when banked.
 
-### Altitude hold — `alt_hold()` (ALT_HOLD and POS_HOLD)
+### Altitude hold — `alt_hold()` (POS_HOLD)
 
-One z-axis controller, called identically by both modes. POS_HOLD only adds
-the N/E cascade in `PosControl` on top. `alt_hold()` is the stick's target
+One z-axis controller (the unreachable ALT_HOLD mode calls it the same way). `alt_hold()` is the stick's target
 generator in front of `track(alt_tgt_D, climb_rate_ff, cur_D, vD)`, the
 feedback loop itself, which `TrajectoryTracker` calls directly with a
 commanded altitude.
@@ -278,7 +330,8 @@ pilot_thr [0,1]
     ▼ stick_to_climb_rate()
     │   centered    = pilot_thr − 0.5            [-0.5, +0.5]
     │   deadband    = ±0.05 around centre
-    │   climb_stick = ±MAX_CLIMB_RATE (3 m/s) outside deadband, 0 inside
+    │   climb_stick = 0 inside the deadband, rising linearly to
+    │                 ±MAX_CLIMB_RATE (3 m/s) at full stick outside it
     │
     ▼ alt_tgt += climb_stick × CONTROL_DT_S      (frozen while stick is in the deadband)
     │   alt_tgt leashed to cur_D ± ALT_LEASH_M (1 m)
@@ -287,10 +340,10 @@ pilot_thr [0,1]
     │
     ▼ climb_rate_pid (rate_tgt − vD → delta_thr)
     │
-    thrust_out = constrain(THR_MID − delta_thr, 0, 1)
+    thrust_out = constrain(hover_thr − delta_thr, 0, 1)
 ```
 
-`THR_MID = 0.4`. Same scheme as ArduPilot's
+`hover_thr` is per drone (`AltControlGains::hover_thr`: Drone1 0.40, Drone2 0.50 — both unmeasured placeholders — and Drone3 0.27, measured); the closer it is to the real hover throttle, the less the climb-rate integrator has to make up after take-off. `THR_MID = 0.4` is only the STABILIZE expo curve's mid-stick point. Same scheme as ArduPilot's
 `set_pos_target_z_from_climb_rate_cm()`: the stick moves the altitude target
 and is fed forward as a climb rate, so centring the stick holds the current
 altitude. `cur_D` is the EKF D position and `vD` the NED D velocity (body
@@ -364,7 +417,7 @@ accel_tgt = accel_cmd + accel_fb
                       pitch_tgt = atan2(−accel_N_body, g)
                       roll_tgt  = atan2( accel_E_body·cos(pitch_tgt), g)
                                 │
-                          clamp: ±30° (MAX_LEAN_deg, feed-forward + feedback together)
+                          clamp: ±40° (MAX_LEAN_deg, feed-forward + feedback together; was 30°, LOG0100)
 ```
 
 The stick acceleration goes straight to the lean angle, so the response to the stick is immediate; the PIDs only correct tracking error, which stays small because the targets move no faster than the vehicle can. The feed-forward bypasses the 10 Hz filter so it doesn't pick up the filter's lag.
@@ -405,8 +458,12 @@ Lives per-drone as `PosControlGains` in `configs/<Drone>/drone_config.cpp` (see 
 |---|---|---|---|---|---|---|
 | Pos N | 1.0 | 0 | 0 | off | 20 Hz | 0 |
 | Pos E | 1.0 | 0 | 0 | off | 20 Hz | 0 |
-| Vel N | 3.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
-| Vel E | 3.0 | 1.0 | 0 | 20 Hz | 20 Hz | 0.8 |
+| Vel N | 2.5 | 0.85 | 0 | 20 Hz | 20 Hz | 0.8 |
+| Vel E | 2.5 | 0.85 | 0 | 20 Hz | 20 Hz | 0.8 |
+
+Drone1/Drone3 values (Drone3's flown set, trojTrack_test1 2026-10-08). Drone2 runs vel P 3.0 / I 1.0. Mocap latency, not the controller, is what limits these on Drone3 — run `tools/sim` `degraded_link` before raising them.
+
+While JINDI is the flying attitude controller, `FlightStateMachine` scales PosControl's feedback by `JINDI_POS_FB_SCALE` (0.85): JINDI tracks lean commands more fully than PID at pos-hold frequencies, so the position loop otherwise runs hotter.
 
 ---
 
@@ -424,7 +481,7 @@ yaw_rate_cmd = rate_tgt + constrain(kp · wrap(target − yaw), ±max_rate)
 | `update_rate(yaw, rate)` | POS_HOLD yaw stick | `stick_rate` × stick (deadband 0.10, rescaled) |
 | `update_heading(yaw, yaw_des, rate_ff)` | TrajectoryTracker | `rate_ff` + approach toward `yaw_des` (≤ `max_rate`, sqrt profile) |
 
-The target is leashed to within 0.6 rad of the vehicle, and shifted by `yaw_frame_reset()` when the estimator's yaw steps. Gains are per-drone (`HeadingGains`): `kp` 1.75 /s, `stick_rate` 3.0 rad/s, `max_rate` 1.0 rad/s, `max_accel` 4.0 rad/s² — starting values, not flight-tuned.
+The target is leashed to within 0.6 rad of the vehicle, and shifted by `yaw_frame_reset()` when the estimator's yaw steps. The target is integrated from a prediction of the vehicle's yaw rate (the commanded rate through a first-order lag of `lag_s`), not from the command itself, so it doesn't run ahead of a vehicle that responds `lag_s` late — the same idea as PosControl's `accel_pred`. Gains are per-drone (`HeadingGains`), currently the same on every drone: `kp` 1.75 /s, `stick_rate` 3.0 rad/s, `max_rate` 1.0 rad/s, `max_accel` 4.0 rad/s², `lag_s` 0.16 s (measured on Drone3; re-measure on the others).
 
 ---
 
@@ -461,7 +518,7 @@ Limits are constants at the top of `TrajectoryTracker.hpp` (starting values, to 
 
 Heading: `HeadingControl` — the yaw stick turns the heading target rather than commanding a raw rate.
 
-D axis: `AltControl::alt_hold()`, exactly as in ALT_HOLD — the throttle stick commands climb rate outside its deadband and the current altitude is held inside it.
+D axis: `AltControl::alt_hold()` — the throttle stick commands climb rate outside its deadband and the current altitude is held inside it.
 
 **Stick frame** — `PosControl::STICKS_BODY_FRAME` (`PosControl.hpp`, currently `true`): the pitch/roll sticks command forward/right acceleration relative to the nose and are rotated by yaw into N/E (ArduPilot Loiter behaviour). Set it to `false` for the sticks to command N/E directly.
 
@@ -471,7 +528,7 @@ D axis: `AltControl::alt_hold()`, exactly as in ALT_HOLD — the throttle stick 
 
 ## Unmixer (`Unmixer.hpp/.cpp`)
 
-Converts per-motor RPM (DShot GCR telemetry) to physical roll/pitch torques in N·m for INDI feedback. Uses real bench-fit constants (not placeholders) — supplied per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`) rather than hardcoded `static constexpr` members; `Unmixer`'s constructor takes the config by reference and stores it.
+Converts per-motor RPM to physical roll/pitch torques in N·m for INDI/JINDI/PIDJerk feedback. RPM comes from bidirectional DShot telemetry, or from the CAN shaft-encoder nodes (`src/sensors/EncoderRPM.hpp`) on a drone without DShot (Drone2). Constants are per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`): bench-fit on Drone1/Drone3, placeholders on Drone2 (its 12 in motors/props haven't been on the thrust stand).
 
 **RPM filtering** — each motor's RPM goes through the drone's `ang_accel_filt` — a 2nd-order lowpass at `lpf_hz` and an optional 1st-order stage at `lpf_extra_hz` (`<= 0` disables it) — before the motor model, at the fixed `CONTROL_DT_S`. It's the same config StateManager uses for p_dot/q_dot, so there's one place to change it.
 
@@ -501,6 +558,10 @@ Converts `[roll_tq, pitch_tq, yaw_tq, thrust]` (all normalised) to four motor co
 
 All motors output 0 when disarmed or when |roll| or |pitch| exceeds the config's `max_angle_rad` (~80° for the drones today).
 
+- **Thrust linearisation** (`thrust_expo`, ArduPilot's `MOT_THST_EXPO`): mixing happens in thrust space, so `att_scale`/`yaw_scale` give the same torque at any throttle. `T = (1 − e)·a + e·a²`; `e = 0` is the old linear-PWM mixer. Drone2 runs 0.65, Drone1/Drone3 0.
+- **Yaw headroom:** yaw is limited to what each motor has left after roll+pitch, but always keeps at least `yaw_headroom_min` of the output span. If roll+pitch+yaw still don't fit, they are scaled down together (never yaw alone) and throttle absorbs the rest.
+- **Saturation flags:** `limits()` reports which axes couldn't be delivered this tick; `FlightStateMachine::set_mixer_limits()` passes them to the flying controller for integrator anti-windup next tick. All axes read as limited while disarmed.
+
 ```
     FL [2]       FR [0]
          \       /
@@ -513,6 +574,28 @@ All internal math is in this logical `[FR, RL, FL, RR]` order — `MotorMixerCon
 
 ---
 
+## SysId (`SysId.hpp/.cpp`)
+
+RC-triggered system-identification sweeps — ArduPilot's SystemID mode `MIX_*` axes, but without taking over the flight mode. `SysId::apply()` runs as the last step of every ACTIVE tick in `FlightStateMachine::update()` (after the spool-up ramp and landed detection, so a heave sweep can't trip landing) and adds an exponential chirp (`Chirp`, ported from ArduPilot's `AP_Math/chirp.cpp`) to one of the final commands:
+
+| Axis | Added to |
+|---|---|
+| `ROLL` / `PITCH` / `YAW` | `out_cmds[0/1/2]` (normalised torque), clamped to [-1, 1] |
+| `HEAVE` | `thrust_out`, clamped to [0, 1] |
+
+The sticks and the flying controller keep running underneath, and the controller fights the sweep as a disturbance — identify against `OUTP` (controller + chirp), not the chirp alone. `SIDD` logs the sweep state, axis, time, frequency and chirp value.
+
+Switch logic (`SysIdConfig::rc_channel`, `-1` disables; 0-based like `kRcMaps`, `> 992` = on):
+
+- **Rising edge** while flying: sweep `axes[idx]`. An edge on the ground or during spool-up is ignored — flip again once flying.
+- **Falling edge** mid-sweep: cancel, stop injecting; `idx` unchanged, so the next flip retries that axis.
+- **Sweep completes:** stop injecting, `idx` → next axis (wraps). Nothing more until the switch goes low and high again.
+- **Disarm / ground idle / landed:** abort, `idx` unchanged.
+
+`SysIdConfig` (per drone): `axes[4]` (`NONE` ends the list), `f_start_hz`, `f_stop_hz`, `duration_s` (whole sweep including a two-cycle dwell at `f_start_hz` and both fades), `magnitude[4]` per axis [roll, pitch, yaw, heave], `fade_in_s`, `fade_out_s`. A config that fails validation (duration shorter than the dwell, fades longer than the sweep, empty axis list) disables SysId. Current magnitudes are untested placeholders.
+
+---
+
 ## PID base class (`PID.hpp/.cpp`)
 
 All controllers use the same `PID` class. Filtering matches ArduPilot's `AC_PID` structure — target and error each get their own optional low-pass stage ahead of the derivative, not just a single D-term filter:
@@ -520,9 +603,11 @@ All controllers use the same `PID` class. Filtering matches ArduPilot's `AC_PID`
 ```cpp
 PID(float kp, float ki, float kd, float imax,
     float filt_target_hz = 0.0f, float filt_error_hz = 0.0f, float filt_d_hz = 20.0f);
-float update(float target, float measurement);
+float update(float target, float measurement, bool limit = false);
 void  reset();
 void  set_gains(float kp, float ki, float kd);
+void  set_integrator(float value);   // bumpless handover (clamped to ±imax)
+float integrator() const;
 ```
 
 ```
@@ -537,12 +622,12 @@ derivative of error_filt --[1st-order LPF @ filt_d_hz]--> feeds D
 - **First sample** (`_deriv_valid == false`): returns `kp * error` only (no I or D term), and latches the timestamp — avoids a derivative spike from an undefined previous error.
 - **Stale input** (gap since the last call `> 200 ms`, `STALE_TIMEOUT_US`): calls `reset()` (zeroes the integrator and derivative state) and returns `kp * error` only, same as the first-sample case — protects against a large derivative/integral kick if a caller stops calling `update()` for a while and then resumes.
 
-The integrator is clamped to `±imax`.
+The integrator is clamped to `±imax`. While `limit` is true (the output this PID drives saturated last tick), the integrator may only shrink toward zero — ArduPilot's `AC_PID::update_i()` rule; the attitude controllers pass the mixer's per-axis saturation flags here.
 
 ---
 
 ## Notes
 
-- **Yaw / heading hold** — in STABILIZE and ALT_HOLD the yaw stick commands yaw *rate*, and each attitude controller adds a heading-lock trim on top: while the yaw stick is inside its ±0.10 deadband the current heading is latched as the target and a PI on heading error (`yaw_hold` gains) adds a corrective rate, capped at `YAW_HOLD_MAX_RATE` (0.3 rad/s); moving the stick re-latches the target to wherever the nose is. POS_HOLD replaces this with `HeadingControl` (see above), which owns a heading target the stick turns or a trajectory sets. The heading itself comes from the EKF, which takes it from the IMX5 and/or the mocap yaw (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section) — there is no magnetometer.
+- **Yaw / heading hold** — in STABILIZE the yaw stick commands yaw *rate*, and each attitude controller adds a heading-lock trim on top: while the yaw stick is inside its ±0.10 deadband the current heading is latched as the target and a PI on heading error (`yaw_hold` gains) adds a corrective rate, capped at `YAW_HOLD_MAX_RATE` (0.3 rad/s); moving the stick re-latches the target to wherever the nose is. POS_HOLD replaces this with `HeadingControl` (see above), which owns a heading target the stick turns or a trajectory sets. The heading itself comes from the EKF, which takes it from the IMX5 and/or the mocap yaw (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section) — there is no magnetometer.
 
 See the root README's [TODO](../../README.md#todo) list for planned feature work; this file documents the controllers as they exist today.

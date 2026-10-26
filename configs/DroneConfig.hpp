@@ -14,19 +14,19 @@
  * selects which one gets compiled in (see top-level Makefile).
  */
 
-// Mirrors PID's constructor parameters exactly (see src/controllers/PID.hpp).
+// Mirrors PID's constructor parameters exactly (see src/controllers/extras/PID.hpp).
 struct PidGains {
     float kp, ki, kd, imax;
     float filt_target_hz, filt_error_hz, filt_d_hz;
 };
 
-// Gains for AttitudePID (src/controllers/Attitude_PID.hpp).
+// Gains for AttitudePID (src/controllers/attitude/Attitude_PID.hpp).
 struct AttitudePidGains {
     PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
     float    yaw_stick_gain;   // was AttitudePID::YAW_STICK_GAIN
 };
 
-// Gains for AttitudeINDI (src/controllers/Attitude_INDI.hpp).
+// Gains for AttitudeINDI (src/controllers/attitude/Attitude_INDI.hpp).
 struct AttitudeIndiGains {
     PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
     // G1_tau seed (N*m per rad/s^2) — offline-identified airframe effectiveness
@@ -49,7 +49,7 @@ struct AttitudeIndiGains {
     float    yaw_gain;         // was AttitudeINDI::YAW_GAIN
 };
 
-// Gains for AttitudeJINDI (src/controllers/Attitude_JINDI.hpp) — roll_jerk
+// Gains for AttitudeJINDI (src/controllers/attitude/Attitude_JINDI.hpp) — roll_jerk
 // (src/sensors/JerkFit.hpp) is a second, independent control path for roll,
 // combined with the accel-level path via a convex combination — see
 // Attitude_JINDI.hpp's class comment for the full derivation. Both of
@@ -76,15 +76,14 @@ struct AttitudeJindiGains {
     // not-yet-characterized gains in this file.
     float    alpha;
     // NLMS adaptation rate (mu) for the shared G1 estimator — same
-    // mode-dependent meaning as AttitudeIndiGains::nlms_mu_pid/indi. Set to
-    // 0 for now (not yet characterized) — the machinery stays wired so it
-    // can be turned on later without a code change.
+    // mode-dependent meaning as AttitudeIndiGains::nlms_mu_pid/indi. 0 turns
+    // adaptation off (G1 stays at its seed).
     float    nlms_mu_pid;
     float    nlms_mu_indi;
     float    yaw_gain;
 };
 
-// Gains for AttitudePIDPI (src/controllers/Attitude_PID_PI.hpp) — ported from
+// Gains for AttitudePIDPI (src/controllers/attitude/Attitude_PID_PI.hpp) — ported from
 // the BPRL ArduPilot fork's rate-PID + inner angular-acceleration-PI cascade
 // (AC_AttitudeControl_Multi, "switched to PID" commit). roll_accel/pitch_accel
 // are the inner PI loop closed on measured angular acceleration (kd expected
@@ -95,18 +94,18 @@ struct AttitudePidPiGains {
     float    yaw_stick_gain;
 };
 
-// Gains for AltControl (src/controllers/AltControl.hpp).
+// Gains for AltControl (src/controllers/position/AltControl.hpp).
 struct AltControlGains {
     PidGains pos_D, climb_rate;
     float    hover_thr;   // throttle [0,1] this airframe hovers at — the closed-loop altitude hold's starting point (read OUTP Thr in a steady hover)
 };
 
-// Gains for PosControl (src/controllers/PosControl.hpp).
+// Gains for PosControl (src/controllers/position/PosControl.hpp).
 struct PosControlGains {
     PidGains pos_N, pos_E, vel_N, vel_E;
 };
 
-// Gains for HeadingControl (src/controllers/HeadingControl.hpp) — POS_HOLD's
+// Gains for HeadingControl (src/controllers/position/HeadingControl.hpp) — POS_HOLD's
 // heading loop, which feeds whichever attitude controller is active.
 struct HeadingGains {
     float kp;          // 1/s     heading error → yaw-rate trim
@@ -155,7 +154,7 @@ constexpr RcChannelMap kRcMaps[2] = {
       7 }, // strain_cal_switch (momentary)
 };
 
-// Motor mixing geometry (src/controllers/MotorMixer.hpp). Factor arrays are
+// Motor mixing geometry (src/controllers/extras/MotorMixer.hpp). Factor arrays are
 // indexed [FR, RL, FL, RR] — always that logical frame-position order,
 // regardless of which physical DShot lane/MOT pad each corner's ESC is
 // actually wired to.
@@ -184,7 +183,7 @@ struct MotorMixerConfig {
     float   thrust_expo;
 };
 
-// RPM-to-torque motor model + geometry (src/controllers/Unmixer.hpp).
+// RPM-to-torque motor model + geometry (src/controllers/extras/Unmixer.hpp).
 // T_MAX_NM is NOT a field here — Unmixer derives it once at construction
 // from arm_length_m/max_thrust_n so the two numbers can't drift apart.
 struct UnmixerConfig {
@@ -265,11 +264,39 @@ struct LogEnableConfig {
     bool strn;                // strain gauge array — gates all four of STN1..STN4 together
     bool jindi, jpid;         // jerk-controller diagnostics (JIND / JPID)
     bool ctun;                // AttitudePID roll/pitch tuning (CTUN); ptun above is POS_HOLD tuning (PTUN)
+    bool sidd;                // system-ID sweep state + chirp output (SIDD), see SysId.hpp
 };
 
 struct LoggingConfig {
     float           log_rate_hz;
     LogEnableConfig enable;
+};
+
+// System-ID frequency sweep (src/controllers/extras/SysId.hpp). The chirp is added
+// on top of the final mixer inputs — normalised torque for roll/pitch/yaw,
+// thrust_out for heave — after the flying controller, so the sticks keep
+// working normally and the controller fights it as a disturbance (identify
+// from OUTP, which carries the sum). Each rising edge of rc_channel runs one
+// sweep on the next axis in axes[]; the list wraps. Switching low mid-sweep
+// cancels it without advancing to the next axis.
+enum class SysIdAxis : uint8_t {
+    NONE,    // ends axes[] early
+    ROLL,
+    PITCH,
+    YAW,
+    HEAVE,
+};
+
+struct SysIdConfig {
+    int8_t    rc_channel;     // 0-based channel index like RcChannelMap; > 992 = on. -1 disables sysid
+    SysIdAxis axes[4];        // excited in this order, one per switch flip; NONE entries end the list
+    float     f_start_hz;     // sweep start frequency
+    float     f_stop_hz;      // sweep stop frequency
+    float     duration_s;     // whole sweep, including the start-frequency dwell and both fades
+    float     magnitude[4];   // chirp amplitude [roll, pitch, yaw, heave]: normalised torque [-1, 1] for
+                              // roll/pitch/yaw (× mixer att_scale/yaw_scale = PWM), throttle fraction for heave
+    float     fade_in_s;      // cosine amplitude ramp-in at the start (ArduPilot SID_T_FADE_IN)
+    float     fade_out_s;     // cosine amplitude ramp-out at the end (ArduPilot SID_T_FADE_OUT)
 };
 
 struct DroneConfig {
@@ -287,6 +314,7 @@ struct DroneConfig {
     SensorsConfig     sensors;
     ControllersConfig controllers;
     LoggingConfig     logging;
+    SysIdConfig       sysid;
 };
 
 extern const DroneConfig kDroneConfig;

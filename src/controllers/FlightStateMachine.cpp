@@ -19,6 +19,7 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     // In double so 57.2958 deg lands on exactly 1.0f (the old fixed mapping).
     , _stick_angle_scale((float)(cfg.controllers.stick_max_angle_deg * (M_PI / 180.0)))
     , _unmixer(cfg.unmixer, cfg.ang_accel_filt)
+    , _sysid(cfg.sysid)
     , _num_controllers(0)
     , _active_index(0)
     , _indi_index(-1)
@@ -397,6 +398,7 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
             _phase = FlightPhase::DISARMED;
             reset_all();
         }
+        _sysid.abort();
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
         _takeoff_debounce_ticks = _landed_debounce_ticks = _spool_ticks = 0;
@@ -432,6 +434,7 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
 
     if (_phase == FlightPhase::GROUND_IDLE) {
         reset_all();
+        _sysid.abort();
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
         return;
@@ -484,6 +487,11 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
     } else {
         _landed_debounce_ticks = 0;
     }
+
+    // ── System-ID sweep, added on top of the final commands. After landed
+    // detection so a heave sweep can't trip it; aborted by the landed drop
+    // above, or while the spool-up ramp is still running.
+    _sysid.apply(_phase == FlightPhase::ACTIVE && !still_spooling, out_cmds, thrust_out);
 }
 
 // ── Trajectory commands ──────────────────────────────────────────────────────

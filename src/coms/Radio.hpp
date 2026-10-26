@@ -36,3 +36,4 @@ bool  radio_valid(void);        /* true while the RC link is delivering fresh fr
 float radio_indi(void);         /* raw ctrl_select switch position [-1, 1], RcChannelMap::ctrl_select (3-pos) */
 int   radio_switch_position(void);  /* radio_indi() bucketed to 0/1/2 (low/mid/high) — see FlightStateMachine::set_active_controller() */
 bool  radio_strain_cal(void);   /* momentary strain-bias-cal switch, RcChannelMap::strain_cal_switch — see JerkFit.hpp */
+bool  radio_sysid(void);        /* system-ID sweep switch, SysIdConfig::rc_channel (always false when -1) — see SysId.hpp */

@@ -22,6 +22,8 @@
  *   strain_cal_switch      momentary strain-bias-cal switch → >992 = held;
  *                          see JerkFit.hpp / ControlThread's strain calibration block
  *
+ * The sysid switch is per drone instead (SysIdConfig::rc_channel, -1 = off).
+ *
  * Both SBUS and CRSF use the same 11-bit value range: 172–1811, centre 992.
  */
 static const RcChannelMap &rc() { return kRcMaps[static_cast<uint8_t>(kDroneConfig.rc_tx)]; }
@@ -45,6 +47,11 @@ bool  radio_valid()       { return !PARSER.frame_lost() && !PARSER.failsafe(); }
 float radio_flight_mode() { return norm_axis(PARSER.channel(rc().poshold_switch)); }
 float radio_indi()        { return norm_axis(PARSER.channel(rc().ctrl_select)); }
 bool  radio_strain_cal()  { return PARSER.channel(rc().strain_cal_switch) > 992u; }
+bool  radio_sysid()
+{
+    const int8_t ch = kDroneConfig.sysid.rc_channel;
+    return ch >= 0 && PARSER.channel((uint8_t)ch) > 992u;
+}
 
 int radio_switch_position()
 {

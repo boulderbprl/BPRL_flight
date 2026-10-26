@@ -1,17 +1,18 @@
 #pragma once
 #include <cstdint>
 #include <cstring>
-#include "Attitude_PID.hpp"
-#include "Attitude_JINDI.hpp"
-#include "Attitude_PID_Jerk.hpp"
-#include "Attitude_INDI.hpp"
-#include "Attitude_PID_PI.hpp"
-#include "AttitudeController.hpp"
-#include "AltControl.hpp"
-#include "PosControl.hpp"
-#include "HeadingControl.hpp"
-#include "TrajectoryTracker.hpp"
-#include "Unmixer.hpp"
+#include "src/controllers/attitude/Attitude_PID.hpp"
+#include "src/controllers/attitude/Attitude_JINDI.hpp"
+#include "src/controllers/attitude/Attitude_PID_Jerk.hpp"
+#include "src/controllers/attitude/Attitude_INDI.hpp"
+#include "src/controllers/attitude/Attitude_PID_PI.hpp"
+#include "src/controllers/attitude/AttitudeController.hpp"
+#include "src/controllers/position/AltControl.hpp"
+#include "src/controllers/position/PosControl.hpp"
+#include "src/controllers/position/HeadingControl.hpp"
+#include "src/controllers/position/TrajectoryTracker.hpp"
+#include "src/controllers/extras/Unmixer.hpp"
+#include "src/controllers/extras/SysId.hpp"
 #include "configs/DroneConfig.hpp"
 
 enum class FlightMode  { STABILIZE, ALT_HOLD, POS_HOLD };
@@ -33,10 +34,11 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  *                to GROUND_IDLE if commanded thrust and vertical speed both
  *                stay low for LANDED_DEBOUNCE_TICKS ("landed").
  *
- * Flight mode from input[InputIdx::FLIGHT_MODE] (3-position switch):
- *   < -0.33  → STABILIZE  (attitude + throttle passthrough)
- *   -0.33..0.33 → ALT_HOLD (attitude + altitude hold cascade)
+ * Flight mode from input[InputIdx::FLIGHT_MODE] (the poshold_switch):
  *   > +0.33  → POS_HOLD   (position hold + attitude + altitude hold)
+ *   otherwise → STABILIZE (attitude + throttle passthrough)
+ * ALT_HOLD (attitude + altitude hold cascade, mode_alt_hold()) is still
+ * implemented but not reachable from the switches.
  *
  * POS_HOLD has two sources for what its position, altitude and heading
  * controllers track: the pilot's sticks (the default), or — after a
@@ -55,8 +57,8 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * but only in shadow, feeding get_ptun_diag() for the PTUN log. Flip that
  * flag to false to restore closed-loop pos-hold flight.
  *
- * Every controller in the drone's config list runs every tick (shadow mode —
- * see code_rework.md Section 3.4), so a controller not currently selected
+ * Every controller in the drone's config list runs every tick (shadow
+ * mode), so a controller not currently selected
  * stays live and its output is always directly comparable to whichever one
  * actually flew (see get_indi_diag() / get_jindi_diag() / get_pidj_diag()
  * for INDI's/JINDI's/PIDJerk's shadow diagnostics specifically). Only the
@@ -93,6 +95,10 @@ enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
  * dispatch, whether or not either is currently the active (motor-driving)
  * controller.
  *
+ * SysId (SysId.hpp) adds its RC-triggered chirp to out_cmds/thrust_out as
+ * the very last step of an ACTIVE tick, on top of whatever the flying
+ * controller commanded — the sticks keep working through a sweep.
+ *
  * Output (out_cmds[3], thrust_out) feeds the unchanged MotorMixer.
  */
 class FlightStateMachine {
@@ -101,7 +107,7 @@ public:
 
     // state_full[19]: full EKF state vector (StateIdx::*)
     // euler[3]:       [roll, pitch, yaw] rad
-    // input[5]:       [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode]
+    // input[6]:       InputIdx::* [thrust, roll_tgt, pitch_tgt, yaw_rate, flight_mode, indi_stk]
     // armed:          arm switch state from radio
     // pos_valid:      the N/E/D position in state_full is backed by a live
     //                 external position source (mocap link healthy)
@@ -163,6 +169,12 @@ public:
     // Which controller is actually driving out_cmds, as an AttCtrl value —
     // unlike active_index(), means the same thing on every drone. For $TEL.
     AttCtrl active_ctrl() const { return _active_ctrl; }
+
+    // SysId switch level (radio_sysid()), every tick before update() — see SysId::set_switch().
+    void set_sysid_switch(bool on) { _sysid.set_switch(on); }
+
+    // This tick's sweep state + chirp output, for SIDD logging.
+    SysIdDiag sysid_diag() const { return _sysid.diag(); }
 
     FlightPhase phase() const { return _phase; }
     FlightMode  mode()  const { return _mode;  }
@@ -273,8 +285,9 @@ private:
     // POS_HOLD position-feedback scale while JINDI is the active attitude
     // controller (PID and the others use 1.0). LOG0076: JINDI reaches ~0.9 of
     // commanded lean at 0.1-0.5 Hz vs PID's ~0.55 with similar phase, so the
-    // pos-hold loop ran ~1.6× hotter and swayed at ~0.4 Hz. 0.6 ≈ 0.55/0.9.
-    // Raise toward 0.7-0.8 if position hold feels too soft.
+    // pos-hold loop ran ~1.6× hotter and swayed at ~0.4 Hz. 0.55/0.9 ≈ 0.6
+    // was the first value; it now flies at 0.85 — lower it back toward 0.6 if
+    // that ~0.4 Hz sway returns.
     static constexpr float JINDI_POS_FB_SCALE = 0.85f;
 
     // Yaw stick [-1, 1] → turn rate for HeadingControl [rad/s]; zero inside
@@ -332,8 +345,9 @@ private:
     float           _yaw_stick_rate; // from DroneConfig::heading.stick_rate
     float           _stick_angle_scale; // rad of lean per unit roll/pitch stick, from DroneConfig::controllers.stick_max_angle_deg
     Unmixer         _unmixer;
+    SysId           _sysid;
 
-    // ── Config-driven attitude-controller list (see code_rework.md 3.4) ──────
+    // ── Config-driven attitude-controller list ───────────────────────────────
     static constexpr int MAX_ATTITUDE_CONTROLLERS = 5;  // PID + INDI + PID+PI + PIDJerk + JINDI
     AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
     int _num_controllers;

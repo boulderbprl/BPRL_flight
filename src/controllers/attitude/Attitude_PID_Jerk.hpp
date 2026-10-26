@@ -1,6 +1,6 @@
 #pragma once
-#include "PID.hpp"
-#include "Unmixer.hpp"
+#include "src/controllers/extras/PID.hpp"
+#include "src/controllers/extras/Unmixer.hpp"
 #include "AttitudeController.hpp"
 #include "src/math/math.hpp"
 
@@ -10,9 +10,9 @@
  * using the strain-fit roll jerk (src/sensors/JerkFit.hpp) as the measured
  * derivative of acceleration. Pitch and yaw are identical to AttitudePID.
  *
- * Reachable via FlightStateMachine's controller list when the drone's
- * config enables it (ControllersConfig::pid_jerk_enabled) — selectable on
- * the channel-7 switch, and like every listed controller it runs and logs
+ * Reachable via FlightStateMachine's controller list when a
+ * ControllersConfig::switch_pos entry names AttCtrl::PID_JERK — selectable
+ * on the ctrl_select switch, and like every listed controller it runs and logs
  * (LOG_MSG_JPID) every tick whether or not it's selected.
  *
  * History: the previous version closed an innermost loop *on* jerk (accel

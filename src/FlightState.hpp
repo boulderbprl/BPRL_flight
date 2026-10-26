@@ -2,8 +2,8 @@
 #include <cstdint>
 
 /*
- * Shared flight state indices — 19-state EKF output written by StateEstThread,
- * read by ControlThread, LogThread, and DebugThread.
+ * Shared flight state indices — 19-state EKF output, computed and used by
+ * ControlThread and published (g_state) for LogThread and DebugThread.
  *
  * Units are SI throughout:
  *   Position:    metres         (NED inertial frame)

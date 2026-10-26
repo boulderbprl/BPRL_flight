@@ -133,7 +133,7 @@ public:
     static constexpr float V_VERT_MAX     = 0.5f;    // m/s, climb/descent speed toward a commanded D
     static constexpr float A_TAN_MAX      = 1.0f;    // m/s², speeding up / slowing down along the path
     static constexpr float A_VERT_MAX     = 1.0f;    // m/s², same, vertically
-    static constexpr float A_LAT_MAX      = 2.0f;    // m/s², turning (PosControl's 30° lean limit allows ~5.7; ArduPilot's AC_Circle also keeps to under half)
+    static constexpr float A_LAT_MAX      = 2.0f;    // m/s², turning (PosControl's 40° lean limit allows ~8.2; ArduPilot's AC_Circle also keeps to under half)
     static constexpr float YAW_RATE_MAX   = 0.8f;    // rad/s, how fast the path may ask the nose to turn — keep below HeadingGains::max_rate
     static constexpr float RADIUS_MIN_M   = 0.3f;
     static constexpr float RADIUS_MAX_M   = 10.0f;   // also the cap on the semi-major axis, r + |f|

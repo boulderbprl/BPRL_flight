@@ -1,11 +1,11 @@
 #pragma once
-#include "MotorMixer.hpp"
+#include "src/controllers/extras/MotorMixer.hpp"
 
 class Unmixer;
 
 /*
  * AttitudeController — common interface for FlightStateMachine's
- * config-driven controller list (see code_rework.md Section 3.4).
+ * config-driven controller list.
  *
  * PID is always list index 0 and is the default; any additional controller
  * (INDI today) that a drone's config enables runs every tick alongside it

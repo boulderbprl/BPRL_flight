@@ -47,7 +47,7 @@ which need ChibiOS. `stubs/` holds minimal replacements, and `run.sh` puts
 `stubs/` ahead of the repository on the include path, so
 `#include "src/threads.hpp"` finds the stub. Everything else — `PID`,
 `AltControl`, `PosControl`, `HeadingControl`, `TrajectoryTracker`,
-`FlightStateMachine`, the attitude controllers, the drone's
+`FlightStateMachine`, the attitude controllers, `SysId`, the drone's
 `drone_config.cpp` — is the firmware's own file, unmodified.
 
 Time is simulated: `stubs/src/uptime.hpp` returns `g_sim_time_us`, which the

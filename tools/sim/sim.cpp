@@ -9,7 +9,7 @@
 // linear drag, a steady wind). It is good for catching logic errors, sign
 // errors, target jumps and gross mistuning — not for final gains.
 #include "src/controllers/FlightStateMachine.hpp"
-#include "src/controllers/HeadingControl.hpp"
+#include "src/controllers/position/HeadingControl.hpp"
 #include "src/FlightState.hpp"
 #include "src/math/math.hpp"
 #include "src/threads.hpp"

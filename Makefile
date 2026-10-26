@@ -202,19 +202,20 @@ CPPSRC = $(ALLCPPSRC) \
          src/math/math.cpp \
          src/state_estimator/EKF.cpp \
          src/state_estimator/StateManager.cpp \
-         src/controllers/PID.cpp \
-         src/controllers/Attitude_PID.cpp \
-         src/controllers/Attitude_PID_Jerk.cpp \
-         src/controllers/Attitude_INDI.cpp \
-         src/controllers/Attitude_JINDI.cpp \
-         src/controllers/Attitude_PID_PI.cpp \
-         src/controllers/AltControl.cpp \
-         src/controllers/PosControl.cpp \
-         src/controllers/HeadingControl.cpp \
-         src/controllers/TrajectoryTracker.cpp \
-         src/controllers/Unmixer.cpp \
+         src/controllers/extras/PID.cpp \
+         src/controllers/attitude/Attitude_PID.cpp \
+         src/controllers/attitude/Attitude_PID_Jerk.cpp \
+         src/controllers/attitude/Attitude_INDI.cpp \
+         src/controllers/attitude/Attitude_JINDI.cpp \
+         src/controllers/attitude/Attitude_PID_PI.cpp \
+         src/controllers/position/AltControl.cpp \
+         src/controllers/position/PosControl.cpp \
+         src/controllers/position/HeadingControl.cpp \
+         src/controllers/position/TrajectoryTracker.cpp \
+         src/controllers/extras/Unmixer.cpp \
          src/controllers/FlightStateMachine.cpp \
-         src/controllers/MotorMixer.cpp \
+         src/controllers/extras/MotorMixer.cpp \
+         src/controllers/extras/SysId.cpp \
          src/coms/IMUs/ICM42688.cpp \
          src/coms/IMUs/ICM45686.cpp \
          src/coms/IMUs/ICM20602.cpp \
