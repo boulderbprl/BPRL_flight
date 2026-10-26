@@ -166,7 +166,7 @@ const DroneConfig kDroneConfig = {
     // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
     {
         100.0f, // log_rate_hz
-        { false, // att
+        { true, // att
           false, // lin
           true, // rcin
           false, // outp
@@ -185,7 +185,7 @@ const DroneConfig kDroneConfig = {
           false, // jindi
           false, // jpid
           false, // ctun (AttitudePID tuning)
-          true }, // sidd (system-ID sweep)
+          false }, // sidd (system-ID sweep)
     },
 
     // .sysid — SysIdConfig { rc_channel, axes[4], f_start_hz, f_stop_hz, duration_s, magnitude[4], fade_in_s, fade_out_s }
@@ -194,8 +194,8 @@ const DroneConfig kDroneConfig = {
     // Magnitudes are untested placeholders — start small and work up.
     { 8,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
       { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
-      0.3f, 10.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
-      60.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
-      { 0.05f, 0.05f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
+      0.1f, 10.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
+      40.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
+      { 0.1f, 0.1f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
       5.0f, 2.0f },                         // fade_in_s, fade_out_s
 };
