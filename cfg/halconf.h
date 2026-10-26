@@ -429,7 +429,7 @@
  *          buffers.
  */
 #if !defined(SERIAL_BUFFERS_SIZE) || defined(__DOXYGEN__)
-#define SERIAL_BUFFERS_SIZE                 128  /* CRSF frames are 26 B; 128 gives headroom for high-rate ELRS */
+#define SERIAL_BUFFERS_SIZE                 256  /* CRSF frames are 26 B; MAVLink at 230400 baud can deliver ~230 B per 10 ms MAVLinkThread poll — 256 covers that */
 #endif
 
 /*===========================================================================*/

@@ -181,8 +181,9 @@ void PosControl::feedback(const float state[], const float accel_ff[2], float at
     const float accel_N_fb = lowpass2p(accel_N_fb_raw, _accel_N_filt, ACCEL_FILT_HZ, CONTROL_DT_S);
     const float accel_E_fb = lowpass2p(accel_E_fb_raw, _accel_E_filt, ACCEL_FILT_HZ, CONTROL_DT_S);
 
-    const float accel_N_tgt = accel_ff[0] + accel_N_fb;
-    const float accel_E_tgt = accel_ff[1] + accel_E_fb;
+    // _fb_scale: per-attitude-controller feedback gain, see set_feedback_scale().
+    const float accel_N_tgt = accel_ff[0] + _fb_scale * accel_N_fb;
+    const float accel_E_tgt = accel_ff[1] + _fb_scale * accel_E_fb;
 
     float roll_tgt  = 0.0f;
     float pitch_tgt = 0.0f;

@@ -50,13 +50,13 @@ const DroneConfig kDroneConfig = {
     // ee3b405); 1.0 would be plain accel-path-only. nlms_mu_* at 0 for now
     // (G1 adaptation machinery stays wired, just not live yet).
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
+        { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 10.0f,  0.50f, 0.25f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate P=7.0 was stable, and performed batter than base PID
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 25.00f,  10.0f,  0.0f, 1000.0f, 0.0f, 0.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]
+        { 25.00f,  40.0f,  0.0f, 1000.0f, 0.0f, 0.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; ki 10 -> 20 (LOG0084: Pdot only reached 0.44-0.60 of AccR at 0.15-0.9 Hz, JINDI rang after gusts)
         0.0048f,  //0.006f,  // g1_seed_roll — shared by both of roll's paths, see class comment
         0.0065f, // g1_seed_pitch
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
@@ -74,7 +74,7 @@ const DroneConfig kDroneConfig = {
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate  ("SLC")
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate ("SLC")
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
-        { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold 
         { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — matches ArduPilot HEAD)
         { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — matches ArduPilot HEAD)
         3.0f,  // yaw_stick_gain
@@ -145,7 +145,7 @@ const DroneConfig kDroneConfig = {
    
     // .logging — LoggingConfig { log_rate_hz, log_enabled[19] }
     {
-        100.0f, // log_rate_hz
+        70.0f, // log_rate_hz
         { true, // att
           true, // lin
           true, // rcin

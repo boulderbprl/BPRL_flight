@@ -126,14 +126,38 @@ public:
     // changes at runtime, this repeats the same value every tick.
     float alpha_roll() const { return _alpha; }
 
-    // Measured roll jerk after the JERK_MEAS_LPF_HZ lowpass — the value the
-    // jerk error actually uses (most recent update()). Diagnostic only.
-    float roll_jerk_filt() const { return _jerk_meas_lpf; }
+    // Measured roll jerk after the JERK_MEAS_LPF_HZ lowpass and the
+    // JERK_MEAS_HPF_HZ highpass — the value the jerk error actually uses
+    // (most recent update()). Diagnostic only.
+    float roll_jerk_filt() const { return _jerk_meas_hpf; }
 
     // Tells the live NLMS estimator whether this controller is the one
     // currently driving out_cmds (vs. running in shadow) — same mechanism
     // as AttitudeINDI::set_indi_active().
     void set_indi_active(bool active) { _indi_active = active; }
+
+    // Handover reset, called by FlightStateMachine on the switch edge into
+    // JINDI. Everything below winds up in shadow against a plant JINDI isn't
+    // driving:
+    //   - the jerk path's stored torque (_tau_cmd_jerk_prev_roll) sits at the
+    //     torque clamp (±1.27 N·m in LOG0088) — switching in with it commanded
+    //     a large roll torque (crash);
+    //   - the outer integrators: _roll_accel (accel error → jerk reference)
+    //     held +119 rad/s³ at a LOG0088 switch, which kicked roll to +7° in
+    //     ~0.5 s and set off the ~0.4 Hz position oscillation; plus the
+    //     angle/rate/yaw loops.
+    // Zeroing them restarts JINDI from no stored torque or integral state.
+    // (PID::reset() makes each loop's first update P-only, which is fine here
+    // — nothing is seeded.)
+    void reset_jerk_path()
+    {
+        _tau_cmd_jerk_prev_roll = 0.0f;
+        _roll_att.reset();   _pitch_att.reset();
+        _roll_rate.reset();  _pitch_rate.reset();
+        _roll_accel.reset();
+        _yaw_rate.reset();   _yaw_hold.reset();
+        _yaw_target_valid = false;
+    }
 
 private:
     PID _roll_att;
@@ -190,12 +214,27 @@ private:
     static constexpr float JERK_ERR_LPF_HZ = 35.0f;
     float _jerk_err_lpf = 0.0f;   // single-pole filter state = previous output
 
-    // Single-pole lowpass on the measured jerk before it enters the
-    // jerk error. Its own state (not shared with any other filter), and
-    // applied to a local copy so _roll_jerk_input stays the raw set_roll_jerk()
-    // value.
+    // Single-pole lowpass on the measured jerk before it enters the jerk
+    // error, applied to a local copy so _roll_jerk_input stays the raw
+    // set_roll_jerk() value. 20 Hz: −8.7 dB @ 45 Hz, 7.7 ms @ 5 Hz, −26° @
+    // 10 Hz. (A 2nd-order 20 Hz version, LOG0079, cost JINDI ~50-65% more roll
+    // error at 0.5-3 Hz and was reverted; the Teensy LPF30 sketch now does the
+    // heavier anti-alias filtering upstream.)
     static constexpr float JERK_MEAS_LPF_HZ = 20.0f;
-    float _jerk_meas_lpf = 0.0f;   // single-pole filter state = previous output
+    float _jerk_meas_lpf = 0.0f;   // single-pole lowpass state = output
+
+    // 1st-order highpass on the measured jerk, after the lowpass above. Below
+    // ~1 Hz the strain jerk reads ~4-10× the gyro-derived roll jerk (LOG0082,
+    // coherence 0.7-0.9, ratio falling ~1/f), and the jerk loop servoing to
+    // that left JINDI with ~2× PID's roll error at 0.1-0.5 Hz (slow walk in
+    // POS_HOLD). Below the cutoff, low-frequency attitude is held by the accel
+    // loop on gyro P_DOT instead. Passes 0.89× at 2 Hz, 0.97× at 5 Hz, so gust
+    // onsets still reach the jerk path; adds phase lead (+11° / ~6 ms at 5 Hz,
+    // +5.7° at 10 Hz), no lag.
+    static constexpr float JERK_MEAS_HPF_HZ = 1.0f;
+    float _jerk_meas_hpf         = 0.0f;   // highpass output (see roll_jerk_filt())
+    float _jerk_meas_hpf_prev_in = 0.0f;   // previous highpass input
+    bool  _jerk_meas_hpf_valid   = false;  // false → seed on the next update()
 
     // TC — the actual combined torque commanded last tick (_tau_roll,
     // clamped to ±unmixer.max_torque_nm()), carried forward as the jerk
