@@ -29,8 +29,8 @@ const DroneConfig kDroneConfig = {
     {
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  — S500 ArduPilot-tuned (was Drone1's 0.08/0.05/0.002, filt_d 30)
-        { 0.135f, 0.135f, 0.0036f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate — S500 ArduPilot-tuned (was Drone1's 0.09/0.06/0.002, filt_d 30)
+        { 0.135f, 0.135f, 0.0054f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  — S500 ArduPilot-tuned (was Drone1's 0.08/0.05/0.002, filt_d 30)
+        { 0.135f, 0.135f, 0.0054f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate — S500 ArduPilot-tuned (was Drone1's 0.09/0.06/0.002, filt_d 30)
         { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         4.0f,  // yaw_stick_gain
@@ -165,11 +165,11 @@ const DroneConfig kDroneConfig = {
     
     // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
     {
-        100.0f, // log_rate_hz
+        50.0f, // log_rate_hz
         { true, // att
           false, // lin
           true, // rcin
-          false, // outp
+          true, // outp
           true, // rpms
           false, // strt
           true, // imu1
@@ -184,7 +184,7 @@ const DroneConfig kDroneConfig = {
           true, // strn (STN1..STN4)
           false, // jindi
           false, // jpid
-          false, // ctun (AttitudePID tuning)
+          true, // ctun (AttitudePID tuning)
           false }, // sidd (system-ID sweep)
     },
 
@@ -192,7 +192,7 @@ const DroneConfig kDroneConfig = {
     // Each flip of rc_channel sweeps the next axis in axes[] (wraps); flipping back
     // down mid-sweep cancels it and keeps the same axis. See src/controllers/extras/SysId.hpp.
     // Magnitudes are untested placeholders — start small and work up.
-    { 8,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
+    { 6,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
       { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
       0.1f, 10.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
       40.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)

@@ -713,6 +713,11 @@ static THD_FUNCTION(ControlThread, arg)
                 s_cal_committed = false;
                 s_cal_ticks     = 0;
                 memset(s_cal_sum, 0, sizeof(s_cal_sum));
+                // Also zero the ConBoard strain gauge ('Z', see
+                // ConBoard_I2C_Reference.md) — once per press. Only queues
+                // the command for the next poll tick, so it's a no-op flag
+                // set if strain_gauge_init() was never called.
+                strain_gauge_calibrate();
             }
 
             if (s_cal_active && sw && !s_cal_committed && s_cal_ticks < CAL_MAX_TICKS) {
@@ -1521,7 +1526,12 @@ static THD_FUNCTION(USBCmdThread, arg)
  *        <imu0_v>,<imu1_v>,<imu2_v>,<can_v>,<can_quat_hz>,<can_rate_hz>,
  *        <flight_mode>,         ← FlightMode enum (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD)
  *        <active_controller>,   ← AttCtrl value of the controller flying (0=PID 1=INDI 2=PID_PI 3=PID_JERK 4=JINDI)
- *        <poshold_sw>           ← raw pos-hold switch [-1,1] (RcChannelMap::poshold_switch; >0.33 = POS_HOLD)
+ *        <poshold_sw>,          ← raw pos-hold switch [-1,1] (RcChannelMap::poshold_switch; >0.33 = POS_HOLD)
+ *        <ctrl_sel_sw>,         ← raw controller-select switch [-1,1] (RcChannelMap::ctrl_select)
+ *        <strain_cal_sw>,       ← strain-cal switch held (RcChannelMap::strain_cal_switch)
+ *        <sysid_ch>,            ← SysIdConfig::rc_channel (-1 = sysid disabled)
+ *        <sysid_sw>,            ← sysid switch high
+ *        <sysid_state>,<sysid_axis>,<sysid_t>,<sysid_f>  ← SysIdState / SysIdAxis enums, sweep time s, chirp freq Hz
  * ══════════════════════════════════════════════════════════════════════════ */
 #ifdef BPRL_DEBUG
 static THD_FUNCTION(DebugThread, arg)
@@ -1560,7 +1570,9 @@ static THD_FUNCTION(DebugThread, arg)
         }
 
         /* ── Snapshot flight state ──────────────────────────────────────── */
-        float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw, rc_poshold;
+        float roll, pitch, yaw, thr, rc_roll, rc_pitch, rc_yaw, rc_poshold, rc_ctrl_sel;
+        float sysid_diag[5];
+        bool  sysid_sw;
         float p, q, r;
         float pos_x, pos_y, pos_z, vel_u, vel_v, vel_w;
         float lane_roll[3], lane_pitch[3], lane_yaw[3];
@@ -1587,6 +1599,9 @@ static THD_FUNCTION(DebugThread, arg)
         rc_pitch = g_input[InputIdx::PITCH_TGT];
         rc_yaw   = g_input[InputIdx::YAW_RATE];
         rc_poshold = g_input[InputIdx::FLIGHT_MODE];
+        rc_ctrl_sel = g_input[InputIdx::INDI_STK];
+        memcpy(sysid_diag, g_sysid_diag, sizeof(sysid_diag));
+        sysid_sw = g_sysid_sw;
         armed    = g_armed;
         flight_mode = g_flight_mode;
         active_controller = g_active_controller;
@@ -1600,6 +1615,12 @@ static THD_FUNCTION(DebugThread, arg)
         }
         primary_lane = s_primary_lane;
         chMtxUnlock(&state_mtx);
+
+        /* ── Snapshot strain-cal switch ──────────────────────────────────── */
+        bool  strain_cal_sw;
+        chMtxLock(&strainRate_mtx);
+        strain_cal_sw = g_strain_cal_active;
+        chMtxUnlock(&strainRate_mtx);
 
         /* ── Snapshot full IMU data ─────────────────────────────────────── */
         float imu_ax[3], imu_ay[3], imu_az[3];
@@ -1671,7 +1692,7 @@ static THD_FUNCTION(DebugThread, arg)
          * the USB_ACTIVE guard (chnWriteTimeout handles a disconnected port
          * gracefully by returning an error rather than hanging). */
         {
-            static char tel_buf[256];
+            static char tel_buf[384];
             MemoryStream ms;
             msObjectInit(&ms, (uint8_t *)tel_buf, sizeof(tel_buf) - 1, 0);
             chprintf((BaseSequentialStream *)&ms,
@@ -1681,7 +1702,9 @@ static THD_FUNCTION(DebugThread, arg)
                 "%.3f,%.3f,%.3f,%.3f,%d,"
                 "%lu,%lu,%lu,%lu,"
                 "%d,%d,%d,%d,%lu,%lu,"
-                "%d,%d,%.3f\r\n",
+                "%d,%d,%.3f,"
+                "%.3f,%d,"
+                "%d,%d,%d,%d,%.2f,%.2f\r\n",
                 bprl_millis(),
                 (double)(roll  * 57.2958f),
                 (double)(pitch * 57.2958f),
@@ -1694,7 +1717,11 @@ static THD_FUNCTION(DebugThread, arg)
                 (int)imu_v[0], (int)imu_v[1], (int)imu_v[2],
                 (int)can_v,
                 can_quat_hz, can_rate_hz,
-                flight_mode, active_controller, (double)rc_poshold);
+                flight_mode, active_controller, (double)rc_poshold,
+                (double)rc_ctrl_sel, (int)strain_cal_sw,
+                (int)kDroneConfig.sysid.rc_channel, (int)sysid_sw,
+                (int)sysid_diag[0], (int)sysid_diag[1],
+                (double)sysid_diag[2], (double)sysid_diag[3]);
             size_t tlen = ms.eos;
             if (tlen > 0 && chMtxTryLock(&s_usb_write_mtx)) {
                 chnWriteTimeout((BaseChannel *)&SDU1,

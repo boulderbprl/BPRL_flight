@@ -30,6 +30,7 @@ from bprl_common import (
     EkfLaneState, parse_ekfl_line,
     PosVelState, parse_pos_line,
     StrainState, parse_strain_line, STRAIN_ARM_NAMES,
+    SYSID_STATE_NAMES, SYSID_AXIS_NAMES,
 )
 
 from rich.layout import Layout
@@ -48,6 +49,34 @@ def _valid(v: bool) -> Text:
     return Text("● valid  ", style="green") if v else Text("○ absent ", style="dim")
 
 
+def _three_pos(v: float) -> str:
+    # Same ±0.33 bucketing as radio_switch_position() / FlightStateMachine.
+    if v > 0.33:
+        return "[bold cyan]HIGH[/bold cyan]"
+    return "MID" if v >= -0.33 else "LOW"
+
+
+def _on_off(v: bool) -> str:
+    return "[bold cyan]ON [/bold cyan]" if v else "[dim]off[/dim]"
+
+
+def _sysid_line(s: TelState) -> str:
+    if s.sysid_ch is None:
+        return "SysId:  [dim]n/a (old fw)[/dim]"
+    if s.sysid_ch < 0:
+        return "SysId:  [dim]disabled (rc_channel = -1)[/dim]"
+    state = SYSID_STATE_NAMES[s.sysid_state] if 0 <= s.sysid_state < len(SYSID_STATE_NAMES) \
+            else f"?{s.sysid_state}"
+    axis  = SYSID_AXIS_NAMES[s.sysid_axis] if 0 <= s.sysid_axis < len(SYSID_AXIS_NAMES) \
+            else f"?{s.sysid_axis}"
+    style = {"RUNNING": "bold red", "DONE": "green", "ABORTED": "yellow"}.get(state, "dim")
+    line = (f"SysId:  ch{s.sysid_ch} {_on_off(s.sysid_sw)}  "
+            f"[{style}]{state}[/{style}]  axis={axis}")
+    if state == "RUNNING":
+        line += f"  t={s.sysid_t:5.1f} s  f={s.sysid_f:5.2f} Hz"
+    return line
+
+
 def build_telemetry_panel(s: TelState) -> Panel:
     age   = time.monotonic() - s.last_rx
     stale = age > 1.0
@@ -60,30 +89,39 @@ def build_telemetry_panel(s: TelState) -> Panel:
     ctrl_tag = f"[{ctrl_style}]{attitude_ctrl_name(s.active_controller)}[/{ctrl_style}]"
     t_sec = s.time_ms / 1000.0
 
+    na = "[dim]n/a[/dim]"
+    poshold  = na if s.rc_poshold is None else f"{s.rc_poshold:+5.3f} {_three_pos(s.rc_poshold)}"
+    ctrl_sel = na if s.rc_ctrl_sel is None else f"{s.rc_ctrl_sel:+5.3f} {_three_pos(s.rc_ctrl_sel)}"
+    strn_cal = na if s.strain_cal_sw is None else _on_off(s.strain_cal_sw)
+
     grid = Table.grid(padding=(0, 2))
+    grid.add_column(min_width=16)
     grid.add_column(min_width=18)
-    grid.add_column(min_width=18)
-    grid.add_column(min_width=18)
+    grid.add_column(min_width=14)
+    grid.add_column(min_width=22)
     grid.add_row("[bold]ATTITUDE[/bold]",
                  "[bold]BODY RATES (rad/s)[/bold]",
-                 "[bold]RC INPUTS[/bold]")
+                 "[bold]RC STICKS[/bold]",
+                 "[bold]RC SWITCHES[/bold]")
     grid.add_row(f"Roll:  {s.roll:+7.2f}°",
                  f"P: {s.p:+8.4f}",
-                 f"Thr:   {s.thr:5.3f}")
+                 f"Thr:   {s.thr:5.3f}",
+                 f"Arm:     {_on_off(s.armed)}")
     grid.add_row(f"Pitch: {s.pitch:+7.2f}°",
                  f"Q: {s.q:+8.4f}",
-                 f"Roll:  {s.rc_roll:+5.3f}")
+                 f"Roll:  {s.rc_roll:+5.3f}",
+                 f"CtrlSel: {ctrl_sel}")
     grid.add_row(f"Yaw:   {s.yaw:+7.2f}°",
                  f"R: {s.r:+8.4f}",
-                 f"Pitch: {s.rc_pitch:+5.3f}")
-    grid.add_row("", "", f"Yaw:   {s.rc_yaw:+5.3f}")
-    if s.rc_poshold is None:
-        grid.add_row("", "", "PosHld: [dim]n/a (old fw)[/dim]")
-    else:
-        # Same threshold FlightStateMachine uses: > +0.33 = POS_HOLD, else STABILIZE.
-        sw_tag = "[bold cyan]HIGH[/bold cyan]" if s.rc_poshold > 0.33 else \
-                 ("MID" if s.rc_poshold >= -0.33 else "LOW")
-        grid.add_row("", "", f"PosHld: {s.rc_poshold:+5.3f} {sw_tag}")
+                 f"Pitch: {s.rc_pitch:+5.3f}",
+                 f"PosHld:  {poshold}")
+    grid.add_row("", "",
+                 f"Yaw:   {s.rc_yaw:+5.3f}",
+                 f"StrnCal: {strn_cal}")
+
+    mode_grid = Table.grid(padding=(0, 2))
+    mode_grid.add_column()
+    mode_grid.add_row(_sysid_line(s))
 
     imu_grid = Table.grid(padding=(0, 2))
     imu_grid.add_column(min_width=20)
@@ -122,6 +160,7 @@ def build_telemetry_panel(s: TelState) -> Panel:
     from rich.columns import Columns
     body = Table.grid()
     body.add_row(grid)
+    body.add_row(Panel(mode_grid, title="SysId", border_style="dim"))
     body.add_row(Panel(imu_grid, title="IMU Status", border_style="dim"))
     body.add_row(Panel(rpm_grid, title="Motor RPM",  border_style="dim"))
     return Panel(body, title=title, border_style="blue")

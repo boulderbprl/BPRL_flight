@@ -679,7 +679,7 @@ With `-DBPRL_DEBUG`, `DebugThread` emits five CSV streams at 10 Hz over the **US
 
 | Prefix | Content |
 |---|---|
-| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD), active_controller (`AttCtrl`: 0=PID, 1=INDI, 2=PID_PI, 3=PID_JERK, 4=JINDI), poshold_sw (raw switch value) |
+| `$TEL` | time_ms, roll°, pitch°, yaw°, p, q, r, thr, rc_roll, rc_pitch, rc_yaw, armed, rpm×4, imu_valid×3, can_valid, can_quat_hz, can_rate_hz, flight_mode (0=STABILIZE, 1=ALT_HOLD, 2=POS_HOLD), active_controller (`AttCtrl`: 0=PID, 1=INDI, 2=PID_PI, 3=PID_JERK, 4=JINDI), poshold_sw (raw switch value), ctrl_sel_sw (raw), strain_cal_sw, sysid_ch (-1 = disabled), sysid_sw, sysid_state (0=IDLE 1=RUNNING 2=DONE 3=ABORTED), sysid_axis (0=NONE 1=ROLL 2=PITCH 3=YAW 4=HEAVE), sysid_t (s), sysid_f (Hz) |
 | `$EKFL` | time_ms, primary_lane, then 4×{roll°, pitch°, yaw°, p, q, r} (lanes 0–2 + IMX5 INS) |
 | `$IMU` | time_ms, then 3×{ax, ay, az, gx, gy, gz, valid} + can_p, can_q, can_r, can_valid |
 | `$POS` | time_ms, x, y, z (EKF position), u, v, w (EKF body velocity), mocap x, y, z, mocap vx, vy, vz, mocap_valid |

@@ -145,6 +145,11 @@ def _read_line_ex(ser: serial.Serial, timeout: float = 5.0):
     return None, b""
 
 
+# SysIdState / SysIdAxis (src/controllers/extras/SysId.hpp, configs/DroneConfig.hpp)
+SYSID_STATE_NAMES = ["IDLE", "RUNNING", "DONE", "ABORTED"]
+SYSID_AXIS_NAMES  = ["NONE", "ROLL", "PITCH", "YAW", "HEAVE"]
+
+
 # ── Shared telemetry state ────────────────────────────────────────────────────
 
 @dataclass
@@ -161,6 +166,15 @@ class TelState:
     rc_pitch:     float = 0.0
     rc_yaw:       float = 0.0
     rc_poshold:   Optional[float] = None  # raw pos-hold switch [-1,1]; None = firmware too old to send it
+    # Fields below are None when the firmware is too old to send them.
+    rc_ctrl_sel:  Optional[float] = None  # raw controller-select switch [-1,1]
+    strain_cal_sw: Optional[bool] = None  # strain-cal switch held
+    sysid_ch:     Optional[int]   = None  # SysIdConfig::rc_channel; -1 = sysid disabled
+    sysid_sw:     Optional[bool]  = None  # sysid switch high
+    sysid_state:  int   = 0               # SysIdState (see SYSID_STATE_NAMES)
+    sysid_axis:   int   = 0               # SysIdAxis  (see SYSID_AXIS_NAMES)
+    sysid_t:      float = 0.0             # time into current sweep, s
+    sysid_f:      float = 0.0             # instantaneous chirp frequency, Hz
     armed:        bool  = False
     rpm:          list  = field(default_factory=lambda: [0, 0, 0, 0])
     rpm_valid:    list  = field(default_factory=lambda: [False] * 4)
@@ -226,6 +240,15 @@ def parse_tel_line(line: str, state: TelState) -> bool:
         state.flight_mode = int(parts[22])
         state.active_controller = int(parts[23])
         state.rc_poshold  = float(parts[24]) if len(parts) > 24 else None
+        if len(parts) > 32:
+            state.rc_ctrl_sel   = float(parts[25])
+            state.strain_cal_sw = bool(int(parts[26]))
+            state.sysid_ch      = int(parts[27])
+            state.sysid_sw      = bool(int(parts[28]))
+            state.sysid_state   = int(parts[29])
+            state.sysid_axis    = int(parts[30])
+            state.sysid_t       = float(parts[31])
+            state.sysid_f       = float(parts[32])
         state.received_any = True
         state.usb_rx_any   = True
         state.last_rx      = time.monotonic()
