@@ -26,11 +26,12 @@
  */
 const DroneConfig kDroneConfig = {
     // .pid — AttitudePidGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, yaw_stick_gain }
+    //  — S500 ArduPilot-tuned 
     {
-        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 0.135f, 0.135f, 0.0054f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  — S500 ArduPilot-tuned (was Drone1's 0.08/0.05/0.002, filt_d 30)
-        { 0.135f, 0.135f, 0.0054f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate — S500 ArduPilot-tuned (was Drone1's 0.09/0.06/0.002, filt_d 30)
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
+        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  
+        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate 
         { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         4.0f,  // yaw_stick_gain
@@ -148,7 +149,7 @@ const DroneConfig kDroneConfig = {
     //   NODE_ID 1 (CAN 0x71) — back-right  (RR, logical 3)
     //   NODE_ID 2 (CAN 0x72) — back-left   (RL, logical 1)
     //   NODE_ID 3 (CAN 0x73) — front-left  (FL, logical 2)
-    // see Strain_CAN/Feather_Code/Feather_Code.ino's NODE_ID comment for which physical board is which.
+    // see externalMCUs/Encoder_CAN/Feather_Code/Feather_Code.ino's NODE_ID comment for which physical board is which.
     {
         true,           // has_baro
         false,           // has_can_imx5_ins

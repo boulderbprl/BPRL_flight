@@ -4,7 +4,7 @@ BPRL Encoder RPM Monitor — live display of shaft-angle encoder RPM nodes.
 
 Reads mechanical RPM + raw shaft angle from up to four Feather M4 + AS5047P
 CAN nodes (CAN 0x70 = node 0, 0x71 = node 1, 0x72 = node 2, 0x73 = node 3),
-broadcast per Strain_CAN/Feather_Code/Feather_Code.ino and decoded on the FC
+broadcast per externalMCUs/Encoder_CAN/Feather_Code/Feather_Code.ino and decoded on the FC
 by src/sensors/EncoderRPM.cpp.
 
 Works on any firmware build (no BPRL_DEBUG required).

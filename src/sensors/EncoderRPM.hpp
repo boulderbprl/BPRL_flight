@@ -5,7 +5,7 @@
 /*
  * Shaft-angle encoder RPM sensor nodes — Feather M4 CAN Express + AS5047P,
  * one node per motor (4 motors, 4 nodes), for BDShot RPM cross-validation
- * on the strain-gauge drone. See Strain_CAN/Feather_Code/Feather_Code.ino
+ * on the strain-gauge drone. See externalMCUs/Encoder_CAN/Feather_Code/Feather_Code.ino
  * for the sensor-side firmware (NODE_ID selects which CAN address a given
  * board broadcasts on).
  *

@@ -209,7 +209,7 @@ Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag refle
 
 > Works on any firmware build.
 
-Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70–0x73, up to four, one per Feather M4 + AS5047P board — see `Strain_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
+Live display of the shaft-angle encoder RPM nodes (CAN IDs 0x70–0x73, up to four, one per Feather M4 + AS5047P board — see `externalMCUs/Encoder_CAN/Feather_Code/Feather_Code.ino`'s `NODE_ID`): mechanical RPM, shaft angle, and AS5047P error flag, per node.
 
 ```bash
 python3 tools/encoder_rpm.py encoder-rpm
