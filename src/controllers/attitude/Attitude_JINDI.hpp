@@ -127,7 +127,7 @@ public:
     // Measured roll jerk after the JERK_MEAS_LPF_HZ lowpass and the
     // JERK_MEAS_HPF_HZ highpass — the value the jerk error actually uses
     // (most recent update()). Diagnostic only.
-    float roll_jerk_filt() const { return _jerk_meas_hpf; }
+    float roll_jerk_filt() const { return _roll_jerk_input; }   // LPF+HPF disabled — was _jerk_meas_hpf
 
     // Tells the live NLMS estimator whether this controller is the one
     // currently driving out_cmds (vs. running in shadow) — same mechanism

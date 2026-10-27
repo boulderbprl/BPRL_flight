@@ -12,6 +12,23 @@ static constexpr int iQ0=6, iQ1=7, iQ2=8, iQ3=9;
 static constexpr int iBax=10, iBay=11, iBaz=12;
 static constexpr int iBgx=13, iBgy=14, iBgz=15;
 
+// NED velocity and heading of one lane's state — the quantities the mocap
+// lag sums track (see STATEMGR_MOCAP_LAG_S).
+static void lane_ned_vel(const float* st, float out[3])
+{
+    float R[3][3];
+    quat_to_rot_body2ned({ st[iQ0], st[iQ1], st[iQ2], st[iQ3] }, R);
+    for (int k = 0; k < 3; ++k)
+        out[k] = R[k][0]*st[iU] + R[k][1]*st[iV] + R[k][2]*st[iW];
+}
+
+static float lane_yaw(const float* st)
+{
+    float ro, pi, ya;
+    quat_to_euler({ st[iQ0], st[iQ1], st[iQ2], st[iQ3] }, ro, pi, ya);
+    return ya;
+}
+
 /* ══════════════════════════════════════════════════════════════════════════
  * Construction / initialisation
  * ══════════════════════════════════════════════════════════════════════════ */
@@ -48,6 +65,16 @@ void StateManager::init()
     _mocap_yaw_aligned = false;
     _mocap_yaw_rad     = 0.0f;
     _yaw_reset_rad     = 0.0f;
+    for (int i = 0; i < NUM_LANES; ++i) {
+        _mocap_yaw_dpast[i] = 0.0f;
+        _lag_pos[i][0] = _lag_pos[i][1] = _lag_pos[i][2] = 0.0f;
+        _lag_vel[i][0] = _lag_vel[i][1] = _lag_vel[i][2] = 0.0f;
+        _lag_yaw[i]    = 0.0f;
+    }
+    for (int s = 0; s < MOCAP_LAG_BUF; ++s)
+        for (int i = 0; i < NUM_LANES; ++i)
+            _lag_buf[s][i] = LagSlot{};
+    _lag_head = 0;
     _blended_p    = _blended_q    = _blended_r    = 0.0f;
     _blended_x    = _blended_y    = _blended_z    = 0.0f;
     _blended_u    = _blended_v    = _blended_w    = 0.0f;
@@ -96,11 +123,16 @@ void StateManager::_reoffset_yaw_from_mocap(float mocap_yaw_rad, const Quat& raw
     _yaw_offset_q = { cosf(delta * 0.5f), 0.0f, 0.0f, sinf(delta * 0.5f) };
 }
 
-void StateManager::_align_lanes_to_mocap(float mocap_yaw_rad)
+float StateManager::_mocap_yaw_now(int lane) const
+{
+    return wrap_pi(_mocap_yaw_rad + wrap_pi(_lag_yaw[lane] - _mocap_yaw_dpast[lane]));
+}
+
+void StateManager::_align_lanes_to_mocap()
 {
     const float yaw_before = yaw();
     for (int i = 0; i < NUM_LANES; ++i)
-        _lanes[i].reset_yaw(mocap_yaw_rad);
+        _lanes[i].reset_yaw(_mocap_yaw_now(i));
     _yaw_reset_rad    += wrap_pi(yaw() - yaw_before);
     _mocap_yaw_aligned = true;
 }
@@ -121,14 +153,43 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         || (can_imu.valid && (now_us - can_imu.quat_timestamp_us) <= STATEMGR_CAN_QUAT_STALE_US);
     for (int i = 0; i < NUM_LANES; ++i) {
         _lanes[i].set_tilt_aided(tilt_aided);
-        if (imu[i].valid)
+        if (imu[i].valid) {
+            // Add this predict()'s motion to the mocap lag sums (see
+            // STATEMGR_MOCAP_LAG_S): before/after this call only, so no
+            // measurement update ever lands in them.
+            const float* st = _lanes[i].state();
+            const float pos0[3] = { st[iX], st[iY], st[iZ] };
+            float vel0[3];
+            lane_ned_vel(st, vel0);
+            const float yaw0 = lane_yaw(st);
+
             _lanes[i].predict(dt, imu[i].accel, imu[i].gyro);
+
+            float vel1[3];
+            lane_ned_vel(st, vel1);
+            for (int k = 0; k < 3; ++k) {
+                _lag_pos[i][k] += st[iX+k] - pos0[k];
+                _lag_vel[i][k] += vel1[k] - vel0[k];
+            }
+            _lag_yaw[i] = wrap_pi(_lag_yaw[i] + wrap_pi(lane_yaw(st) - yaw0));
+        }
         // A lane with no IMU behind it (e.g. imu3 on the two-IMU Orqa board)
         // is initialised but never predicts, so its state is frozen. It must
         // get no blend weight and never be picked as primary — otherwise it
         // drags every blended output toward its stale values (two live lanes
         // + one dead one scaled position, velocity and rates to 2/3).
         _lane_active[i] = _lanes[i].is_valid() && imu[i].valid;
+    }
+
+    // Push this tick's lag sums; _lag_ago(i, n) is now n ticks old.
+    _lag_head = (_lag_head + 1) % MOCAP_LAG_BUF;
+    for (int i = 0; i < NUM_LANES; ++i) {
+        LagSlot& s = _lag_buf[_lag_head][i];
+        for (int k = 0; k < 3; ++k) {
+            s.pos[k] = _lag_pos[i][k];
+            s.vel[k] = _lag_vel[i][k];
+        }
+        s.yaw = _lag_yaw[i];
     }
 
     // ── 1.5. Gravity-vector attitude + accel-bias update (gated on |a| ≈ g) ─
@@ -179,9 +240,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         _grav_window_dt = 0.0f;
     }
 
-    // Latch a fresh mocap heading until one of the two paths below uses it.
+    // Latch a fresh mocap heading until one of the two paths below uses it,
+    // with each lane's yaw sum from when it was taken so it can be carried
+    // forward to whichever tick consumes it (_mocap_yaw_now()).
     if (mocap.valid && mocap.has_new_yaw) {
         _mocap_yaw_rad     = mocap.yaw;
+        for (int i = 0; i < NUM_LANES; ++i)
+            _mocap_yaw_dpast[i] = _lag_ago(i, MOCAP_LAG_TICKS).yaw;
         _mocap_yaw_pending = true;
     }
 
@@ -216,9 +281,9 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
         // update_quaternion()'s innovation gate would otherwise reject the
         // re-anchored quaternion outright.
         if (_mocap_yaw_pending) {
-            _reoffset_yaw_from_mocap(_mocap_yaw_rad, q_meas);
+            _reoffset_yaw_from_mocap(_mocap_yaw_now(_primary), q_meas);
             if (!_mocap_yaw_aligned)
-                _align_lanes_to_mocap(_mocap_yaw_rad);
+                _align_lanes_to_mocap();
             _mocap_yaw_pending = false;
         }
 
@@ -253,10 +318,10 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // again when the link returns.
     if (_mocap_yaw_pending && !can_imu.valid) {
         if (!_mocap_yaw_aligned) {
-            _align_lanes_to_mocap(_mocap_yaw_rad);
+            _align_lanes_to_mocap();
         } else {
             for (int i = 0; i < NUM_LANES; ++i)
-                _lanes[i].update_yaw(_mocap_yaw_rad, R_MOCAP_YAW);
+                _lanes[i].update_yaw(_mocap_yaw_now(i), R_MOCAP_YAW);
         }
         _mocap_yaw_pending = false;
     }
@@ -290,17 +355,30 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // are separate MAVLink messages that need not arrive together or at the
     // same rate. Fusing update_ned_vel() off a has_new_pos-only tick would
     // re-fuse a stale mocap.vx/vy/vz into u/v on every position packet.
+    // Each sample is first carried forward by the lane's own predicted motion
+    // over its latency (lag sum now − lag sum then): STATEMGR_MOCAP_LAG_S for
+    // position, STATEMGR_MOCAP_VEL_LAG_S for velocity.
     if (mocap.valid && mocap.has_new_pos) {
-        const float xyz[3] = { mocap.x, mocap.y, mocap.z };
         for (int i = 0; i < NUM_LANES; ++i) {
             if (!_lanes[i].is_valid()) continue;
+            const LagSlot& past = _lag_ago(i, MOCAP_LAG_TICKS);
+            const float xyz[3] = {
+                mocap.x + (_lag_pos[i][0] - past.pos[0]),
+                mocap.y + (_lag_pos[i][1] - past.pos[1]),
+                mocap.z + (_lag_pos[i][2] - past.pos[2])
+            };
             _lanes[i].update_position(xyz, R_MOCAP_POS);
         }
     }
     if (mocap.valid && mocap.has_new_vel) {
-        const float vel[3] = { mocap.vx, mocap.vy, mocap.vz };
         for (int i = 0; i < NUM_LANES; ++i) {
             if (!_lanes[i].is_valid()) continue;
+            const LagSlot& past = _lag_ago(i, MOCAP_VEL_LAG_TICKS);
+            const float vel[3] = {
+                mocap.vx + (_lag_vel[i][0] - past.vel[0]),
+                mocap.vy + (_lag_vel[i][1] - past.vel[1]),
+                mocap.vz + (_lag_vel[i][2] - past.vel[2])
+            };
             _lanes[i].update_ned_vel(vel, R_MOCAP_VEL);
         }
     }

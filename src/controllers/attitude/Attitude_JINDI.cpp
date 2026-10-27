@@ -74,23 +74,25 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
     // battery. roll_jerk_input/jerk_cmd_roll stay unfiltered/as-filtered-
     // above for logging; only this error, which actually drives torque,
     // gets the notch.
-    // Measured jerk lowpassed at JERK_MEAS_LPF_HZ (own filter state — see header).
-    _jerk_meas_lpf = lowpass(_roll_jerk_input, _jerk_meas_lpf, lowpass_alpha(JERK_MEAS_LPF_HZ, NLMS_DT_S));
+    // Measured jerk lowpassed at JERK_MEAS_LPF_HZ (own filter state — see header) — disabled.
+    // _jerk_meas_lpf = lowpass(_roll_jerk_input, _jerk_meas_lpf, lowpass_alpha(JERK_MEAS_LPF_HZ, NLMS_DT_S));
 
-    // Then a 1st-order highpass at JERK_MEAS_HPF_HZ (see header):
+    // Then a 1st-order highpass at JERK_MEAS_HPF_HZ (see header) — disabled.
     // y[k] = a·(y[k-1] + x[k] − x[k-1]),  a = 1 / (1 + 2π·fc·dt).
     // First sample after a reset seeds x[k-1] = x[k] so there's no startup step.
-    if (!_jerk_meas_hpf_valid) {
-        _jerk_meas_hpf_prev_in = _jerk_meas_lpf;
-        _jerk_meas_hpf         = 0.0f;
-        _jerk_meas_hpf_valid   = true;
-    }
-    {
-        const float a = 1.0f / (1.0f + 6.2831853f * JERK_MEAS_HPF_HZ * NLMS_DT_S);
-        _jerk_meas_hpf         = a * (_jerk_meas_hpf + _jerk_meas_lpf - _jerk_meas_hpf_prev_in);
-        _jerk_meas_hpf_prev_in = _jerk_meas_lpf;
-    }
-    const float roll_jerk_filt = _jerk_meas_hpf;
+    // if (!_jerk_meas_hpf_valid) {
+    //     _jerk_meas_hpf_prev_in = _jerk_meas_lpf;
+    //     _jerk_meas_hpf         = 0.0f;
+    //     _jerk_meas_hpf_valid   = true;
+    // }
+    // {
+    //     const float a = 1.0f / (1.0f + 6.2831853f * JERK_MEAS_HPF_HZ * NLMS_DT_S);
+    //     _jerk_meas_hpf         = a * (_jerk_meas_hpf + _jerk_meas_lpf - _jerk_meas_hpf_prev_in);
+    //     _jerk_meas_hpf_prev_in = _jerk_meas_lpf;
+    // }
+    // const float roll_jerk_filt = _jerk_meas_hpf;
+    // const float roll_jerk_filt = _jerk_meas_lpf;
+    const float roll_jerk_filt = _roll_jerk_input;
 
     const float jerk_err_raw = _jerk_cmd_roll - roll_jerk_filt;
     // const float jerk_err = notch_apply(jerk_err_raw, _jerk_err_notch_state, _jerk_err_notch_coeffs);
@@ -98,7 +100,7 @@ void AttitudeJINDI::update(const float euler[3], const float state_full[],
     // _jerk_err_lpf = lowpass(jerk_err_raw, _jerk_err_lpf, lowpass_alpha(JERK_ERR_LPF_HZ, NLMS_DT_S));
     // const float jerk_err = _jerk_err_lpf;
     const float jerk_err = jerk_err_raw;
-    _tau_jerk_roll = _tau_cmd_jerk_prev_roll + (_g1_roll / _h_roll) * jerk_err * 0.13;
+    _tau_jerk_roll = _tau_cmd_jerk_prev_roll + (_g1_roll / _h_roll) * jerk_err * 0.15;
     // Clamp to the same physical torque limit normalize_torque() divides by
     // — a persistent jerk_cmd/roll_jerk bias would otherwise integrate
     // without bound, and this keeps the jerk path's contribution to the

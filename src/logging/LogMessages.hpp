@@ -129,10 +129,14 @@ struct __attribute__((packed)) LogMsgJKFT {
     uint64_t time_us;
     float   JerkZ;    // m/s^3, raw fit output
     float   Pdd;      // rad/s^3, per-channel-bias-corrected (see JerkFit.hpp::estimate_jerk()'s strain_bias param)
+    // Strain-rate inputs behind Pdd, as floats so UAV Log Viewer shows them
+    // (it doesn't list STRT, the int16 copy of the raw channels):
+    float   s0, s1, s2, s3; // raw strain-rate channels [counts] — same values as STRT.S0..S3
+    float   sr, sl;         // fit inputs: bias-corrected pair averages, sr = ((S0-b0)+(S1-b1))/2, sl = ((S2-b2)+(S3-b3))/2 [counts]
     uint8_t valid;    // 1 once at least one strain rate CAN frame has arrived
     uint8_t cal_active; // 1 while the channel-6 strain-bias-cal switch is held — see radio_strain_cal() / ControlThread's calibration block
 };
-// Format: "QffBB"
+// Format: "QffffffffBB"
 
 struct __attribute__((packed)) LogMsgIMU {
     uint64_t time_us;
@@ -418,8 +422,8 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_JKFT,
       "JKFT",
-      "QffBB",
-      "TimeUS,JerkZ,Pdd,Valid,CalAct",
+      "QffffffffBB",
+      "TimeUS,JerkZ,Pdd,S0,S1,S2,S3,SR,SL,Valid,CalAct",
       sizeof(LogMsgJKFT) },
 
     { LOG_MSG_IMU1,

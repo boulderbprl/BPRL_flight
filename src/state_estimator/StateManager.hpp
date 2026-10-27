@@ -49,6 +49,37 @@
 #define STATEMGR_CAN_QUAT_STALE_US   50000   // 50 ms (~10x the ~200Hz nominal quat period)
 #define STATEMGR_CAN_RATES_STALE_US  50000   // 50 ms (~5x the ~100Hz nominal rates period)
 
+// Mocap end-to-end latency (s): camera exposure → bridge → radio → MAVLink
+// poll → ControlThread tick. Measured 30–60 ms on this setup. The ArduPilot
+// equivalent is VISO_DELAY_MS. STATEMGR_MOCAP_LAG_S applies to position and
+// yaw (VISION_POSITION_ESTIMATE); velocity (VISION_SPEED_ESTIMATE) has its
+// own STATEMGR_MOCAP_VEL_LAG_S below. Both are limited to 0–250 ms.
+//
+// EKF3 handles this by running its whole filter on a "fusion time horizon"
+// delayed by the sensor lag, with a separate output predictor carrying the
+// state forward to now. Here the lanes stay at the current time instead:
+// each lane keeps a running sum of the motion its IMU prediction step
+// produced (NED position, NED velocity, yaw), with one entry per tick for
+// the last STATEMGR_MOCAP_LAG_S kept in a ring buffer. A mocap sample is moved forward by the
+// motion predicted since it was taken (sum now − sum STATEMGR_MOCAP_LAG_S
+// ago) and then fused as a measurement of the current state. Measurement
+// updates (mocap, IMX5, gravity, baro) never enter the sums, so a
+// correction is not counted again by the next mocap sample — the reason
+// EKF3 adds each correction to its whole output buffer. For the state
+// estimate itself this gives the same result as fusing at the delayed
+// horizon, to first order. The innovation gate and Kalman gain still use
+// the current covariance.
+// 0 disables the compensation (samples are fused as if current).
+#define STATEMGR_MOCAP_LAG_S       0.040f
+
+// Mocap velocity latency (s). Longer than STATEMGR_MOCAP_LAG_S because the
+// bridge (drone_position_hold position_publisher.py) makes velocity by
+// finite-differencing position and smoothing it with an EMA (alpha 0.3),
+// which adds ~(1-alpha)/alpha + 0.5 ≈ 2.8 mocap frames — ~25–30 ms at the
+// ~90 Hz link rate. LOG0021 (fit against EKF tilt) put velocity ~25–37 ms
+// behind position. Retune if the bridge's velocity filter or rate changes.
+#define STATEMGR_MOCAP_VEL_LAG_S   0.065f
+
 // Motor vibration notch — tracks the fundamental rotation frequency (Hz)
 // derived from average gated motor RPM, applied to p/q/r before the
 // STATEMGR_LP_PQ_HZ/STATEMGR_LP_R_HZ lowpass (matches ArduPilot's harmonic
@@ -242,14 +273,45 @@ private:
     //     least once. Never cleared: after a mocap dropout the lanes keep
     //     that alignment and simply stop being corrected.
     //   _yaw_reset_rad: see consume_yaw_reset().
+    //   _mocap_yaw_rad is the sample as received (STATEMGR_MOCAP_LAG_S old);
+    //   _mocap_yaw_dpast[] is each lane's _lag_yaw at the time it was taken,
+    //   so _mocap_yaw_now() can carry it forward to whichever tick uses it.
     bool  _mocap_yaw_pending;
     bool  _mocap_yaw_aligned;
     float _mocap_yaw_rad;
+    float _mocap_yaw_dpast[NUM_LANES];
     float _yaw_reset_rad;
 
-    // Snap every lane's yaw to mocap_yaw_rad (EKF::reset_yaw()) and record
-    // the step the primary lane took in _yaw_reset_rad.
-    void _align_lanes_to_mocap(float mocap_yaw_rad);
+    // ── Mocap lag compensation — see STATEMGR_MOCAP_LAG_S ─────────────────
+    static_assert(STATEMGR_MOCAP_LAG_S >= 0.0f && STATEMGR_MOCAP_LAG_S <= 0.25f,
+                  "STATEMGR_MOCAP_LAG_S out of range (0-250 ms, as VISO_DELAY_MS)");
+    static_assert(STATEMGR_MOCAP_VEL_LAG_S >= 0.0f && STATEMGR_MOCAP_VEL_LAG_S <= 0.25f,
+                  "STATEMGR_MOCAP_VEL_LAG_S out of range (0-250 ms, as VISO_DELAY_MS)");
+    static constexpr int MOCAP_LAG_TICKS     = static_cast<int>(STATEMGR_MOCAP_LAG_S / CONTROL_DT_S + 0.5f);
+    static constexpr int MOCAP_VEL_LAG_TICKS = static_cast<int>(STATEMGR_MOCAP_VEL_LAG_S / CONTROL_DT_S + 0.5f);
+    static constexpr int MOCAP_LAG_BUF       = (MOCAP_LAG_TICKS > MOCAP_VEL_LAG_TICKS ? MOCAP_LAG_TICKS : MOCAP_VEL_LAG_TICKS) + 1;
+
+    // Running sums of the motion each lane's predict() has produced since
+    // init(): NED position, NED velocity, and yaw (wrapped to ±π).
+    float _lag_pos[NUM_LANES][3];
+    float _lag_vel[NUM_LANES][3];
+    float _lag_yaw[NUM_LANES];
+
+    // Those sums, one entry per tick, MOCAP_LAG_BUF - 1 ticks deep (the
+    // longer of the two lags). After the push in update() step 1,
+    // _lag_buf[_lag_head] is this tick; _lag_ago(lane, n) is n ticks ago.
+    struct LagSlot { float pos[3]; float vel[3]; float yaw; };
+    LagSlot _lag_buf[MOCAP_LAG_BUF][NUM_LANES];
+    int     _lag_head;
+    const LagSlot& _lag_ago(int lane, int ticks) const { return _lag_buf[(_lag_head - ticks + MOCAP_LAG_BUF) % MOCAP_LAG_BUF][lane]; }
+
+    // Latched mocap yaw carried forward to the current tick for `lane`.
+    float _mocap_yaw_now(int lane) const;
+
+    // Snap every lane's yaw to the latched mocap heading (EKF::reset_yaw(),
+    // per lane via _mocap_yaw_now()) and record the step the primary lane
+    // took in _yaw_reset_rad.
+    void _align_lanes_to_mocap();
 
     // Recompute _yaw_offset_q so that rotating `raw_q` (the latest raw IMX5
     // quaternion, pre-offset) by it yields a fused yaw equal to

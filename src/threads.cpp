@@ -2255,6 +2255,13 @@ static THD_FUNCTION(LogThread, arg)
             msg.time_us   = t_us;
             msg.JerkZ     = jerk.z_jerk;
             msg.Pdd       = jerk.roll_jerk;
+            msg.s0        = (float)strain.val[0];
+            msg.s1        = (float)strain.val[1];
+            msg.s2        = (float)strain.val[2];
+            msg.s3        = (float)strain.val[3];
+            // Same pair averages estimate_jerk() feeds its fit (JerkFit.hpp).
+            msg.sr        = (((float)strain.val[0] - strain_bias[0]) + ((float)strain.val[1] - strain_bias[1])) * 0.5f;
+            msg.sl        = (((float)strain.val[2] - strain_bias[2]) + ((float)strain.val[3] - strain_bias[3])) * 0.5f;
             msg.valid     = (uint8_t)strain.valid;
             msg.cal_active = (uint8_t)strain_cal_active;
             logger.write(LOG_MSG_JKFT, msg);

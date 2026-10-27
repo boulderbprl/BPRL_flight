@@ -18,7 +18,7 @@ const DroneConfig kDroneConfig = {
     {
         { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
-        { 0.08f, 0.05f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
+        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
         { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
@@ -52,7 +52,7 @@ const DroneConfig kDroneConfig = {
     {
         { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 10.0f,  0.50f, 0.25f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate P=7.0 was stable, and performed batter than base PID
+        { 10.5f,  0.50f, 0.25f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate P=7.0 was stable, and performed batter than base PID
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
@@ -92,10 +92,10 @@ const DroneConfig kDroneConfig = {
     // motors/props and similar size. The limit is mocap latency, not the
     // airframe: see Drone3's .pos comment before raising these.
     {
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
-        { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 0.7f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
+        { 0.7f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
+        { 4.0f, 0.6f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 4.0f, 0.6f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
     },
    
     // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
