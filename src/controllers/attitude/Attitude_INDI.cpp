@@ -71,7 +71,10 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
     // once every NLMS_DECIMATION ticks — see the comment on NLMS_DECIMATION
     // in Attitude_INDI.hpp and src/controllers/README.md's AttitudeINDI
     // "Live G(x) adaptation" section.
-    if (++_nlms_tick_count >= NLMS_DECIMATION) {
+    if (!_sensors_ok) {
+        _nlms_initialized = false;
+        _nlms_tick_count  = 0;
+    } else if (++_nlms_tick_count >= NLMS_DECIMATION) {
         _nlms_tick_count = 0;
         _nlms_update_axis(current_torque[0], p_dot_meas, _g1_roll, _g1_seed_roll,
                            _prev_tau[0], _prev_omegadot[0]);
@@ -124,6 +127,14 @@ void AttitudeINDI::reset_all()
     _prev_omegadot[1] = 0.0f;
     _nlms_initialized   = false;
     _nlms_tick_count    = 0;
+}
+
+void AttitudeINDI::prepare_handover()
+{
+    _roll_att.set_integrator(0.0f);  _pitch_att.set_integrator(0.0f);
+    _roll_rate.set_integrator(0.0f); _pitch_rate.set_integrator(0.0f);
+    _yaw_rate.set_integrator(0.0f);  _yaw_hold.set_integrator(0.0f);
+    _yaw_target_valid = false;
 }
 
 // One decimated NLMS update step for a single axis — see the class-level

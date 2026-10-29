@@ -106,7 +106,19 @@ A controller is built into the list only if one of `ControllersConfig::switch_po
 
 Each switch position maps to whichever list index its `AttCtrl` resolved to; the same controller may sit on more than one position. `set_active_controller()` runs every tick from the `ctrl_select` switch (`radio_switch_position()`, 0/1/2).
 
-Handover on the switch edge into a controller: PID and PID+PI are reset (they aren't anchored to measured torque, so their shadow integrators may have drifted); PIDJerk calls `prepare_handover()`, which resets its loops and seeds the roll accel integrator with the measured roll torque; JINDI resets its jerk path (`reset_jerk_path()`). INDI needs nothing — it is anchored to `current_torque` every tick.
+Handover on the switch edge into a controller: PID seeds its rate integrators so its output matches what was flying (`AttitudePID::prepare_handover()`, clamped to `imax`); PID+PI is reset (neither is anchored to measured torque, so their shadow integrators may have drifted); PIDJerk calls `prepare_handover()`, which resets its loops and seeds the roll accel integrator with the measured roll torque; JINDI resets its jerk path (`reset_jerk_path()`). INDI clears its outer-loop integrators (`AttitudeINDI::prepare_handover()`); its torque law needs nothing, since it is anchored to `current_torque` every tick.
+
+Every controller change blends rather than steps: `out = w·new + (1−w)·(old + offset)`, `w` ramping 0 → 1 over 50 ms into PID or 300 ms into anything else (`BLEND_TO_PID_TICKS` / `BLEND_TO_OTHER_TICKS`). `offset` carries whatever an interrupted blend was still adding, so switching again mid-blend is continuous too.
+
+**INDI sensor fallback.** ControlThread passes the worst health of INDI's feedback sensors to `set_indi_sensor_health()` every tick: encoder RPM (`EncoderRpmMonitor`, `src/sensors/EncoderRPM.hpp`), plus the strain gauge array where `SensorsConfig::indi_requires_strain` is set. The health levels are `SensorHealth` (`src/sensors/SensorHealth.hpp`):
+
+| Health | Meaning | INDI |
+|---|---|---|
+| GOOD | live data | flies |
+| HOLDING | hiccup under 50 ms; last value held | keeps flying, NLMS paused |
+| BAD | outage over 50 ms, or plainly wrong data | blends out to PID |
+
+INDI comes back by itself once health has been out of BAD for 0.5 s (`INDI_RECOVER_TICKS`). More than 3 BAD onsets within 2 s locks it out until the switch is moved off INDI or the vehicle disarms. All of this is logged in `INDH`: sensor health, per-motor encoder state and fault bits, fallback/lockout, trip count, blend weight and source, and the motor-model RPM residual.
 
 Only the flying controller gets the mixer's real saturation flags (`set_mixer_limits()`); shadow controllers see "not limited".
 

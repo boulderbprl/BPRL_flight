@@ -4,26 +4,37 @@ All peripheral drivers live in `src/coms/`. Register CAN devices and I2C devices
 
 ---
 
-## CAN — FDCAN1 (`CAN.hpp/.cpp`)
+## CAN — FDCAN1 + FDCAN2 (`CAN.hpp/.cpp`)
 
 **Clock:** PLL2Q = 80 MHz → 1 Mbit/s (BRP=5, TSEG1=13, TSEG2=2, 87.5% sample point)
 
 Classical CAN, standard 11-bit IDs, RxFIFO0 accept-all filter (16 elements, overwrite-on-full).
 
-This is a **direct register-level FDCAN1 driver**, not ChibiOS's `HAL_USE_CAN` (`HAL_USE_CAN` is `FALSE` in `cfg/halconf.h`). That driver's `canStart()` never programs `RXF0C` — the register that gives RxFIFO0 an actual address/size in message RAM — so on STM32H7 it silently receives nothing forever: frames get ACKed on the wire (no bus errors, looks perfectly healthy) and then have nowhere to be stored. ArduPilot doesn't hit this because it has its own FDCAN driver (`AP_HAL_ChibiOS/CANFDIface.cpp`) and never goes through that ChibiOS layer either. Full writeup is in the comment at the top of `CAN.cpp`.
+### Two buses
+
+| Bus | Port | Pins (Cube) | Started when |
+|---|---|---|---|
+| `CAN_BUS_1` | CAN1 / FDCAN1 | PD1 TX, PD0 RX | always |
+| `CAN_BUS_2` | CAN2 / FDCAN2 | PB6 TX, PB12 RX | `BPRL_BOARD_HAS_CAN2` (Cube `board.h`) **and** `kDroneConfig.sensors.can2_enable` |
+
+Each instance gets its own 64-word RxFIFO0 slice of the shared message RAM (FDCAN1 words 0–63, FDCAN2 words 64–127) and its own IT0 vector. Both ISRs signal the same semaphore, and `CANThread` drains both FIFOs. The IMX5/IMX6 callbacks are registered on `kDroneConfig.sensors.imx5_can_bus` (1 or 2). Everything else registers on `CAN_BUS_1`. Per airframe: Drone1 has IMX5 on CAN1 with CAN2 off; Drone2 has IMX6 on CAN2 and the encoders on CAN1; Drone3 has no CAN2 port.
+
+All `CAN,*` USB commands (`status`, `diag`, `regdump`, `scan,start`) target FDCAN2 when given a `,2` suffix (e.g. `CAN,diag,2`); `tools/can_tools.py --bus 2 <cmd>` does that for you. `HW,CANBUS2` is only reported while FDCAN2 is running.
+
+This is a **direct register-level FDCAN driver**, not ChibiOS's `HAL_USE_CAN` (`HAL_USE_CAN` is `FALSE` in `cfg/halconf.h`). That driver's `canStart()` never programs `RXF0C` — the register that gives RxFIFO0 an actual address/size in message RAM — so on STM32H7 it silently receives nothing forever: frames get ACKed on the wire (no bus errors, looks perfectly healthy) and then have nowhere to be stored. ArduPilot doesn't hit this because it has its own FDCAN driver (`AP_HAL_ChibiOS/CANFDIface.cpp`) and never goes through that ChibiOS layer either. Full writeup is in the comment at the top of `CAN.cpp`.
 
 ### RX path — interrupt-driven
 
-`FDCAN1_IT0` (our own `OSAL_IRQ_HANDLER(STM32_FDCAN1_IT0_HANDLER)`, not ChibiOS's) fires on new-message / message-lost / bus-off and signals a binary semaphore — no register or FIFO work happens in ISR context. `CANThread` blocks on that semaphore (`bprl_can_wait_rx()`, 200 ms timeout), drains RxFIFO0 with `bprl_can_poll()`, and calls `can_dispatch()` per frame, routing it to the registered callback in O(n) time.
+`FDCAN1_IT0`/`FDCAN2_IT0` (our own `OSAL_IRQ_HANDLER`s, not ChibiOS's) fires on new-message / message-lost / bus-off and signals a binary semaphore — no register or FIFO work happens in ISR context. `CANThread` blocks on that semaphore (`bprl_can_wait_rx()`, 200 ms timeout), drains each enabled bus's RxFIFO0 with `bprl_can_poll()`, and calls `can_dispatch()` per frame, routing it to the registered callback in O(n) time.
 
 ### Self-healing
 
-Every time `CANThread` wakes (on real traffic or the 200 ms timeout), it checks `PSR.BO` (Bus_Off) and calls `can_hw_reinit()` — a full hardware reconfigure — if set, so a transient bus fault recovers without a reflash. Two counters track this instead of it happening silently:
+Every time `CANThread` wakes (on real traffic or the 200 ms timeout), it checks each bus's `PSR.BO` (Bus_Off) and calls `can_hw_reinit(bus)` — a full hardware reconfigure — if set, so a transient bus fault recovers without a reflash. Two counters track this instead of it happening silently:
 
 - `msg_lost` — RxFIFO0 overflowed (CANThread fell behind the bus)
 - `reinit_count` — Bus_Off recoveries so far; climbing steadily means something on the bus (wiring, termination, a bad node) is causing real errors, not just this firmware
 
-Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-status` (raw PSR/ECR/RXF0S/CCCR), `can-regdump` (full FDCAN1 register dump), `can-scan` (per-ID traffic breakdown over a time window).
+Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-status` (raw PSR/ECR/RXF0S/CCCR), `can-regdump` (full FDCAN register dump), `can-scan` (per-ID traffic breakdown over a time window).
 
 ### Registered devices
 
@@ -33,7 +44,7 @@ Check both with `python3 tools/can_tools.py can-diag`. Other diagnostics: `can-s
 | `0x02` | IMX5 p + ax | int16 ÷ 1000 (rad/s), int16 ÷ 100 (m/s²) | 100 Hz |
 | `0x03` | IMX5 q + ay | same encoding | 100 Hz |
 | `0x04` | IMX5 r + az | same encoding | 100 Hz |
-| `0x70`–`0x73` | Shaft-encoder RPM nodes | One Feather M4 + AS5047P per node (`src/sensors/EncoderRPM.*`): mechanical RPM, shaft angle, error flag | per node |
+| `0x70`–`0x73` | Shaft-encoder RPM nodes | One Feather M4 + AS5047P per node (`src/sensors/EncoderRPM.*`): mechanical RPM, shaft angle, error flag | 400 Hz per node |
 | `0x69` | Strain rate sensor | 4 signed int16 values, one per arm (FR/RL/FL/RR) | 1.5 kHz — this is the override interface (`STRAIN_RATE_INTERFACE=STRAIN_RATE_CAN`, see `src/sensors/StrainRate.*`); I2C is the **default** |
 
 `imx5_can_cb()` timestamps the quaternion (`0x01`) and rate (`0x02`) frames into `g_can_imu.quat_timestamp_us`/`rates_timestamp_us` on arrival — `StateManager` uses these to age-gate and forward-propagate the measurements rather than fusing/blending them as if they arrived instantaneously (see the root README's [State Estimation](../../README.md#3-state-estimation-ekf) section).

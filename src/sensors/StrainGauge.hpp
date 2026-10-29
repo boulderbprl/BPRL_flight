@@ -1,6 +1,7 @@
 #pragma once
 #include "ch.h"
 #include "hal.h"
+#include "src/sensors/SensorHealth.hpp"
 
 /*
  * Strain gauge array sensor — the ADC "ConBoard" (nRF52840), a single I2C
@@ -73,10 +74,80 @@ struct StrainGaugeRaw {
                               // [1] = channels 18-35), counted even when the other
                               // chunk of that poll failed — diff over a window for
                               // each chunk's own receive rate (logged as STN1/STN3 Hz)
+    uint32_t last_update_us; // bprl_micros() of the last good read — for strain_gauge_health()
+    uint32_t frozen_frames;  // consecutive published frames bit-identical to the one before
 };
 
 extern mutex_t        strainGauge_mtx;
 extern StrainGaugeRaw g_strain_gauge;
+
+// Whether the strain data is usable right now, evaluated once per
+// ControlThread tick from a snapshot of g_strain_gauge. Whole-board checks
+// only for now — the per-channel ones are in the TODO below.
+//
+//   GOOD     a frame within STRAIN_GAUGE_FRESH_US that isn't a repeat of
+//            the frames before it.
+//   HOLDING  no frame for STRAIN_GAUGE_FRESH_US..STRAIN_GAUGE_STALE_US, or
+//            STRAIN_GAUGE_HOLD_FRAMES..STRAIN_GAUGE_FROZEN_FRAMES frames in a
+//            row bit-identical across all 36 channels — a short hiccup.
+//   BAD      no frame ever, none for more than STRAIN_GAUGE_STALE_US, or
+//            STRAIN_GAUGE_FROZEN_FRAMES identical frames in a row: the board
+//            answers I2C from its last snapshot even if its ADCs stop, and
+//            live, noisy channels never repeat exactly for that long (at
+//            400 Hz polling of a 500 Hz board a single repeat is normal).
+//
+// No recovery dwell here — that is FlightStateMachine's. Stateless.
+#define STRAIN_GAUGE_FRESH_US        7500U   // 3 missed polls at 400 Hz
+#define STRAIN_GAUGE_STALE_US        50000U  // 50 ms — the hold INDI tolerates
+#define STRAIN_GAUGE_HOLD_FRAMES     2U      // 2 repeats in a row: not live
+#define STRAIN_GAUGE_FROZEN_FRAMES   20U     // 50 ms at 400 Hz
+
+SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
+
+/*
+ * TODO — strain -> angular acceleration fit and per-channel health.
+ * Strain is only logged today; nothing here feeds a controller yet. When
+ * the fit goes in (in these StrainGauge files):
+ *
+ *  1. Fit. p_dot/q_dot = sum over the ~30 good channels of weight[i] x
+ *     data[i] (+ bias), weights fitted in MATLAB (strain cal pipeline) and
+ *     imported as a static table. Channels left out of the fit get weight 0.
+ *     Applied every published frame: ~30 multiply-adds per axis, nothing.
+ *     Keep the result's delay matched to the RPM -> torque path INDI
+ *     differences it against (~10 ms target).
+ *
+ *  2. Per-channel freeze. A channel whose (max - min) over a 50 ms window
+ *     (20 frames) is <= 1 count, two windows in a row (100 ms), is frozen.
+ *     Two compares per channel per frame, plus a reset every 20 frames.
+ *     Catches a channel stuck flickering between two values too, which
+ *     comparing consecutive 50 ms averages would miss. Only channels with a
+ *     non-zero weight need checking.
+ *
+ *  3. Railed channel. |data[i]| >= ~32700 (the +/-3.2767 mV full scale) is
+ *     saturated — treat it like frozen, since it also stops changing.
+ *
+ *  4. Spike on one channel. Clamp each channel's frame-to-frame step: a
+ *     step larger than anything the arm can physically do holds the
+ *     previous value for that frame. No added delay (a median-of-3 would
+ *     cost 2.5 ms at 400 Hz). The board's 100 Hz low-pass already softens
+ *     spikes; this only catches gross ones.
+ *
+ *  5. What a bad channel does. For now: any weighted channel frozen,
+ *     railed or repeatedly clamped -> strain_gauge_health() returns BAD, so
+ *     INDI falls back to PID — refit with fewer channels in MATLAB rather
+ *     than fly a fit missing a term. Dropout tolerance (re-solved weight
+ *     sets per dropped channel, or rescaling the rest) is out of scope; note
+ *     that just zeroing a weight shifts the estimate by weight x value, and
+ *     channels on one arm are strongly correlated.
+ *
+ *  6. Auto-zero. strain_gauge_poll() re-zeroes the board ('Z') on every
+ *     reconnect. Mid-flight that zeroes under load and biases every channel
+ *     — block it while armed (keep the frames BAD until disarm instead).
+ *
+ *  7. Chunk skew. Channels 0-17 and 18-35 of one frame can come from
+ *     adjacent 2 ms board snapshots (see Timing above) — worth knowing when
+ *     fitting weights across both halves.
+ */
 
 // Call after i2c_drv_init() in main.cpp. Registers the I2C poll function
 // for the sensor at 0x09. Do not also call strain_rate_init() — see the

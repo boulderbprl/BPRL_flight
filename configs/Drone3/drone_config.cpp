@@ -160,10 +160,10 @@ const DroneConfig kDroneConfig = {
     // Extra stage off on this airframe (2nd-order only).
     { 20.0f, 0.0f },
 
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU. Mocap over the MAVLink radio (UART7).
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
-    { true, false, true, false, { -1, -1, -1, -1 } },
+    { true, false, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 } },  // no CAN2 port on this board; INDI uses gyro p_dot, no strain
 
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];

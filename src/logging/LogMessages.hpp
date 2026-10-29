@@ -54,6 +54,7 @@ constexpr uint8_t LOG_MSG_JINDI = 0x1BU; // AttitudeJINDI diagnostics — roll_j
 constexpr uint8_t LOG_MSG_JPID = 0x1CU;  // AttitudePIDJerk diagnostics — angle→rate→accel PI + jerk D on roll, see Attitude_PID_Jerk.hpp (new layout, not the retired LOG_MSG_PIDJ)
 constexpr uint8_t LOG_MSG_CTUN = 0x1DU;  // AttitudePID roll/pitch tuning: angle + rate targets, errors, rate integrators (0x10 is PTUN — old logs' "CTUN" at 0x10 was today's PTUN)
 constexpr uint8_t LOG_MSG_SIDD = 0x1EU;  // system-ID sweep: state, axis, sweep time, chirp frequency + output (SysId.hpp)
+constexpr uint8_t LOG_MSG_INDH = 0x1FU;  // INDI feedback-sensor health, INDI -> PID fallback state, controller blend
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -362,6 +363,24 @@ struct __attribute__((packed)) LogMsgSTNH {  // STN1, STN3
 };
 // Format: "QhhhhhhhhhHB"   Body: 8+9×2+2+1 = 29 B   Record: 32 B
 
+/* ── INDH — INDI sensor health + fallback + controller blend ─────────────── */
+// Health values are SensorHealth (src/sensors/SensorHealth.hpp): 0 GOOD,
+// 1 HOLDING, 2 BAD. Per-motor fields are logical [FR, RL, FL, RR].
+// Gated by DroneConfig::LoggingConfig::enable.indi, like INDI.
+struct __attribute__((packed)) LogMsgINDH {
+    uint64_t time_us;
+    uint8_t  rpm_health;     // worst of the four motors
+    uint8_t  strain_health;  // GOOD when the drone doesn't use strain (indi_requires_strain false)
+    uint8_t  gate;           // bit 0: INDI fallback active (PID flying in its place), bit 1: locked out
+    uint8_t  enc_state;      // 2 bits per motor, FR in bits 0-1 ... RR in bits 6-7 (encoder drones; 0 otherwise)
+    uint32_t enc_fault;      // ENCODER_FAULT_* bits, 8 per motor, FR in bits 0-7 ... RR in bits 24-31
+    uint16_t trips;          // FlightStateMachine::indi_trips()
+    int8_t   blend_from;     // controller-list index blended away from, -1 = not blending
+    float    blend_w;        // weight on the active controller, 1 = not blending
+    float    model_res[4];   // RPM: measured (or held) - motor model, per motor — log-only until the model is measured
+};
+// Format: "QBBBBIHbfffff"   Body: 8+4+4+2+1+4+16 = 39 B   Record: 42 B
+
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
 struct LogDef {
@@ -545,6 +564,12 @@ constexpr LogDef kLogDefs[] = {
       "QBBfff",
       "TimeUS,State,Axis,T,Freq,Out",
       sizeof(LogMsgSIDD) },
+
+    { LOG_MSG_INDH,
+      "INDH",
+      "QBBBBIHbfffff",
+      "TimeUS,RpmH,StrH,Gate,EncS,EncF,Trip,From,W,RsFR,RsRL,RsFL,RsRR",
+      sizeof(LogMsgINDH) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

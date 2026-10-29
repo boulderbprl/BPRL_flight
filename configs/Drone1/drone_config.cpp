@@ -133,9 +133,9 @@ const DroneConfig kDroneConfig = {
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
     { 20.0f, 15.0f },
    
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
-    { true, true, true, false, { -1, -1, -1, -1 } },
+    { true, true, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 } },  // IMX5 on CAN1, CAN2 unused; INDI not in the switch list
     
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];

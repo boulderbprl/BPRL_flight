@@ -164,9 +164,13 @@ void strain_gauge_poll(void *ctx)
     }
 
     chMtxLock(&strainGauge_mtx);
+    const bool same = g_strain_gauge.valid &&
+                      memcmp(g_strain_gauge.data, raw, sizeof(g_strain_gauge.data)) == 0;
+    g_strain_gauge.frozen_frames  = same ? g_strain_gauge.frozen_frames + 1 : 0;
     memcpy(g_strain_gauge.data, raw, sizeof(g_strain_gauge.data));
     g_strain_gauge.valid          = true;
     g_strain_gauge.last_update_ms = bprl_millis();
+    g_strain_gauge.last_update_us = bprl_micros();
     g_strain_gauge.update_count++;
     chMtxUnlock(&strainGauge_mtx);
 }
@@ -181,6 +185,24 @@ void strain_gauge_init(void)
 void strain_gauge_calibrate(void)
 {
     s_cal_pending = true;
+}
+
+SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us)
+{
+    if (!snap.valid) return SensorHealth::BAD;
+
+    // Signed for the same reason as EncoderRpmMonitor: a frame published
+    // after the caller read now_us is fresh, not wrapped-around stale.
+    const int32_t age_us = (int32_t)(now_us - snap.last_update_us);
+    if (age_us > (int32_t)STRAIN_GAUGE_STALE_US ||
+        snap.frozen_frames >= STRAIN_GAUGE_FROZEN_FRAMES) {
+        return SensorHealth::BAD;
+    }
+    if (age_us > (int32_t)STRAIN_GAUGE_FRESH_US ||
+        snap.frozen_frames >= STRAIN_GAUGE_HOLD_FRAMES) {
+        return SensorHealth::HOLDING;
+    }
+    return SensorHealth::GOOD;
 }
 
 bool strain_gauge_reset(void)

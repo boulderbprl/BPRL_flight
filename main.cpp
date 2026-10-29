@@ -13,7 +13,7 @@
  *   src/coms/SPI.*         On-board IMU + barometer SPI bus drivers (chip set is
  *                          board-conditional — ICM-45686 x3 on Drone1/CubeOrangePlus,
  *                          ICM-20948 x2 + ICM-20602 on Drone2/CubeBlueH7).
- *   src/coms/CAN.*         FDCAN1 driver, IMX5 callback, device registration.
+ *   src/coms/CAN.*         FDCAN1/FDCAN2 driver, IMX5 callback, device registration.
  *   src/coms/I2C.*         I2C peripheral driver (I2CD1, 400 kHz).
  *   src/sensors/StrainRate.*  Strain rate sensor, CAN/I2C switchable via STRAIN_RATE_INTERFACE.
  *   src/sensors/EncoderRPM.*  Shaft-angle encoder RPM nodes, CAN 0x70-0x73 (Feather M4 + AS5047P).
@@ -24,7 +24,7 @@
  * ── Adding a CAN device ─────────────────────────────────────────────────────
  *   1. Write: void my_cb(const CANRxFrame &f, void *ctx) in src/coms/CAN.cpp
  *      or anywhere that includes src/coms/CAN.hpp.
- *   2. Add: bprl_can_register(MY_ID, my_cb, nullptr);  below.
+ *   2. Add: bprl_can_register(CAN_BUS_1, MY_ID, my_cb, nullptr);  below.
  *
  * ── Adding an I2C device ────────────────────────────────────────────────────
  *   1. Write: void my_poll(void *ctx)
@@ -162,7 +162,7 @@ int main(void)
     // exercise the strain gauge array (I2C 0x09, StrainGauge.hpp)
     // before trusting it in flight.
     motor_output_init();
-    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    can_drv_init();        // start FDCAN1 (+FDCAN2 per can2_enable), register IMX5 callbacks on imx5_can_bus
     i2c_drv_init();        // start I2CD2 at 400 kHz
     strain_gauge_init();   // register I2C 0x09 strain gauge array node
     // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
@@ -170,7 +170,7 @@ int main(void)
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud
 #else
     motor_output_init();
-    can_drv_init();        // start FDCAN1, register IMX5 callbacks
+    can_drv_init();        // start FDCAN1 (+FDCAN2 per can2_enable), register IMX5 callbacks on imx5_can_bus
     i2c_drv_init();        // start I2CD2 at 400 kHz
     strain_rate_init();    // register CAN or I2C based on STRAIN_RATE_INTERFACE
     encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes

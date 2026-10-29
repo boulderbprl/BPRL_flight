@@ -86,3 +86,13 @@ void AttitudePID::reset_all()
     _out_clipped[0] = _out_clipped[1] = _out_clipped[2] = false;
     memset(_ctun_diag, 0, sizeof(_ctun_diag));   // update() doesn't run while grounded/disarmed
 }
+
+void AttitudePID::prepare_handover(const float target[3], const float own_last[3])
+{
+    _roll_rate.set_integrator (_roll_rate.integrator()  + target[0] - own_last[0]);
+    _pitch_rate.set_integrator(_pitch_rate.integrator() + target[1] - own_last[1]);
+    _yaw_rate.set_integrator  (_yaw_rate.integrator()   + target[2] - own_last[2]);
+    _yaw_hold.reset();
+    _yaw_target_valid = false;
+    _out_clipped[0] = _out_clipped[1] = _out_clipped[2] = false;
+}

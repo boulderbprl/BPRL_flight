@@ -8,8 +8,10 @@ Usage:
     python3 tools/can_tools.py                         # default: CAN status
     python3 tools/can_tools.py can-status              # FDCAN1 protocol status and error counters
     python3 tools/can_tools.py can-scan [--duration N] # scan all CAN IDs and show Hz breakdown
+    python3 tools/can_tools.py --bus 2 can-scan        # same, on CAN2 (FDCAN2, Cube boards only)
 
 Options:
+    --bus {1,2}           Which CAN port (default 1). 2 needs can2_enable in the drone config.
     --port /dev/ttyACMx   Serial port (auto-detected if omitted)
     --baud N              Baud rate (default 115200, ignored by USB CDC)
 """
@@ -59,10 +61,16 @@ def _decode_rxf0s(rxf0s: int) -> str:
     return f"fill={fill}{'  FULL' if full else ''}{'  MSGS_LOST' if lost else ''}"
 
 
+def _cmd(base: str, args) -> bytes:
+    """Firmware picks FDCAN2 when a CAN,* command carries a ",2" suffix."""
+    suffix = ",2" if getattr(args, "bus", 1) == 2 else ""
+    return f"{base}{suffix}\r\n".encode("ascii")
+
+
 # ── CAN status ────────────────────────────────────────────────────────────────
 
-def cmd_can_status(ser, _args):
-    ser.write(b"CAN,status\r\n")
+def cmd_can_status(ser, args):
+    ser.write(_cmd("CAN,status", args))
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         line = ser.readline().decode("ascii", errors="replace").strip()
@@ -74,7 +82,7 @@ def cmd_can_status(ser, _args):
             ecr   = int(m.group(2), 16)
             rxf0s = int(m.group(3), 16)
             cccr  = int(m.group(4), 16)
-            console.print("[bold]FDCAN1 Status[/bold]")
+            console.print(f"[bold]FDCAN{args.bus} Status[/bold]")
             console.print(f"  PSR   0x{psr:08x}  →  {_decode_psr(psr)}")
             console.print(f"  ECR   0x{ecr:08x}  →  {_decode_ecr(ecr)}")
             console.print(f"  RXF0S 0x{rxf0s:08x}  →  {_decode_rxf0s(rxf0s)}")
@@ -90,8 +98,8 @@ def cmd_can_status(ser, _args):
 
 # ── CAN diag (software-side dispatch counters) ─────────────────────────────────
 
-def cmd_can_diag(ser, _args):
-    ser.write(b"CAN,diag\r\n")
+def cmd_can_diag(ser, args):
+    ser.write(_cmd("CAN,diag", args))
     deadline = time.monotonic() + 2.0
     while time.monotonic() < deadline:
         line = ser.readline().decode("ascii", errors="replace").strip()
@@ -123,8 +131,8 @@ def cmd_can_diag(ser, _args):
 
 # ── CAN regdump (raw FDCAN1 register block) ────────────────────────────────────
 
-def cmd_can_regdump(ser, _args):
-    ser.write(b"CAN,regdump\r\n")
+def cmd_can_regdump(ser, args):
+    ser.write(_cmd("CAN,regdump", args))
     deadline = time.monotonic() + 2.0
     regs = {}
     while time.monotonic() < deadline:
@@ -139,7 +147,7 @@ def cmd_can_regdump(ser, _args):
         console.print("[red]No CAN,REG response — firmware may not support this command[/red]")
         return
 
-    tbl = Table(title="FDCAN1 raw registers", show_header=True, header_style="bold")
+    tbl = Table(title=f"FDCAN{args.bus} raw registers", show_header=True, header_style="bold")
     tbl.add_column("Register")
     tbl.add_column("Value", justify="right")
     tbl.add_column("Note")
@@ -163,7 +171,7 @@ def cmd_can_scan(ser, args):
     duration = getattr(args, "duration", 1)
 
     ser.reset_input_buffer()
-    ser.write(b"CAN,scan,start\r\n")
+    ser.write(_cmd("CAN,scan,start", args))
     deadline = time.monotonic() + 2.0
     started  = False
     while time.monotonic() < deadline:
@@ -254,6 +262,8 @@ def main():
     parser = argparse.ArgumentParser(
         description="BPRL CAN tools — bus status and ID scanner")
     add_port_args(parser)
+    parser.add_argument("--bus", type=int, choices=(1, 2), default=1,
+                        help="CAN port: 1 = FDCAN1 (default), 2 = FDCAN2")
     sub = parser.add_subparsers(dest="command")
 
     sub.add_parser("can-status", help="Read FDCAN1 protocol status and error counters")

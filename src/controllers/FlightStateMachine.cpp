@@ -77,6 +77,64 @@ void FlightStateMachine::reset_all()
     _traj.cancel();   // the origin and floor are kept
 }
 
+// ── INDI sensor fallback + controller blending ───────────────────────────────
+
+void FlightStateMachine::update_indi_gate(bool want_indi)
+{
+    ++_gate_tick;
+    const bool bad   = _indi_health == SensorHealth::BAD;
+    const bool armed = _phase != FlightPhase::DISARMED;
+
+    if (!want_indi || !armed) {
+        _indi_lockout    = false;
+        _indi_trip_count = 0;
+    }
+
+    if (bad) {
+        // A trip is a BAD onset while INDI is wanted in flight — including
+        // one during the recovery dwell, which is what a flapping sensor does.
+        if (!_indi_was_bad && want_indi && armed) {
+            ++_indi_trip_total;
+            if (_indi_trip_count == INDI_MAX_TRIPS) {
+                // Ring full: the slot about to be overwritten is the oldest
+                // of the last INDI_MAX_TRIPS, so this is trip
+                // INDI_MAX_TRIPS + 1 within the window if that one is.
+                if (_gate_tick - _indi_trip_tick[_indi_trip_next] <= INDI_TRIP_WINDOW_TICKS)
+                    _indi_lockout = true;
+            } else {
+                ++_indi_trip_count;
+            }
+            _indi_trip_tick[_indi_trip_next] = _gate_tick;
+            _indi_trip_next = (_indi_trip_next + 1) % INDI_MAX_TRIPS;
+        }
+        _indi_ok_ticks = 0;
+    } else if (_indi_ok_ticks < INDI_RECOVER_TICKS) {
+        ++_indi_ok_ticks;
+    }
+    _indi_was_bad = bad;
+
+    _indi_fallback = want_indi && (_indi_lockout || _indi_ok_ticks < INDI_RECOVER_TICKS);
+}
+
+void FlightStateMachine::begin_blend(int from)
+{
+    // Nothing has flown since disarm / ground idle — nothing to blend from.
+    if (!_last_out_valid || from < 0) {
+        _blend_from = -1;
+        _blend_w    = 1.0f;
+        return;
+    }
+    // Whatever the output carried beyond `from`'s own command (a blend still
+    // in progress) rides along as a fixed offset, so the switch itself is
+    // continuous however many switches are in flight.
+    for (int a = 0; a < 3; ++a)
+        _blend_offset[a] = _last_out[a] - _last_cmds[from][a];
+    const uint32_t ticks = (_active_index == 0) ? BLEND_TO_PID_TICKS : BLEND_TO_OTHER_TICKS;
+    _blend_from = from;
+    _blend_w    = 0.0f;
+    _blend_step = 1.0f / (float)ticks;
+}
+
 // ── Attitude dispatcher ──────────────────────────────────────────────────────
 
 void FlightStateMachine::run_attitude(const float euler[],
@@ -183,9 +241,28 @@ void FlightStateMachine::run_attitude(const float euler[],
     }
 
     const float *active = cmds[_active_index];
-    out_cmds[0] = active[0];
-    out_cmds[1] = active[1];
-    out_cmds[2] = active[2];
+    if (_blend_from >= 0) {
+        _blend_w = fminf(1.0f, _blend_w + _blend_step);
+        const float *from = cmds[_blend_from];
+        for (int a = 0; a < 3; ++a)
+            out_cmds[a] = _blend_w * active[a] + (1.0f - _blend_w) * (from[a] + _blend_offset[a]);
+        if (_blend_w >= 1.0f) _blend_from = -1;
+    } else {
+        out_cmds[0] = active[0];
+        out_cmds[1] = active[1];
+        out_cmds[2] = active[2];
+    }
+
+    memcpy(_last_cmds, cmds, sizeof(cmds[0]) * _num_controllers);
+    memcpy(_last_out, out_cmds, sizeof(_last_out));
+    _last_out_valid = true;
+}
+
+void FlightStateMachine::stop_blend()
+{
+    _blend_from     = -1;
+    _blend_w        = 1.0f;
+    _last_out_valid = false;
 }
 
 // ── Mode: STABILIZE ─────────────────────────────────────────────────────────
@@ -399,6 +476,7 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
             reset_all();
         }
         _sysid.abort();
+        stop_blend();
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
         _takeoff_debounce_ticks = _landed_debounce_ticks = _spool_ticks = 0;
@@ -435,6 +513,7 @@ void FlightStateMachine::update(const float state_full[], const float euler[3],
     if (_phase == FlightPhase::GROUND_IDLE) {
         reset_all();
         _sysid.abort();
+        stop_blend();
         out_cmds[0] = out_cmds[1] = out_cmds[2] = 0.0f;
         thrust_out = 0.0f;
         return;

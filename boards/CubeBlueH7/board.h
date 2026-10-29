@@ -58,6 +58,7 @@
 /* ── FDCAN2 ─────────────────────────────────────────────────────────────────── */
 #define LINE_CAN2_TX            PAL_LINE(GPIOB, 6U)
 #define LINE_CAN2_RX            PAL_LINE(GPIOB, 12U)
+#define BPRL_BOARD_HAS_CAN2     /* CAN.cpp may start FDCAN2 (SensorsConfig::can2_enable) */
 
 /* ── SDMMC1 (SD card) ───────────────────────────────────────────────────────── */
 #define LINE_SDMMC1_D0          PAL_LINE(GPIOC, 8U)

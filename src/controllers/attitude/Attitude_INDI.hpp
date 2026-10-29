@@ -93,6 +93,19 @@ public:
     // the AttitudeController::update() interface (INDI-only, like get_diag()).
     void set_indi_active(bool active) { _indi_active = active; }
 
+    // False while INDI's RPM/strain feedback isn't live — held or bad (see
+    // FlightStateMachine::set_indi_sensor_health()): NLMS adaptation pauses
+    // and its differencing memory is dropped, so no Delta is formed across
+    // the stretch. G1_hat keeps its last value.
+    void set_sensors_ok(bool ok) { _sensors_ok = ok; }
+
+    // On the edge into INDI (FlightStateMachine): clear the outer angle /
+    // rate / yaw loops' integrators, which wound up in shadow while another
+    // controller flew, and re-capture the heading-lock target. The
+    // incremental torque law itself needs nothing — it re-anchors on
+    // current_torque every tick. Filters and NLMS state are kept.
+    void prepare_handover();
+
 private:
     PID _roll_att;
     PID _pitch_att;
@@ -129,6 +142,7 @@ private:
 
     // ── Live NLMS G(x) estimator state ──────────────────────────────────────
     bool _indi_active = false;   // set via set_indi_active(); selects _mu_pid vs _mu_indi
+    bool _sensors_ok  = true;    // set via set_sensors_ok(); false pauses NLMS
 
     // Previous decimated-step current_torque / p_dot,q_dot, for the
     // incremental NLMS regression (Delta_tau, Delta_Omega_dot). Only

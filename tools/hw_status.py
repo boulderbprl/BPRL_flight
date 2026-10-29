@@ -96,6 +96,9 @@ def cmd_hw_status(ser, _args):
         body.add_row(tbl)
         body.add_row("")
         body.add_row(f"[bold]CAN bus[/bold]  {can_txt}")
+        can2 = rows.get("CANBUS2", "")
+        if can2:   # only sent when FDCAN2 is enabled (SensorsConfig::can2_enable)
+            body.add_row(f"[bold]CAN2 bus[/bold] [dim]{can2}[/dim]")
 
         title = "Hardware Status" + ("  [yellow](stale)[/yellow]" if stale else "")
         return Panel(body, title=title, border_style="cyan")

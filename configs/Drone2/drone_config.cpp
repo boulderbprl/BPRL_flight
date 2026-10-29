@@ -142,7 +142,7 @@ const DroneConfig kDroneConfig = {
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
     { 20.0f, 15.0f },
     
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
     // shaft-encoder RPM (src/sensors/EncoderRPM.hpp) substitutes in, all 4 motors now instrumented:
     //   NODE_ID 0 (CAN 0x70) — front-right (FR, logical 0)
@@ -152,10 +152,14 @@ const DroneConfig kDroneConfig = {
     // see externalMCUs/Encoder_CAN/Feather_Code/Feather_Code.ino's NODE_ID comment for which physical board is which.
     {
         true,           // has_baro
-        false,           // has_can_imx5_ins
+        true,           // has_can_imx5_ins — IMX6 on CAN2 (see imx5_can_bus)
         false,           // has_mocap_link
         true,           // has_encoder_rpm
         { 0, 3, 1, 2 }, // encoder_motor_map — [node0..node3] -> logical motor (FR=0/RL=1/FL=2/RR=3)
+        true,           // can2_enable — IMX6 (IMX5 driver) is on the CAN2 port
+        2,              // imx5_can_bus — encoders stay on CAN1
+        true,           // indi_requires_strain — INDI falls back to PID unless the strain gauge array is healthy too
+        { -1, -1, +1, +1 }, // encoder_rpm_sign [FR, RL, FL, RR] — FR/RL spin CCW, FL/RR CW; assumes the encoders read + for CW (TODO: confirm on the bench with ENC,read)
     },
 
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
@@ -166,16 +170,16 @@ const DroneConfig kDroneConfig = {
     
     // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
     {
-        50.0f, // log_rate_hz
+        80.0f, // log_rate_hz
         { true, // att
           false, // lin
           true, // rcin
           true, // outp
           true, // rpms
           false, // strt
-          true, // imu1
-          true, // imu2
-          true, // imu3
+          false, // imu1
+          false, // imu2
+          false, // imu3
           false, // indi
           false, // baro
           false, // ptun

@@ -45,6 +45,14 @@ public:
     void yaw_frame_reset(float delta_rad) override { _yaw_target = wrap_pi(_yaw_target + delta_rad); }
     void set_mixer_limits(const MixerLimits &limits) override { _mixer_limits = limits; }
 
+    // Bumpless handover into this controller (FlightStateMachine, on the
+    // edge into PID): shift each rate integrator so this controller's output
+    // matches target[3] — what was actually flying last tick — instead of its
+    // own shadow output own_last[3]. Clamped to each PID's imax, so a wild
+    // target can only seed a bounded integrator. The heading-lock target is
+    // re-captured, as reset_all() would.
+    void prepare_handover(const float target[3], const float own_last[3]);
+
     // CTUN log, from the last update(): diag[10] = [roll_tgt, roll_err,
     // roll_rate_tgt, roll_rate_err, pitch_tgt, pitch_err, pitch_rate_tgt,
     // pitch_rate_err, roll_rate_i, pitch_rate_i]. Angles rad, rates rad/s,

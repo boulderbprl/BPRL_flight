@@ -151,6 +151,13 @@ void boardInit(void)
     palSetPadMode(GPIOD, 1U, PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
     palSetPadMode(GPIOD, 0U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
 
+    /* ── FDCAN2 (PB6=TX, PB12=RX) → AF9 ────────────────────────────────
+     * Configured unconditionally; FDCAN2 itself is only started when the
+     * airframe's SensorsConfig::can2_enable is set (see CAN.cpp). Pins
+     * match ArduPilot's CubeOrange hwdef and BPRL_balance's board.c. */
+    palSetPadMode(GPIOB, 6U,  PAL_MODE_ALTERNATE(9) | PAL_STM32_OSPEED_HIGHEST);
+    palSetPadMode(GPIOB, 12U, PAL_MODE_ALTERNATE(9) | PAL_STM32_PUPDR_PULLUP);
+
 /* ── SDMMC1 — microSD card → AF12 ──────────────────────────────────
      * D0=PC8, D1=PC9, D2=PC10, D3=PC11, CK=PC12, CMD=PD2
      * Data lines need pull-ups per SD spec.                             */

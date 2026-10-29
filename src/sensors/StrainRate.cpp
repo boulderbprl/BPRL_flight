@@ -22,7 +22,7 @@ static void strain_rate_can_cb(const CANRxFrame &f, void *ctx)
 
 void strain_rate_init(void)
 {
-    bprl_can_register(0x69, strain_rate_can_cb, nullptr);
+    bprl_can_register(CAN_BUS_1, 0x69, strain_rate_can_cb, nullptr);
 }
 
 // ── I2C implementation ────────────────────────────────────────────────────────

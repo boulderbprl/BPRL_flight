@@ -220,12 +220,38 @@ struct AngAccelFilterConfig {
 // to; -1 means the node isn't wired to a motor on this airframe. Verify
 // against the physical harness before enabling — a wrong mapping feeds one
 // motor's RPM into another motor's notch/torque estimate.
+//
+// can2_enable starts FDCAN2 (CAN2 port, PB6/PB12) alongside FDCAN1. Only the
+// Cube boards wire it out (BPRL_BOARD_HAS_CAN2 in their board.h); it's
+// ignored elsewhere. imx5_can_bus (1 or 2) is which port the IMX5/IMX6 INS
+// is listening on — 2 needs can2_enable too, or its frames never arrive.
+// Every other CAN device (encoders, CAN strain rate) stays on CAN1.
+//
+// encoder_rpm_sign[motor] is the sign each logical motor's encoder RPM must
+// have in flight, [FR, RL, FL, RR]; a node reading the other sign for 50 ms
+// while flying is BAD (EncoderRpmMonitor, ENCODER_FAULT_SIGN) — that's what
+// a NODE_ID flashed onto the wrong arm looks like. 0 = don't check. Which
+// sign a CW motor gives depends on how the encoder faces the magnet — check
+// it with ENC,read while spinning each motor on the bench.
+//
+// indi_requires_strain: INDI may only fly while its sensors are healthy;
+// otherwise FlightStateMachine flies PID in its place (see
+// FlightStateMachine::set_indi_sensor_health()). RPM health is always
+// required. With this set, the strain gauge array (StrainGauge.hpp,
+// strain_gauge_health()) must be healthy too — set it on airframes whose
+// INDI angular-acceleration feedback comes from strain. Only the CubeBlue
+// build starts the strain gauge array (main.cpp), so on any other board
+// this keeps INDI permanently on PID.
 struct SensorsConfig {
     bool    has_baro;
     bool    has_can_imx5_ins;
     bool    has_mocap_link;
     bool    has_encoder_rpm;
     int8_t  encoder_motor_map[4];   // [node0..node3] -> logical motor index, or -1
+    bool    can2_enable;
+    uint8_t imx5_can_bus;           // 1 = CAN1 (FDCAN1), 2 = CAN2 (FDCAN2)
+    bool    indi_requires_strain;   // INDI also needs strain_gauge_health() — see above
+    int8_t  encoder_rpm_sign[4];    // [FR, RL, FL, RR] expected encoder RPM sign in flight, 0 = unchecked — see above
 };
 
 // Attitude controllers FlightStateMachine can fly. The numeric values go out

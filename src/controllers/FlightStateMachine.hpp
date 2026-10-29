@@ -14,6 +14,7 @@
 #include "src/controllers/extras/Unmixer.hpp"
 #include "src/controllers/extras/SysId.hpp"
 #include "configs/DroneConfig.hpp"
+#include "src/sensors/SensorHealth.hpp"
 
 enum class FlightMode  { STABILIZE, ALT_HOLD, POS_HOLD };
 enum class FlightPhase { DISARMED, GROUND_IDLE, ACTIVE };
@@ -122,15 +123,31 @@ public:
 
     // Selects the controller configured for this position of the
     // ctrl_select switch (0/1/2 = low/mid/high, see
-    // ControllersConfig::switch_pos).
+    // ControllersConfig::switch_pos). Call every tick, after
+    // set_indi_sensor_health().
+    //
+    // Every change of controller — switch flip or INDI sensor fallback —
+    // blends: out = w·new + (1−w)·(old + offset), w ramping 0 → 1 over
+    // BLEND_TO_PID_TICKS (into PID: fast, it's the safe one) or
+    // BLEND_TO_OTHER_TICKS (into anything else). offset is whatever the
+    // output was carrying from a blend still in progress, so a switch
+    // mid-blend is continuous too. See run_attitude().
     //
     // PID (list index 0) and PID+PI aren't anchored to the real
     // current_torque measurement (unlike INDI/JINDI, which seed from it
     // every tick — see Attitude_INDI.cpp / Attitude_JINDI.cpp), so their
     // shadow-mode integrators can drift arbitrarily far from whatever's
-    // actually being commanded while another controller flies. Reset them
-    // on the edge in so they start from a clean P-only response instead of
-    // handing the motors a stale, possibly wound-up integrator.
+    // actually being commanded while another controller flies. On the edge
+    // into PID its rate integrators are seeded so its output matches what
+    // was flying (AttitudePID::prepare_handover(), clamped to imax); PID+PI
+    // is reset to a clean P-only response. INDI's own outer-loop integrators
+    // are cleared on the edge into it (AttitudeINDI::prepare_handover()).
+    //
+    // INDI sensor fallback: while the switch asks for INDI, PID flies instead
+    // whenever set_indi_sensor_health() is BAD, and INDI comes back by itself
+    // once health has been out of BAD for INDI_RECOVER_TICKS. More than
+    // INDI_MAX_TRIPS BAD onsets within INDI_TRIP_WINDOW_TICKS locks INDI out
+    // (PID flies) until the switch is moved off INDI or the vehicle disarms.
     void set_active_controller(int radio_switch_pos)
     {
         const int prev_index = _active_index;
@@ -139,27 +156,67 @@ public:
         _active_index = _slot_index[pos];
         _active_ctrl  = _slot_ctrl[pos];
 
-        if (_active_index == 0 && prev_index != 0) {
-            _pid.reset_all();
+        const bool want_indi = _indi_index >= 0 && _active_index == _indi_index;
+        update_indi_gate(want_indi);
+        if (_indi_fallback) {
+            _active_index = 0;
+            _active_ctrl  = AttCtrl::PID;
         }
-        if (_active_index == _pid_pi_index && prev_index != _pid_pi_index) {
+
+        if (_active_index == prev_index) return;
+
+        begin_blend(prev_index);
+
+        if (_active_index == 0) {
+            if (_last_out_valid) _pid.prepare_handover(_last_out, _last_cmds[0]);
+            else                 _pid.reset_all();
+        }
+        if (_active_index == _indi_index) {
+            _indi.prepare_handover();
+        }
+        if (_active_index == _pid_pi_index) {
             _pid_pi.reset_all();
         }
 
         // AttitudePIDJerk isn't anchored to current_torque either — same
         // shadow wind-up problem as PID. Its handover needs the measured
         // torque, which only run_attitude() has, so just flag it here.
-        if (_active_index == _pid_jerk_index && prev_index != _pid_jerk_index) {
+        if (_active_index == _pid_jerk_index) {
             _pid_jerk_handover_pending = true;
         }
 
         // AttitudeJINDI winds up in shadow too (jerk-path stored torque and its
         // outer integrators) — clear it on the edge into JINDI (no measured
         // torque needed, so done here directly). See reset_jerk_path().
-        if (_jindi_index >= 0 && _active_index == _jindi_index && prev_index != _jindi_index) {
+        if (_jindi_index >= 0 && _active_index == _jindi_index) {
             _jindi.reset_jerk_path();
         }
     }
+
+    // Health of INDI's feedback sensors — the worst of RPM and (where
+    // SensorsConfig::indi_requires_strain) strain — every tick before
+    // set_active_controller(). BAD drives the fallback above; anything but
+    // GOOD also pauses INDI's NLMS G1 adaptation, so held or garbage RPM
+    // can't drag the estimate, flying or in shadow.
+    void set_indi_sensor_health(SensorHealth h)
+    {
+        _indi_health = h;
+        _indi.set_sensors_ok(h == SensorHealth::GOOD);
+    }
+
+    // True while the switch asks for INDI but PID is flying because of the
+    // sensor fallback above (waiting out a BAD, the recovery dwell, or the
+    // lockout). active_ctrl()/active_index() already report PID.
+    bool indi_fallback()  const { return _indi_fallback; }
+    bool indi_locked_out() const { return _indi_lockout; }
+    SensorHealth indi_sensor_health() const { return _indi_health; }
+    uint32_t indi_trips() const { return _indi_trip_total; }  // BAD onsets while armed + INDI selected, since boot
+
+    // Controller-blend weight on active_index() (1 = fully on it, not
+    // blending) and the list index being blended away from — see
+    // set_active_controller().
+    float blend_weight()     const { return _blend_w; }
+    int   blend_from_index() const { return _blend_from; }
 
     // Resolved controller-list index actually driving out_cmds (may differ
     // from the raw radio switch position if the drone's config doesn't
@@ -177,6 +234,8 @@ public:
     SysIdDiag sysid_diag() const { return _sysid.diag(); }
 
     FlightPhase phase() const { return _phase; }
+    // ACTIVE and past the spool-up ramp: every motor should be turning.
+    bool spooled_up() const { return _phase == FlightPhase::ACTIVE && _spool_ticks >= SPOOL_UP_TICKS; }
     FlightMode  mode()  const { return _mode;  }
 
     // diag[10]: [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch]
@@ -244,13 +303,15 @@ public:
     }
 
     // Mixer saturation from the tick just output, used by the next update().
-    // The flags describe the active controller's commands, so shadow
+    // The flags describe the flying controller's commands, so shadow
     // controllers get "not limited" rather than another controller's limits.
+    // Mid-blend, whichever of the two has the larger weight gets them.
     void set_mixer_limits(const MixerLimits &limits)
     {
+        const int limited = (_blend_w < 0.5f && _blend_from >= 0) ? _blend_from : _active_index;
         for (int i = 0; i < _num_controllers; ++i)
-            _controllers[i]->set_mixer_limits(i == _active_index ? limits
-                                                                 : MixerLimits{ false, false, false });
+            _controllers[i]->set_mixer_limits(i == limited ? limits
+                                                           : MixerLimits{ false, false, false });
     }
 
 private:
@@ -289,6 +350,20 @@ private:
     // was the first value; it now flies at 0.85 — lower it back toward 0.6 if
     // that ~0.4 Hz sway returns.
     static constexpr float JINDI_POS_FB_SCALE = 0.85f;
+
+    // INDI sensor fallback gate — see set_active_controller().
+    void update_indi_gate(bool want_indi);
+    // Start blending out_cmds from list index `from` onto _active_index.
+    void begin_blend(int from);
+    // No attitude output this tick (disarmed / ground idle): drop any blend,
+    // and the next switch has nothing to blend from.
+    void stop_blend();
+
+    static constexpr uint32_t INDI_RECOVER_TICKS     = 200;  // 0.5 s @ 400 Hz out of BAD before INDI flies again
+    static constexpr uint32_t INDI_MAX_TRIPS         = 3;    // more than this many BAD onsets ...
+    static constexpr uint32_t INDI_TRIP_WINDOW_TICKS = 800;  // ... within 2 s @ 400 Hz locks INDI out
+    static constexpr uint32_t BLEND_TO_PID_TICKS     = 20;   // 50 ms @ 400 Hz
+    static constexpr uint32_t BLEND_TO_OTHER_TICKS   = 120;  // 300 ms @ 400 Hz
 
     // Yaw stick [-1, 1] → turn rate for HeadingControl [rad/s]; zero inside
     // the deadband, rescaled outside it so there is no step at its edge.
@@ -360,4 +435,25 @@ private:
     AttCtrl _slot_ctrl[3] = { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID };  // ctrl_select switch position -> AttCtrl (copy of ControllersConfig::switch_pos)
     AttCtrl _active_ctrl  = AttCtrl::PID;  // _slot_ctrl[] entry for the current switch position, see active_ctrl()
     bool _pid_jerk_handover_pending = false;  // set on the switch edge into PIDJerk, consumed in run_attitude()
+
+    // ── INDI sensor fallback — see set_active_controller() ──────────────────
+    SensorHealth _indi_health      = SensorHealth::BAD;  // see set_indi_sensor_health()
+    bool     _indi_fallback        = false;
+    bool     _indi_lockout         = false;
+    bool     _indi_was_bad         = true;
+    uint32_t _indi_ok_ticks        = 0;      // consecutive ticks out of BAD (saturates at INDI_RECOVER_TICKS)
+    uint32_t _gate_tick            = 0;      // set_active_controller() calls, for the trip window
+    uint32_t _indi_trip_tick[INDI_MAX_TRIPS] = {};  // the last INDI_MAX_TRIPS trips, ring buffer
+    uint32_t _indi_trip_count      = 0;      // trips in _indi_trip_tick[] (<= INDI_MAX_TRIPS)
+    uint32_t _indi_trip_next       = 0;      // ring write index
+    uint32_t _indi_trip_total      = 0;      // see indi_trips()
+
+    // ── Controller blend — see set_active_controller() / run_attitude() ─────
+    float _blend_w       = 1.0f;   // weight on _active_index
+    float _blend_step    = 0.0f;   // per tick
+    int   _blend_from    = -1;     // list index blended away from, -1 = none
+    float _blend_offset[3] = {};   // carried-over output offset of an interrupted blend
+    float _last_cmds[MAX_ATTITUDE_CONTROLLERS][3] = {};  // last run_attitude()'s per-controller commands
+    float _last_out[3]   = {};     // last run_attitude()'s output
+    bool  _last_out_valid = false; // false until run_attitude() has run since disarm / ground idle
 };

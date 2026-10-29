@@ -2,10 +2,10 @@
 #include "hal.h"
 
 /*
- * HAL_USE_CAN is FALSE (cfg/halconf.h) — this driver talks to FDCAN1
- * directly and owns the FDCAN1_IT0 vector itself (see CAN.cpp), so
- * ChibiOS's own CAN HAL/ISR must be compiled out to avoid a conflicting
- * definition of that interrupt vector. CANRxFrame is normally provided by
+ * HAL_USE_CAN is FALSE (cfg/halconf.h) — this driver talks to FDCAN1/2
+ * directly and owns the FDCAN1_IT0/FDCAN2_IT0 vectors itself (see CAN.cpp),
+ * so ChibiOS's own CAN HAL/ISR must be compiled out to avoid conflicting
+ * definitions of those interrupt vectors. CANRxFrame is normally provided by
  * hal_can_lld.h; redefined here with an identical layout (it mirrors the
  * real FDCAN hardware Rx element R0/R1 header words) so the rest of this
  * file's callers (can_dispatch, imx5_can_cb, ...) are unchanged.
@@ -38,11 +38,14 @@ struct CANRxFrame {
 };
 
 /*
- * CAN bus driver — FDCAN1 at 1 Mbit/s.
+ * CAN bus driver — FDCAN1 (CAN1 port) and, on boards that wire it out
+ * (BPRL_BOARD_HAS_CAN2 — the Cubes), FDCAN2 (CAN2 port). Both 1 Mbit/s.
+ * FDCAN2 only starts when kDroneConfig.sensors.can2_enable is set.
  *
  * Device registration:
  *   Call bprl_can_register() in main() before threads_start().
- *   can_drv_init() pre-registers the IMX5 IMU callbacks.
+ *   can_drv_init() pre-registers the IMX5 IMU callbacks on
+ *   kDroneConfig.sensors.imx5_can_bus.
  *
  * IMX5 frame protocol (1 Mbit/s, standard 11-bit IDs):
  *   ID 0x01  CID_INS_QUATN2B — quaternion NED→Body [W,X,Y,Z] (int16 ÷ 10000), 200 Hz
@@ -53,10 +56,13 @@ struct CANRxFrame {
  *
  * Adding devices:
  *   1. Write a callback: void my_cb(const CANRxFrame &f, void *ctx)
- *   2. In main(): bprl_can_register(MY_ID, my_cb, nullptr);
+ *   2. In main(): bprl_can_register(CAN_BUS_1, MY_ID, my_cb, nullptr);
  */
 
-#define MAX_CAN_DEVICES 8
+typedef enum { CAN_BUS_1 = 0, CAN_BUS_2 = 1 } CanBus;
+#define CAN_NUM_BUSES 2
+
+#define MAX_CAN_DEVICES 8   // per bus
 typedef void (*CANCallback)(const CANRxFrame &frame, void *ctx);
 
 struct CANDiag {
@@ -71,40 +77,48 @@ struct CANDiag {
     uint32_t reinit_count;  // times can_hw_reinit() has run (Bus_Off recoveries)
 };
 
-// Register a handler for a specific standard CAN ID.
-void bprl_can_register(uint32_t id, CANCallback cb, void *ctx);
+// Register a handler for a specific CAN ID on one bus.
+void bprl_can_register(CanBus bus, uint32_t id, CANCallback cb, void *ctx);
 
 // Dispatch one received frame to its registered handler (called by CANThread).
-void can_dispatch(const CANRxFrame &frame);
+void can_dispatch(CanBus bus, const CANRxFrame &frame);
 
 // Copy out current diagnostic counters (safe to call from any thread).
-void can_get_diag(CANDiag &out);
+void can_get_diag(CanBus bus, CANDiag &out);
 
-// Start FDCAN1 and register the built-in IMX5 callbacks.
+// Start FDCAN1 (+ FDCAN2 if enabled) and register the built-in IMX5 callbacks.
 void can_drv_init(void);
 
-// Re-run the FDCAN1 hardware init (bit timing + message RAM) without
+// True if this bus's FDCAN was started by can_drv_init().
+bool can_bus_enabled(CanBus bus);
+
+// Re-run one FDCAN's hardware init (bit timing + message RAM) without
 // touching device registrations. Safe to call repeatedly, e.g. for
 // Bus_Off recovery.
-void can_hw_reinit(void);
+void can_hw_reinit(CanBus bus);
 
-// Poll RxFIFO0 for one frame (non-blocking). Returns false if empty.
-// Called from CANThread instead of ChibiOS's canReceiveTimeout() — see the
-// comment at the top of CAN.cpp for why.
-bool bprl_can_poll(CANRxFrame &out);
+// Poll a bus's RxFIFO0 for one frame (non-blocking). Returns false if empty
+// or the bus isn't enabled. Called from CANThread instead of ChibiOS's
+// canReceiveTimeout() — see the comment at the top of CAN.cpp for why.
+bool bprl_can_poll(CanBus bus, CANRxFrame &out);
 
-// Blocks until the FDCAN1 ISR signals new-message/message-lost/bus-off, or
+// Blocks until either FDCAN ISR signals new-message/message-lost/bus-off, or
 // timeout elapses. Returns MSG_OK or MSG_TIMEOUT (both handled the same way
 // by the caller — the timeout just guarantees periodic bus-off checks).
+// One semaphore is shared by both buses; the caller drains both.
 msg_t bprl_can_wait_rx(sysinterval_t timeout);
 
-// True if FDCAN1 has entered the Bus_Off protocol state.
-bool can_is_bus_off(void);
+// True if this bus's FDCAN has entered the Bus_Off protocol state.
+bool can_is_bus_off(CanBus bus);
 
-// Read key FDCAN1 hardware registers into out[].  Returns number of entries.
+// Read key FDCAN hardware registers into out[].  Returns number of entries.
 // Format: out[i] = {name, value}.
 struct CANRegEntry { const char *name; uint32_t value; };
-int can_read_regs(CANRegEntry *out, int max);
+int can_read_regs(CanBus bus, CANRegEntry *out, int max);
+
+// Raw PSR/ECR/RXF0S/CCCR for the CAN,status USB command.
+struct CANStatusRegs { uint32_t psr, ecr, rxf0s, cccr; };
+void can_read_status(CanBus bus, CANStatusRegs &out);
 
 // ── ID scanner (diagnostic) ───────────────────────────────────────────────
 #define CAN_SCAN_MAX 48
@@ -115,8 +129,8 @@ struct CANScanEntry {
     uint8_t  is_ext;  // 1 = extended frame (29-bit EID), 0 = standard (11-bit SID)
 };
 
-// Start accumulating unique-ID counts.  Resets the buffer each call.
-void can_scan_start(void);
+// Start accumulating unique-ID counts on one bus.  Resets the buffer each call.
+void can_scan_start(CanBus bus);
 
 // Stop accumulating.
 void can_scan_stop(void);
