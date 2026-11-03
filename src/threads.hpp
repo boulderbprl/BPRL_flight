@@ -23,11 +23,12 @@ struct CANIMURaw {
     bool  has_new_quat;      // set by CAN callback; cleared after ControlThread consumes it
     uint32_t quat_timestamp_us;  // chVTGetSystemTimeX()-derived us at which has_new_quat was set
 
-    // Body-frame angular rates from IMX5 (100 Hz, CAN IDs 0x02–0x04)
+    // Body-frame angular rates from IMX5/IMX6 (CAN IDs 0x02–0x04; IMX5 100 Hz, IMX6 250 Hz),
+    // already rotated by SensorsConfig::imx5_mount_rpy_deg — as are the quaternion and accels
     float p, q, r;           // rad/s
-    // Body-frame specific force from IMX5 (100 Hz, same CAN frames as rates)
+    // Body-frame specific force from IMX5/IMX6 (same CAN frames as rates)
     float ax, ay, az;        // m/s²
-    bool  has_new_rates;     // set by CAN callback; cleared after ControlThread consumes it
+    bool  has_new_rates;     // set by CAN callback once 0x04 completes the p/q/r set; cleared after ControlThread consumes it
     uint32_t rates_timestamp_us; // chVTGetSystemTimeX()-derived us at which has_new_rates was set
 
     bool  valid;             // true while IMX5 frames are arriving
@@ -103,8 +104,14 @@ extern BaroRaw g_baro;
 // (see math.hpp), so a momentary telemetry dropout reads as the last good
 // RPM instead of a spurious near-zero. Other consumers (logging, $TEL) read
 // this instead of re-deriving RPM from raw telemetry themselves.
+//
+// g_rpm_raw[4] (same lock, same order) is what the sensor reported before
+// any of that: signed encoder RPM straight off CAN (rounded) on encoder drones (a node
+// that stops sending repeats its last frame), DShot eRPM / 7 before
+// rpm_gate() otherwise. Logged as RPMS; nothing flies on it.
 extern mutex_t esc_mtx;
 extern uint32_t g_rpm_gated[4];
+extern int32_t  g_rpm_raw[4];
 
 /* ── Motor test (always built) ───────────────────────────────────────────────
  * Set by USBCmdThread in response to "MT,<motor>,<pct>" USB commands.

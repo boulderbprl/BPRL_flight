@@ -160,10 +160,10 @@ const DroneConfig kDroneConfig = {
     // Extra stage off on this airframe (2nd-order only).
     { 20.0f, 0.0f },
 
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU. Mocap over the MAVLink radio (UART7).
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
-    { true, false, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 } },  // no CAN2 port on this board; INDI uses gyro p_dot, no strain
+    { true, false, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 }, { 0.0f, 0.0f, 0.0f }, 5e-2f },  // no CAN2 port on this board; INDI uses gyro p_dot, no strain
 
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];
@@ -171,9 +171,10 @@ const DroneConfig kDroneConfig = {
     { { AttCtrl::PID, AttCtrl::PID, AttCtrl::INDI },  // low/mid = PID, high = INDI (INDI not yet flight tested on this airframe)
       57.29578f },  // stick_max_angle_deg — 1 rad, unchanged from the old fixed mapping
 
-    // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
+    // .logging — LoggingConfig { log_rate_hz, prealloc_mb, enable } — one LogEnableConfig flag per message type
     {
         50.0f, // log_rate_hz
+        10,     // prealloc_mb — contiguous SD space reserved per log file
         { true, // att
           true, // lin
           true, // rcin

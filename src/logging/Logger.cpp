@@ -51,7 +51,7 @@ static const SDCConfig sdc_cfg = {
  * Public API
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-bool Logger::init()
+bool Logger::init(uint32_t prealloc_mb)
 {
     _head       = 0;
     _tail       = 0;
@@ -104,14 +104,17 @@ bool Logger::init()
 
     // Reserve a contiguous cluster chain now, while a stall is harmless (motors
     // aren't spinning yet), instead of letting f_write() grow the FAT chain
-    // incrementally during flight. Must run before any write — f_expand()
+    // incrementally during flight — that incremental growth (plus f_sync()'s
+    // directory/FAT write) is what was causing LogThread's periodic
+    // multi-ms-to-hundreds-of-ms stalls. Past prealloc_mb of data the file
+    // still grows normally, just with those stalls back. Must run before any write — f_expand()
     // requires an empty (objsize == 0) file. Best-effort: if the card can't
-    // offer a contiguous PRE_ALLOC_SIZE run (e.g. a fragmented/nearly-full
+    // offer a contiguous prealloc_mb run (e.g. a fragmented/nearly-full
     // card), logging still works via FatFS's normal incremental growth, just
     // with the periodic FAT-write stalls this was meant to avoid — check
     // expand_err() (surfaced via "LOG,status" over USB) rather than assuming
     // pre-allocation actually happened.
-    _expand_err = (uint8_t)f_expand(&s_file, PRE_ALLOC_SIZE, 1);
+    _expand_err = (uint8_t)f_expand(&s_file, (FSIZE_t)prealloc_mb * 1024U * 1024U, 1);
 
     _last_init_err = 5;
     _open = true;
@@ -148,7 +151,7 @@ void Logger::close()
 {
     if (!_open) return;
     flush();
-    // Shrink the file from the f_expand()-reserved PRE_ALLOC_SIZE back to the
+    // Shrink the file from the f_expand()-reserved prealloc_mb back to the
     // actual bytes written (f_truncate() cuts at the current write position,
     // which is exactly the real logged size since s_file is never seeked).
     f_truncate(&s_file);

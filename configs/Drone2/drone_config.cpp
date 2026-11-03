@@ -45,8 +45,8 @@ const DroneConfig kDroneConfig = {
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
         { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        0.0035f, // g1_seed_roll (was indi_gain_roll)
-        0.0045f, // g1_seed_pitch (was indi_gain_pitch)
+        0.043f,  // g1_seed_roll  — Ixx: RPM-torque / p_dot FRF ratio, cal flights 3+4 (was Drone1's 0.0035)
+        0.046f,  // g1_seed_pitch — Iyy, same fit (was Drone1's 0.0045).
         1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
         1.0f,    // indi_output_gain_pitch (kappa)
         0.05f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
@@ -65,8 +65,8 @@ const DroneConfig kDroneConfig = {
         { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
         { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
         { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
-        0.0035f, // g1_seed_roll
-        0.0045f, // g1_seed_pitch
+        0.043f,  // g1_seed_roll  — same as .indi
+        0.046f,  // g1_seed_pitch — same as .indi
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
         40.0f,   // h_roll — 1000/25
         1.0f,    // alpha — fully accel-path for now, not yet characterized
@@ -127,22 +127,25 @@ const DroneConfig kDroneConfig = {
     },
     
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
-    // PLACEHOLDER — these 12in motors/props haven't been on the thrust stand.
-    // motor_c0..c3 are the Strain_Drone_Integration branch's normalised-RPM
-    // cubic (C0=4.0396 C1=4.4596 C2=1.2797 C3=0.0244, center=4841 scale=2528)
-    // expanded to raw RPM, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0 — identical
-    // curve, ~4.0 N/motor at 4841 RPM. Re-fit once measured.
+    // Thrust stand (Calibration/thrust_data/StepsTestV2_2026-09-15, 2 runs,
+    // 1200-1900 us, ~15.3 V): cubic in mechanical RPM, rms 0.05 N. Scaled x1.048
+    // so the in-flight accelerometer at 2.7 kg balances (cal flights 3/4,
+    // 2026-10-30): 6.62 N/motor at the 5990 RPM hover. Pure quadratic
+    // equivalent ~1.85e-7*rpm^2 N (C_T 0.060). Reaction torque 0.0163*F_N N·m.
+    // max_thrust_n is the curve at 1950 us (pwm_max, ~8730 RPM). That makes
+    // T_MAX = 6.24 N·m, within ~4% of the measured 6.0-6.2 N·m per unit roll/pitch cmd at
+    // hover, so normalize_torque() is consistent with the mixer (was 27.49 -> 2x off).
     {
         0.3f,                                                   // arm_length_m
-        0.021051f, -6.8474e-5f, 1.78308e-7f, 1.51028e-12f,      // motor_c0, motor_c1, motor_c2, motor_c3
-        27.49f,                                                 // max_thrust_n
+        0.0628879f, -8.01856e-5f, 1.84985e-7f, 1.88320e-12f,    // motor_c0, motor_c1, motor_c2, motor_c3
+        14.7f,                                                  // max_thrust_n
     },
 
     // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
     { 20.0f, 15.0f },
     
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
     // shaft-encoder RPM (src/sensors/EncoderRPM.hpp) substitutes in, all 4 motors now instrumented:
     //   NODE_ID 0 (CAN 0x70) — front-right (FR, logical 0)
@@ -160,6 +163,8 @@ const DroneConfig kDroneConfig = {
         2,              // imx5_can_bus — encoders stay on CAN1
         true,           // indi_requires_strain — INDI falls back to PID unless the strain gauge array is healthy too
         { -1, -1, +1, +1 }, // encoder_rpm_sign [FR, RL, FL, RR] — FR/RL spin CCW, FL/RR CW; assumes the encoders read + for CW (TODO: confirm on the bench with ENC,read)
+        { 180.0f, 0.0f, -45.0f }, // imx5_mount_rpy_deg — IMX6 upside down, 45° off in yaw (IMX's own insRotation now zeroed). LOG0023's unrotated rates fit exactly this rotation.
+        1e-1f,          // imx5_r_quat — IMX6 sends quaternions at 400 Hz, 2x the IMX5's 200 Hz, so 2x Drone1's 5e-2 keeps the same fusion strength
     },
 
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
@@ -168,18 +173,19 @@ const DroneConfig kDroneConfig = {
     { { AttCtrl::PID, AttCtrl::PID, AttCtrl::PID },  // PID only — the others are not yet bench/flight tuned on this airframe
       30.0f },  // stick_max_angle_deg — ArduPilot ANGLE_MAX default (was 1 rad = 57°)
     
-    // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
+    // .logging — LoggingConfig { log_rate_hz, prealloc_mb, enable } — one LogEnableConfig flag per message type
     {
-        80.0f, // log_rate_hz
+        100.0f, // log_rate_hz
+        10,     // prealloc_mb — contiguous SD space reserved per log file
         { true, // att
           false, // lin
           true, // rcin
           true, // outp
           true, // rpms
           false, // strt
-          false, // imu1
-          false, // imu2
-          false, // imu3
+          true, // imu1
+          true, // imu2
+          true, // imu3
           false, // indi
           false, // baro
           false, // ptun
@@ -190,7 +196,7 @@ const DroneConfig kDroneConfig = {
           false, // jindi
           false, // jpid
           true, // ctun (AttitudePID tuning)
-          false }, // sidd (system-ID sweep)
+          true }, // sidd (system-ID sweep)
     },
 
     // .sysid — SysIdConfig { rc_channel, axes[4], f_start_hz, f_stop_hz, duration_s, magnitude[4], fade_in_s, fade_out_s }
@@ -201,6 +207,6 @@ const DroneConfig kDroneConfig = {
       { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
       0.1f, 10.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
       40.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
-      { 0.1f, 0.1f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
+      { 0.15f, 0.15f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
       5.0f, 2.0f },                         // fade_in_s, fade_out_s
 };

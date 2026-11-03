@@ -73,7 +73,7 @@ Files can be opened directly in [UAV Log Viewer](https://plot.ardupilot.org).
 | 0x0A | LIN  | time_us, x, y, z, u, v, w, u_dot, v_dot, w_dot |
 | 0x05 | RCIN | time_us, roll_stk, pitch_stk, yaw_stk, thr_stk, flight_mode, indi_stk, armed |
 | 0x06 | OUTP | time_us, roll_tq, pitch_tq, yaw_tq, throttle |
-| 0x07 | RPMS | time_us, rpm0–rpm3 |
+| 0x07 | RPMS | time_us, rpm0–rpm3 (raw sensor RPM before gating/health, int32; signed on encoder drones) |
 | 0x08 | STRT | time_us, s0–s3, valid |
 | 0x0B/0x0C/0x0D | IMU1/IMU2/IMU3 | time_us, ax, ay, az, gx, gy, gz, valid |
 | 0x0E | INDI | time_us, unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_roll, accel_pitch, g1_roll, g1_pitch |
@@ -108,7 +108,8 @@ bounding the data lost to an unclean power-off.
 
 **File pre-allocation**: right after the file is created (still empty —
 `f_expand()` requires `objsize == 0`), `init()` calls `f_expand(&s_file,
-PRE_ALLOC_SIZE, 1)` to reserve a contiguous 10 MB cluster chain in one shot.
+prealloc_mb MB, 1)` to reserve a contiguous cluster chain in one shot
+(`LoggingConfig::prealloc_mb` per drone in `configs/<Drone>/drone_config.cpp`, 10 MB today).
 This means `f_write()` never needs to grow the FAT chain mid-flight — that
 incremental growth, plus `f_sync()`'s own directory/FAT write, is what was
 causing periodic multi-ms-to-hundreds-of-ms `LogThread` stalls (found via

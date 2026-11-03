@@ -142,7 +142,7 @@ static_assert(MAX_SAMPLE_DT_US > SAMPLE_INTERVAL_US, "RPM_MAX too high for SAMPL
 // Frame status byte — mirrored in src/sensors/EncoderRPM.hpp.
 #define ENC_STATUS_HEALTHY  0x01  // this node's own verdict: RPM is usable
 #define ENC_STATUS_HELD     0x02  // >=1 sample since the last frame was rejected and the last good RPM used
-#define ENC_STATUS_MAGL     0x04  // last DIAAGC read: field too weak (unhealthy)
+#define ENC_STATUS_MAGL     0x04  // last DIAAGC read: field too weak (reported only)
 #define ENC_STATUS_MAGH     0x08  // last DIAAGC read: field too strong (reported only)
 #define ENC_STATUS_COF      0x10  // last DIAAGC read: CORDIC overflow (unhealthy)
 #define ENC_STATUS_SEQ_SHIFT 5    // bits 5-7: frame counter, +1 per frame (mod 8) — lets the FC count lost frames
@@ -190,7 +190,8 @@ static uint8_t    s_frame_seq       = 0;
 // when PSR.BO is set) only runs from inside endPacket()/parsePacket(), and
 // this node never calls parsePacket() (TX-only), so endPacket() is the
 // only place it's ever triggered — the very call whose result we can't
-// trust. Poll the SAME51 CAN0 peripheral's PSR.BO bit directly instead,
+// trust. Poll the SAME51 CAN1 peripheral's PSR.BO bit directly instead (the
+// Feather's on-board transceiver is on PB14/PB15, which is CAN1, not CAN0),
 // and force a full CAN.begin() if it's been stuck Bus_Off longer than the
 // library's per-call recovery should ever need.
 #define BUS_OFF_REINIT_TICKS  80   // ~200 ms of continuous Bus_Off at the 400 Hz CAN tx cadence
@@ -200,7 +201,7 @@ static uint32_t   s_bus_off_reinits = 0;
 
 static void check_can_bus_health(void)
 {
-    if (CAN0->PSR.bit.BO) {
+    if (CAN1->PSR.bit.BO) {
         s_bus_off_ticks++;
         if (s_bus_off_ticks >= BUS_OFF_REINIT_TICKS) {
             s_bus_off_reinits++;
@@ -384,12 +385,13 @@ static void update_health(bool sample_good)
         s_bad_level--;
     }
 
-    // MAGH alone is reported but not a fault: the angle is still valid with
-    // AGC at its limit, and an over-strong magnet is a bench fix, not a
-    // mid-flight failure. MAGL is what a magnet coming off the shaft looks
-    // like, so it faults straight away (and holds the counter at the fault
-    // level, so recovery still takes BAD_LEVEL_FAULT clean samples).
-    if (magnet_status() & (ENC_STATUS_MAGL | ENC_STATUS_COF)) {
+    // MAGH/MAGL are reported but not faults: the angle is still valid with
+    // AGC at either limit (all four Drone2 nodes sit at MAGL with ~3-count
+    // angle noise), and a magnet actually coming off the shaft still shows up
+    // as bad samples here and as a STALL on the FC. COF means the angle itself
+    // is invalid, so it faults straight away (and holds the counter at the
+    // fault level, so recovery still takes BAD_LEVEL_FAULT clean samples).
+    if (magnet_status() & ENC_STATUS_COF) {
         s_bad_level = BAD_LEVEL_FAULT;
     }
 
@@ -420,8 +422,38 @@ static void send_can_frame(void)
     }
 }
 
+// The core's startup.c leaves the DFLL48M in USB clock recovery mode. With no
+// USB host there's no reference, so it free-runs and drifts with temperature,
+// and it clocks CAN (GCLK1) and, through the 1 MHz GCLK5 -> DPLL0, the CPU and
+// micros(). 1 Mbit/s CAN has little clock tolerance, so run it closed-loop off
+// the on-board 32.768 kHz crystal instead (GCLK3): 1465 x 32768 Hz = 48.005 MHz,
+// within USB's +/-0.25%. Call before CAN.begin().
+#define DFLL_LOCK_TIMEOUT_LOOPS  10000000UL
+
+static void dfll_lock_to_crystal(void)
+{
+    GCLK->PCHCTRL[OSCCTRL_GCLK_ID_DFLL48].reg = GCLK_PCHCTRL_GEN(GCLK_PCHCTRL_GEN_GCLK3_Val) | GCLK_PCHCTRL_CHEN;
+    while (!(GCLK->PCHCTRL[OSCCTRL_GCLK_ID_DFLL48].reg & GCLK_PCHCTRL_CHEN)) {
+    }
+
+    OSCCTRL->DFLLMUL.reg = OSCCTRL_DFLLMUL_CSTEP(1) | OSCCTRL_DFLLMUL_FSTEP(1) | OSCCTRL_DFLLMUL_MUL(1465);
+    while (OSCCTRL->DFLLSYNC.reg & OSCCTRL_DFLLSYNC_DFLLMUL) {
+    }
+
+    OSCCTRL->DFLLCTRLB.reg = OSCCTRL_DFLLCTRLB_MODE;
+    while (OSCCTRL->DFLLSYNC.reg & OSCCTRL_DFLLSYNC_DFLLCTRLB) {
+    }
+
+    // Bounded so a failed lock still boots; the FC would then just see the old behaviour.
+    const uint32_t lock = OSCCTRL_STATUS_DFLLLCKC | OSCCTRL_STATUS_DFLLLCKF;
+    for (uint32_t i = 0; i < DFLL_LOCK_TIMEOUT_LOOPS && (OSCCTRL->STATUS.reg & lock) != lock; i++) {
+    }
+}
+
 void setup()
 {
+    dfll_lock_to_crystal();
+
     DEBUG_BEGIN(115200);
 
     pinMode(AS5047P_CS_PIN, OUTPUT);
@@ -483,6 +515,14 @@ void loop()
         DEBUG_PRINT("  agc=");
         DEBUG_PRINT(s_diaagc & 0xFF);
         DEBUG_PRINT(node_healthy() ? "  OK" : "  UNHEALTHY");
+        DEBUG_PRINT("  tec=");
+        DEBUG_PRINT(CAN1->ECR.bit.TEC);
+        DEBUG_PRINT(" rec=");
+        DEBUG_PRINT(CAN1->ECR.bit.REC);
+        DEBUG_PRINT(" lec=");
+        DEBUG_PRINT(CAN1->PSR.bit.LEC);
+        DEBUG_PRINT(" reinits=");
+        DEBUG_PRINT(s_bus_off_reinits);
         if (s_error_flag)                   { DEBUG_PRINT("  [EF]"); }
         if (s_diaagc & AS5047P_DIAAGC_MAGL) { DEBUG_PRINT("  [MAGL]"); }
         if (s_diaagc & AS5047P_DIAAGC_MAGH) { DEBUG_PRINT("  [MAGH]"); }

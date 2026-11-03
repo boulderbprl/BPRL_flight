@@ -32,7 +32,7 @@ constexpr uint8_t LOG_MSG_ATT  = 0x09U;  // angular states: attitude + rates + a
 constexpr uint8_t LOG_MSG_LIN  = 0x0AU;  // linear states: position + velocity + linear accel
 constexpr uint8_t LOG_MSG_RCIN = 0x05U;  // RC stick inputs + flight mode + arm state
 constexpr uint8_t LOG_MSG_OUTP = 0x06U;  // controller outputs entering the motor mixer
-constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor mechanical RPM from DShot GCR telemetry
+constexpr uint8_t LOG_MSG_RPMS = 0x07U;  // per-motor raw sensor RPM (signed CAN encoder, or DShot GCR), before gating/health
 constexpr uint8_t LOG_MSG_STRT = 0x08U;  // strain RATE sensor (CAN 0x69, 4 arms, in development) — not to be confused with STN1..STN4 (strain gauges)
 constexpr uint8_t LOG_MSG_IMU1 = 0x0BU;  // raw accel + gyro, IMU1 (SPI1, CS=PG1)  (board-conditional chip — ICM-45686 on Drone1/CubeOrangePlus, ICM-42688 on Drone3/Orqa, ICM-20649 on Drone2/CubeBlue) (body-frame, post-rotation, pre-EKF)
 constexpr uint8_t LOG_MSG_IMU2 = 0x0CU;  // raw accel + gyro, IMU2 (SPI4, CS=PC15) (board-conditional chip, see IMU1) (body-frame, post-rotation, pre-EKF)
@@ -107,9 +107,14 @@ struct __attribute__((packed)) LogMsgOUTP {
 };
 // Format: "Qffff"   Body: 8+4×4 = 24 B   Record: 27 B
 
+// Raw mechanical RPM per motor, before rpm_gate() and encoder health
+// processing (g_rpm_raw, threads.hpp). Encoder drones: signed, as the node
+// sent it rounded to whole RPM — a node that stops sending repeats its last frame (INDH.EncS
+// says when). DShot: eRPM ÷ 7 pole pairs, unsigned, 0 if no valid GCR frame.
+// Sampled at the log rate, timestamped at log time.
 struct __attribute__((packed)) LogMsgRPMS {
     uint64_t time_us;
-    int32_t  rpm0;   // FR  mechanical RPM (eRPM ÷ 7 pole pairs); 0 if no valid GCR frame
+    int32_t  rpm0;   // FR
     int32_t  rpm1;   // RL
     int32_t  rpm2;   // FL
     int32_t  rpm3;   // RR

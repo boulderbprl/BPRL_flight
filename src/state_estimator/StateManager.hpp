@@ -147,13 +147,9 @@ public:
     static constexpr int NUM_LANES = 3;
 
     // IMX5 / mocap / gravity measurement noise variances — tunable.
-    // IMX5 quaternion component variance — was 1e-2 (very tight/high-trust).
-    // Raised 5x to weaken CAN quaternion fusion strength, paired with the new
-    // QUAT_CHI2_GATE outlier gate added to EKF::update_quaternion() (that
-    // path previously had no chi-squared gate at all, unlike every other
-    // update_*() in EKF.cpp — a single corrupted CAN sample used to get
-    // fused with no outlier rejection).
-    static constexpr float R_QUAT      = 5e-2f;   // IMX5 quaternion component variance
+    // The IMX5/IMX6 quaternion variance is per drone (SensorsConfig::imx5_r_quat):
+    // it's a per-update variance, so its fusion strength depends on that
+    // drone's IMX quaternion rate.
     // accel gravity-vector variance (m/s²)² while disarmed/unaided (e.g. on
     // the bench) — was 0.5; doubled alongside the STATEMGR_GRAVACC_AVG_S
     // windowed average above, closer to ArduPilot DCM's deliberately slow

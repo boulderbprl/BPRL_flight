@@ -27,13 +27,14 @@
  * > 20000, or a jump of more than 1500 RPM from the last good sample
  * (accepted after 4 samples in a row agree — a real fast change). The node
  * goes unhealthy on a leaky bad-sample count — solid garbage trips it in
- * 50 ms, scattered bad samples never do — or at once on a magnet fault.
+ * 50 ms, scattered bad samples never do — or at once on a CORDIC overflow.
+ * MAGL/MAGH are reported only.
  */
 
 // Status byte bits — mirrored in Feather_Code.ino (ENC_STATUS_*).
 #define ENCODER_STATUS_HEALTHY  0x01  // the node's own verdict: RPM is usable
 #define ENCODER_STATUS_HELD     0x02  // >=1 sample since its last frame was rejected and the last good RPM used
-#define ENCODER_STATUS_MAGL     0x04  // magnet field too weak (node reports unhealthy)
+#define ENCODER_STATUS_MAGL     0x04  // magnet field too weak (reported only)
 #define ENCODER_STATUS_MAGH     0x08  // magnet field too strong (reported only)
 #define ENCODER_STATUS_COF      0x10  // AS5047P CORDIC overflow (node reports unhealthy)
 
@@ -107,13 +108,16 @@ extern EncoderRPMRaw g_encoder_rpm[ENCODER_RPM_NUM_NODES];
  * RPM. Simple placeholder: steady-state RPM linear in the mixer's motor
  * command (0..1000 -> 0..1), reached through a first-order lag.
  *
- * TODO: replace with the measured PWM -> RPM curve and motor time constant
- * for Drone2 once they are bench-tested. Until then only the *change* in the
- * model is used (the hold) and the residual is log-only — don't gate health
- * on it.
+ * Drone2 values (thrust stand + cal flights 3/4, 2026-10-30): the real curve
+ * is concave (1342 RPM at cmd 200, 5849 at 600, 8380 at 900), so through-zero
+ * linear is only right near hover — 9800 matches both the hover RPM and the
+ * local slope (~9.7 RPM per count) there. Tau is the per-motor fit, 43-58 ms;
+ * there is also ~9 ms of dead time (+~2.5 ms encoder filter) not modelled.
+ * Only the *change* in the model is used (the hold) and the residual is
+ * log-only — don't gate health on it.
  */
-#define ENCODER_MODEL_RPM_AT_FULL   18000.0f  // TODO: measured RPM at motor command 1000
-#define ENCODER_MODEL_TAU_S         0.030f    // TODO: measured motor time constant
+#define ENCODER_MODEL_RPM_AT_FULL   9800.0f   // RPM per unit motor command, matched at hover (Drone2)
+#define ENCODER_MODEL_TAU_S         0.052f    // motor time constant (Drone2, cmd -> RPM)
 
 struct EncoderNodeHealth {
     SensorHealth state;

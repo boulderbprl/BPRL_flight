@@ -242,6 +242,22 @@ struct AngAccelFilterConfig {
 // INDI angular-acceleration feedback comes from strain. Only the CubeBlue
 // build starts the strain gauge array (main.cpp), so on any other board
 // this keeps INDI permanently on PID.
+//
+// imx5_mount_rpy_deg is how the IMX5/IMX6 sensor frame sits on the airframe,
+// as roll/pitch/yaw in degrees applied in Z,Y,X order (R = Rz·Ry·Rx,
+// v_body = R·v_sensor) — the same numbers you'd otherwise enter in the IMX's
+// DID_FLASH_CONFIG.insRotation. Keep insRotation and the sensorConfig rotation
+// zero on the IMX and set it here instead: insRotation only rotates the INS
+// outputs (quaternion), never the CID_DUAL_* rates/accels, so doing it on the
+// IMX leaves the two in different frames. CAN.cpp applies it to the
+// quaternion, rates and accels alike. {0, 0, 0} = mounted aligned.
+//
+// imx5_r_quat is the EKF measurement variance for each IMX quaternion
+// component (StateManager → EKF::update_quaternion(), which also scales its
+// chi-squared outlier gate). It's per update, so the same value pulls harder
+// the faster the IMX sends quaternions — 5e-2 was set for the IMX5 at 200 Hz;
+// scale it with the rate to keep the same attitude/gyro balance (1e-1 at 400 Hz).
+// Was 1e-2 originally; raised to 5e-2 when the chi-squared gate went in.
 struct SensorsConfig {
     bool    has_baro;
     bool    has_can_imx5_ins;
@@ -252,6 +268,8 @@ struct SensorsConfig {
     uint8_t imx5_can_bus;           // 1 = CAN1 (FDCAN1), 2 = CAN2 (FDCAN2)
     bool    indi_requires_strain;   // INDI also needs strain_gauge_health() — see above
     int8_t  encoder_rpm_sign[4];    // [FR, RL, FL, RR] expected encoder RPM sign in flight, 0 = unchecked — see above
+    float   imx5_mount_rpy_deg[3];  // IMX sensor frame → body, [roll, pitch, yaw] deg, applied Z,Y,X — see above
+    float   imx5_r_quat;            // IMX quaternion component variance, per update — see above
 };
 
 // Attitude controllers FlightStateMachine can fly. The numeric values go out
@@ -295,6 +313,12 @@ struct LogEnableConfig {
 
 struct LoggingConfig {
     float           log_rate_hz;
+    // Contiguous SD space reserved up front for each log file, in MB (see
+    // Logger::init()'s f_expand()). Size it above the longest flight's data
+    // (write rate ≈ log_rate_hz × enabled record bytes) — past it, FatFS falls
+    // back to incremental FAT-chain growth and its periodic write stalls.
+    // The file is trimmed to the bytes actually written on close().
+    uint32_t        prealloc_mb;
     LogEnableConfig enable;
 };
 

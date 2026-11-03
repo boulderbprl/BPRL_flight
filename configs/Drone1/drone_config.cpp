@@ -133,9 +133,9 @@ const DroneConfig kDroneConfig = {
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
     { 20.0f, 15.0f },
    
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
-    { true, true, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 } },  // IMX5 on CAN1, CAN2 unused; INDI not in the switch list
+    { true, true, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 }, { 0.0f, 0.0f, 0.0f }, 5e-2f },  // IMX5 on CAN1 (mounted aligned, quat 200 Hz, R 5e-2 unchanged), CAN2 unused; INDI not in the switch list
     
     // .controllers — ControllersConfig { switch_pos[3], stick_max_angle_deg }
     // Controller flown at each ctrl_select switch position [low, mid, high];
@@ -143,9 +143,10 @@ const DroneConfig kDroneConfig = {
     { { AttCtrl::PID, AttCtrl::PID_JERK, AttCtrl::JINDI },  // low = PID, mid = PID_Jerk, high = JINDI (same as before the switch rework)
       57.29578f },  // stick_max_angle_deg — 1 rad, unchanged from the old fixed mapping
    
-    // .logging — LoggingConfig { log_rate_hz, enable } — one LogEnableConfig flag per message type
+    // .logging — LoggingConfig { log_rate_hz, prealloc_mb, enable } — one LogEnableConfig flag per message type
     {
         70.0f, // log_rate_hz
+        10,     // prealloc_mb — contiguous SD space reserved per log file
         { true, // att
           true, // lin
           true, // rcin

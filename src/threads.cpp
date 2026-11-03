@@ -88,6 +88,7 @@ BaroRaw   g_baro    = {};
 
 MUTEX_DECL(esc_mtx);
 uint32_t g_rpm_gated[4] = {};
+int32_t  g_rpm_raw[4]   = {};
 
 // Persistent per-motor gate state for rpm_gate() — only ControlThread (the
 // site that publishes g_rpm_gated) needs to own this.
@@ -580,13 +581,18 @@ static THD_FUNCTION(ControlThread, arg)
 #if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
         dshot_get_telemetry(sm_telem);
 #endif
+        uint32_t raw_lane[4];
         uint32_t rpm_lane[4];
         for (int lane = 0; lane < 4; lane++) {
-            const uint32_t raw = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
-            rpm_lane[lane] = rpm_gate(s_rpm_gate[lane], raw);
+            raw_lane[lane] = sm_telem[lane].valid ? sm_telem[lane].erpm / 7U : 0U;
+            rpm_lane[lane] = rpm_gate(s_rpm_gate[lane], raw_lane[lane]);
         }
         uint32_t rpm[4];
-        for (int i = 0; i < 4; i++) rpm[i] = rpm_lane[kDroneConfig.mixer.motor_map[i]];
+        int32_t  rpm_raw[4];  // what the sensor said, before rpm_gate()/health — logged as RPMS
+        for (int i = 0; i < 4; i++) {
+            rpm[i]     = rpm_lane[kDroneConfig.mixer.motor_map[i]];
+            rpm_raw[i] = (int32_t)raw_lane[kDroneConfig.mixer.motor_map[i]];
+        }
 
         // INDI feedback health — the worst of the four motors' RPM and, where
         // configured, the strain gauge array — gates INDI
@@ -631,6 +637,12 @@ static THD_FUNCTION(ControlThread, arg)
                 indi_health.enc_seq_gaps[node] = s_enc_monitor.seq_gaps(node);
                 const int8_t motor = kDroneConfig.sensors.encoder_motor_map[node];
                 if (motor < 0) continue;
+                // Signed, as the node sent it, rounded to whole RPM; a node
+                // that stops sending repeats its last frame (0 before the
+                // first). NaN logs as 0; the clamp only keeps lrintf() defined.
+                const float enc_rpm = enc_snap[node].rpm;
+                rpm_raw[motor] = (enc_snap[node].valid && enc_rpm == enc_rpm)
+                               ? (int32_t)lrintf(fminf(fmaxf(enc_rpm, -1.0e9f), 1.0e9f)) : 0;
                 const EncoderNodeHealth &h = indi_health.enc[node];
                 motor_health[motor] = h.state;
                 if (h.state != SensorHealth::BAD) {
@@ -659,6 +671,7 @@ static THD_FUNCTION(ControlThread, arg)
 
         chMtxLock(&esc_mtx);
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
+        memcpy(g_rpm_raw, rpm_raw, sizeof(g_rpm_raw));
         chMtxUnlock(&esc_mtx);
 
         // Run all EKF lanes and derive outputs.
@@ -2046,7 +2059,7 @@ static THD_FUNCTION(LogThread, arg)
     chRegSetThreadName("log");
     const LogRates *rates = static_cast<const LogRates *>(arg);
 
-    while (!logger.init()) {
+    while (!logger.init(kDroneConfig.logging.prealloc_mb)) {
         chThdSleepMilliseconds(5000);
     }
 
@@ -2114,10 +2127,10 @@ static THD_FUNCTION(LogThread, arg)
             }
         }
 
-        /* ── RPM snapshot (fault-gated, published by ControlThread) ───── */
-        uint32_t rpm_log[4];
+        /* ── RPM snapshot (raw sensor RPM, published by ControlThread) ── */
+        int32_t rpm_log[4];
         chMtxLock(&esc_mtx);
-        memcpy(rpm_log, g_rpm_gated, sizeof(rpm_log));
+        memcpy(rpm_log, g_rpm_raw, sizeof(rpm_log));
         chMtxUnlock(&esc_mtx);
 
         /* ── Barometer snapshot ───────────────────────────────────────── */
@@ -2312,14 +2325,14 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_SIDD, msg);
         }
 
-        /* ── RPMS — per-motor mechanical RPM ─────────────────────────── */
+        /* ── RPMS — per-motor raw sensor RPM ─────────────────────────── */
         if (log_en.rpms) {
             LogMsgRPMS msg = {};
             msg.time_us = t_us;
-            msg.rpm0 = (int32_t)rpm_log[0];
-            msg.rpm1 = (int32_t)rpm_log[1];
-            msg.rpm2 = (int32_t)rpm_log[2];
-            msg.rpm3 = (int32_t)rpm_log[3];
+            msg.rpm0 = rpm_log[0];
+            msg.rpm1 = rpm_log[1];
+            msg.rpm2 = rpm_log[2];
+            msg.rpm3 = rpm_log[3];
             logger.write(LOG_MSG_RPMS, msg);
         }
 
@@ -2473,7 +2486,7 @@ static THD_FUNCTION(LogThread, arg)
         if (!logger.is_ready()) {
             logger.close();
             chThdSleepMilliseconds(2000);
-            logger.init();  // internally retries sdcConnect/f_mount up to 5×
+            logger.init(kDroneConfig.logging.prealloc_mb);  // internally retries sdcConnect/f_mount up to 5×
         }
 
         TIMING_TICK_END(tid);

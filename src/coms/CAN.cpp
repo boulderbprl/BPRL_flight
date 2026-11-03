@@ -2,6 +2,8 @@
 #include "src/coms/CAN.hpp"
 #include "src/threads.hpp"
 #include "configs/DroneConfig.hpp"
+#include "src/math/math.hpp"
+#include <cmath>
 #include <cstring>
 
 /*
@@ -220,36 +222,92 @@ static inline int16_t le16s(const uint8_t *p)
     return v;
 }
 
+// IMX sensor frame → body (SensorsConfig::imx5_mount_rpy_deg), set once by
+// imx5_mount_init(). s_mount_R maps sensor-frame vectors into the body frame;
+// s_mount_q_b2s is the matching body→sensor quaternion, right-multiplied onto
+// the IMX attitude (q_ned←sensor ⊗ q_sensor←body = q_ned←body).
+static float s_mount_R[3][3]   = { {1,0,0}, {0,1,0}, {0,0,1} };
+static Quat  s_mount_q_b2s     = { 1.0f, 0.0f, 0.0f, 0.0f };
+
+static void imx5_mount_init(void)
+{
+    const float d2r = (float)M_PI / 180.0f;
+    const float *rpy = kDroneConfig.sensors.imx5_mount_rpy_deg;
+    const float cr = cosf(rpy[0] * d2r), sr = sinf(rpy[0] * d2r);
+    const float cp = cosf(rpy[1] * d2r), sp = sinf(rpy[1] * d2r);
+    const float cy = cosf(rpy[2] * d2r), sy = sinf(rpy[2] * d2r);
+
+    // R = Rz(yaw)·Ry(pitch)·Rx(roll)
+    s_mount_R[0][0] = cy*cp;  s_mount_R[0][1] = cy*sp*sr - sy*cr;  s_mount_R[0][2] = cy*sp*cr + sy*sr;
+    s_mount_R[1][0] = sy*cp;  s_mount_R[1][1] = sy*sp*sr + cy*cr;  s_mount_R[1][2] = sy*sp*cr - cy*sr;
+    s_mount_R[2][0] = -sp;    s_mount_R[2][1] = cp*sr;             s_mount_R[2][2] = cp*cr;
+
+    // Same rotation as a quaternion (qz ⊗ qy ⊗ qx), conjugated: body→sensor.
+    const float hcr = cosf(rpy[0] * d2r * 0.5f), hsr = sinf(rpy[0] * d2r * 0.5f);
+    const float hcp = cosf(rpy[1] * d2r * 0.5f), hsp = sinf(rpy[1] * d2r * 0.5f);
+    const float hcy = cosf(rpy[2] * d2r * 0.5f), hsy = sinf(rpy[2] * d2r * 0.5f);
+    const Quat q_s2b = {
+        hcy*hcp*hcr + hsy*hsp*hsr,
+        hcy*hcp*hsr - hsy*hsp*hcr,
+        hcy*hsp*hcr + hsy*hcp*hsr,
+        hsy*hcp*hcr - hcy*hsp*hsr,
+    };
+    s_mount_q_b2s = quat_conj(q_s2b);
+}
+
+static inline void mount_rotate(const float v_s[3], float v_b[3])
+{
+    for (int i = 0; i < 3; i++)
+        v_b[i] = s_mount_R[i][0]*v_s[0] + s_mount_R[i][1]*v_s[1] + s_mount_R[i][2]*v_s[2];
+}
+
 static void imx5_can_cb(const CANRxFrame &f, void *ctx)
 {
     (void)ctx;
+    // Rates/accels arrive one axis per frame (0x02 x, 0x03 y, 0x04 z, sent in
+    // that order); held here in the sensor frame until 0x04 completes the set,
+    // since the mounting rotation mixes axes.
+    static float s_rate_s[3], s_acc_s[3];
+
     chMtxLock(&can_imu_mtx);
     switch (f.std.SID) {
-    case 0x01:
+    case 0x01: {
         // CID_INS_QUATN2B — quaternion NED→Body [W,X,Y,Z], each int16 scaled by 10000.
-        g_can_imu.q0 = le16s(&f.data8[0]) * (1.0f / 10000.0f);  // W
-        g_can_imu.q1 = le16s(&f.data8[2]) * (1.0f / 10000.0f);  // X
-        g_can_imu.q2 = le16s(&f.data8[4]) * (1.0f / 10000.0f);  // Y
-        g_can_imu.q3 = le16s(&f.data8[6]) * (1.0f / 10000.0f);  // Z
+        const Quat q_s = { le16s(&f.data8[0]) * (1.0f / 10000.0f),   // W
+                           le16s(&f.data8[2]) * (1.0f / 10000.0f),   // X
+                           le16s(&f.data8[4]) * (1.0f / 10000.0f),   // Y
+                           le16s(&f.data8[6]) * (1.0f / 10000.0f) }; // Z
+        const Quat q_b = quat_mul(q_s, s_mount_q_b2s);
+        g_can_imu.q0 = q_b.w;
+        g_can_imu.q1 = q_b.x;
+        g_can_imu.q2 = q_b.y;
+        g_can_imu.q3 = q_b.z;
         g_can_imu.has_new_quat     = true;
         g_can_imu.quat_timestamp_us = bprl_micros();
         g_can_imu.valid        = true;
         break;
+    }
     case 0x02:
-        g_can_imu.p  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.ax = le16s(&f.data8[2]) * (1.0f / 100.0f);
+        s_rate_s[0] = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        s_acc_s[0]  = le16s(&f.data8[2]) * (1.0f / 100.0f);
+        break;
+    case 0x03:
+        s_rate_s[1] = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        s_acc_s[1]  = le16s(&f.data8[2]) * (1.0f / 100.0f);
+        break;
+    case 0x04: {
+        s_rate_s[2] = le16s(&f.data8[0]) * (1.0f / 1000.0f);
+        s_acc_s[2]  = le16s(&f.data8[2]) * (1.0f / 100.0f);
+        float rate_b[3], acc_b[3];
+        mount_rotate(s_rate_s, rate_b);
+        mount_rotate(s_acc_s,  acc_b);
+        g_can_imu.p  = rate_b[0];  g_can_imu.q  = rate_b[1];  g_can_imu.r  = rate_b[2];
+        g_can_imu.ax = acc_b[0];   g_can_imu.ay = acc_b[1];   g_can_imu.az = acc_b[2];
         g_can_imu.has_new_rates      = true;
         g_can_imu.rates_timestamp_us = bprl_micros();
         g_can_imu.valid         = true;
         break;
-    case 0x03:
-        g_can_imu.q  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.ay = le16s(&f.data8[2]) * (1.0f / 100.0f);
-        break;
-    case 0x04:
-        g_can_imu.r  = le16s(&f.data8[0]) * (1.0f / 1000.0f);
-        g_can_imu.az = le16s(&f.data8[2]) * (1.0f / 100.0f);
-        break;
+    }
     default: break;
     }
     chMtxUnlock(&can_imu_mtx);
@@ -346,6 +404,7 @@ void can_drv_init(void)
     // Registered on the configured bus even if that bus isn't running
     // (imx5_can_bus=2 without can2_enable) — HW,CANIMU then just stays 0.
     const CanBus imx5_bus = (kDroneConfig.sensors.imx5_can_bus == 2) ? CAN_BUS_2 : CAN_BUS_1;
+    imx5_mount_init();
     bprl_can_register(imx5_bus, 0x01, imx5_can_cb, nullptr);
     bprl_can_register(imx5_bus, 0x02, imx5_can_cb, nullptr);
     bprl_can_register(imx5_bus, 0x03, imx5_can_cb, nullptr);

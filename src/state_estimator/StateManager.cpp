@@ -1,5 +1,6 @@
 #include "StateManager.hpp"
 #include "src/math/math.hpp"
+#include "configs/DroneConfig.hpp"
 #include <cfloat>
 #include <cmath>
 
@@ -304,7 +305,7 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
                 const Quat dq = { 1.0f, 0.5f*gyro_corr[0]*age_s, 0.5f*gyro_corr[1]*age_s, 0.5f*gyro_corr[2]*age_s };
                 q_prop = quat_norm(quat_mul(q_meas, dq));
             }
-            _lanes[i].update_quaternion(q_prop, R_QUAT);
+            _lanes[i].update_quaternion(q_prop, kDroneConfig.sensors.imx5_r_quat);
         }
     }
 

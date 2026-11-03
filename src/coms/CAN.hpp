@@ -53,6 +53,10 @@ struct CANRxFrame {
  *   ID 0x02  bytes 0-1 = p rate  (int16 ÷ 1000 → rad/s), 2-3 = x accel (÷ 100 → m/s²)
  *   ID 0x03  bytes 0-1 = q rate,                          2-3 = y accel
  *   ID 0x04  bytes 0-1 = r rate,                          2-3 = z accel   (100 Hz each)
+ *   Rates/accels are CID_DUAL_PX/QY/RZ (IMU data, sensor frame — the IMX's
+ *   insRotation never touches them), so the callback rotates quaternion, rates
+ *   and accels by SensorsConfig::imx5_mount_rpy_deg itself; p/q/r publish as a
+ *   set when 0x04 arrives.
  *
  * Adding devices:
  *   1. Write a callback: void my_cb(const CANRxFrame &f, void *ctx)

@@ -263,7 +263,7 @@ python3 tools/logs.py log-status
 | `<stem>_lin.csv` | TimeUS, X/Y/Z position (m NED), U/V/W velocity (m/s body), Udot/Vdot/Wdot accel (m/s²) |
 | `<stem>_rcin.csv` | TimeUS, RollStk/PitchStk/YawStk/ThrStk (normalized), FlightMode (raw switch value), IndiStk (raw control-switch position — see BPRL_flight's `src/controllers/README.md`), Armed |
 | `<stem>_outp.csv` | TimeUS, RollTq/PitchTq/YawTq (normalized torque [-1,1]), Thr |
-| `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (mechanical RPM, int32) |
+| `<stem>_rpms.csv` | TimeUS, RPM0–RPM3 (raw mechanical RPM before gating/health, int32; signed on encoder drones) |
 | `<stem>_strt.csv` | TimeUS, S0–S3 (int16 strain-rate), Valid |
 | `<stem>_stn1.csv` … `_stn4.csv` | TimeUS, 9 raw int16 strain gauge channels each (0.1 µV/count): `stn1` front right (D0–D8), `stn2` back right (D9–D17), `stn3` back left (D18–D26), `stn4` front left (D27–D35). `stn1`/`stn3` add Hz (measured I2C receive rate of that chunk, not the logging rate) and Valid |
 | `<stem>_imu1.csv` / `_imu2.csv` / `_imu3.csv` | TimeUS, AccX/AccY/AccZ (m/s²), GyrX/GyrY/GyrZ (rad/s), Valid — one per on-board IMU |
