@@ -50,7 +50,8 @@ float   g_euler[3]           = {};   // [roll, pitch, yaw] derived from quaterni
 float   g_input[InputIdx::N_INPUTS] = {};
 int32_t g_output[4]          = {};
 float   g_ctrl[4]            = {};   // [roll_tq, pitch_tq, yaw_tq, thrust] — active controller outputs
-float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, always populated
+float   g_indi_diag[10]      = {};   // [unmix_roll, unmix_pitch, delta_roll, delta_pitch, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, g1_hat_pitch] — INDI shadow diagnostics, populated whenever a ControllersConfig::switch_pos names AttCtrl::INDI or log_en.indi is set
+float   g_pidp_diag[11]      = {};   // AttitudePIDPI diagnostics, see FlightStateMachine::get_pidp_diag()
 float   g_pidj_diag[9]       = {};   // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — AttitudePIDJerk shadow diagnostics, populated whenever a ControllersConfig::switch_pos names AttCtrl::PID_JERK
 float   g_jindi_diag[13]     = {};   // [unmix_roll, unmix_pitch, tau_accel_roll, tau_jerk_roll, cmd_roll, cmd_pitch, accel_cmd_roll, accel_cmd_pitch, g1_hat_roll, roll_jerk_filt, jerk_cmd_roll, alpha_roll, tau_roll] — AttitudeJINDI shadow diagnostics, populated whenever a ControllersConfig::switch_pos names AttCtrl::JINDI
 float   g_ctun_diag[10]      = {};   // AttitudePID tuning diagnostics, see threads.hpp
@@ -104,6 +105,10 @@ struct IndiHealthSnap {
 };
 static IndiHealthSnap s_indi_health = {};
 
+// Strain vs IMU angular acceleration, published by ControlThread under
+// state_mtx for LogThread (SACC). time_us filled in by LogThread.
+static LogMsgSACC s_sacc = {};
+
 // Last motor command actually written (physical lane order, 0..1000), for
 // EncoderRpmMonitor's motor model. ControlThread only.
 static int32_t s_last_motor_out[4] = {};
@@ -131,6 +136,8 @@ static MotorMixer         mixer(kDroneConfig.mixer);
 
 /* ── State estimator (ControlThread only) ────────────────────────────────── */
 static StateManager state_mgr(kDroneConfig.ang_accel_filt);
+// Strain gauge angular-acceleration fit — ControlThread only.
+static StrainAngAccel s_strain_acc(kDroneConfig.ang_accel_filt);
 
 /* ── Thread working areas ────────────────────────────────────────────────── */
 static THD_WORKING_AREA(waSPI,      2048);
@@ -657,14 +664,23 @@ static THD_FUNCTION(ControlThread, arg)
         }
 #endif
 
-        SensorHealth strain_health = SensorHealth::GOOD;
-        if (kDroneConfig.sensors.indi_requires_strain) {
-            StrainGaugeRaw sg_snap;
-            chMtxLock(&strainGauge_mtx);
-            sg_snap = g_strain_gauge;
-            chMtxUnlock(&strainGauge_mtx);
-            strain_health = strain_gauge_health(sg_snap, now_us);
-        }
+        // Strain gauge array: the angular-acceleration fit runs every tick
+        // (logged as SACC either way); its health gates INDI when INDI
+        // needs strain — always when p_dot/q_dot come from it. On boards
+        // without the array g_strain_gauge never goes valid, so the fit
+        // stays idle and the health BAD.
+        StrainGaugeRaw sg_snap;
+        chMtxLock(&strainGauge_mtx);
+        sg_snap = g_strain_gauge;
+        chMtxUnlock(&strainGauge_mtx);
+        s_strain_acc.update(sg_snap);
+        const SensorHealth sg_health = strain_gauge_health(sg_snap, now_us);
+        state_mgr.set_strain_ang_accel(s_strain_acc.p_dot(), s_strain_acc.q_dot(),
+                                       s_strain_acc.ready() && sg_health != SensorHealth::BAD);
+
+        const bool indi_needs_strain = kDroneConfig.sensors.indi_requires_strain
+                                    || kDroneConfig.ang_accel_filt.source == AngAccelSource::STRAIN;
+        const SensorHealth strain_health = indi_needs_strain ? sg_health : SensorHealth::GOOD;
         flight_sm.set_indi_sensor_health(worst(rpm_health, strain_health));
         indi_health.log.rpm_health    = (uint8_t)rpm_health;
         indi_health.log.strain_health = (uint8_t)strain_health;
@@ -676,6 +692,14 @@ static THD_FUNCTION(ControlThread, arg)
 
         // Run all EKF lanes and derive outputs.
         state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
+
+        LogMsgSACC sacc = {};
+        sacc.p_dot_strain = s_strain_acc.p_dot();
+        sacc.q_dot_strain = s_strain_acc.q_dot();
+        sacc.p_dot_imu    = state_mgr.imu_p_dot();
+        sacc.q_dot_imu    = state_mgr.imu_q_dot();
+        sacc.ready        = (uint8_t)s_strain_acc.ready();
+        sacc.from_strain  = (uint8_t)state_mgr.ang_accel_from_strain();
 
         // If the estimator just snapped yaw onto the mocap frame, move the
         // attitude controllers' held heading by the same amount so the
@@ -872,6 +896,9 @@ static THD_FUNCTION(ControlThread, arg)
         float pidj_diag[9];
         flight_sm.get_pidj_diag(pidj_diag);
 
+        float pidp_diag[11];
+        flight_sm.get_pidp_diag(pidp_diag);
+
         float traj_diag[8];
         flight_sm.get_traj_diag(traj_diag);
 
@@ -899,6 +926,7 @@ static THD_FUNCTION(ControlThread, arg)
         memcpy(g_ctun_diag, ctun_diag, sizeof(g_ctun_diag));
         memcpy(g_jindi_diag, jindi_diag, sizeof(g_jindi_diag));
         memcpy(g_pidj_diag, pidj_diag, sizeof(g_pidj_diag));
+        memcpy(g_pidp_diag, pidp_diag, sizeof(g_pidp_diag));
         memcpy(g_traj_diag, traj_diag, sizeof(g_traj_diag));
         memcpy(g_sysid_diag, sysid_diag, sizeof(g_sysid_diag));
         memcpy(g_output, motor_out, sizeof(g_output));
@@ -910,6 +938,7 @@ static THD_FUNCTION(ControlThread, arg)
         indi_health.log.blend_from = (int8_t)flight_sm.blend_from_index();
         indi_health.log.blend_w    = flight_sm.blend_weight();
         s_indi_health = indi_health;
+        s_sacc        = sacc;
 #ifdef BPRL_DEBUG
         memcpy(s_lane_roll,  dbg_lane_roll,  sizeof(s_lane_roll));
         memcpy(s_lane_pitch, dbg_lane_pitch, sizeof(s_lane_pitch));
@@ -2074,7 +2103,7 @@ static THD_FUNCTION(LogThread, arg)
         const uint64_t t_us = bprl_micros64();
 
         /* ── State + controller snapshot (one mutex hold) ─────────────── */
-        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ptun_diag[12], ctun_diag[10], traj_diag[8], jindi_diag[13], pidj_diag[9], sysid_diag[5];
+        float euler[3], state[StateIdx::N], inp[InputIdx::N_INPUTS], ctrl[4], indi_diag[10], ptun_diag[12], ctun_diag[10], traj_diag[8], jindi_diag[13], pidj_diag[9], pidp_diag[11], sysid_diag[5];
         bool  armed;
         chMtxLock(&state_mtx);
         memcpy(euler,      g_euler,      sizeof(euler));
@@ -2087,6 +2116,7 @@ static THD_FUNCTION(LogThread, arg)
         memcpy(traj_diag,  g_traj_diag,  sizeof(traj_diag));
         memcpy(jindi_diag, g_jindi_diag, sizeof(jindi_diag));
         memcpy(pidj_diag,  g_pidj_diag,  sizeof(pidj_diag));
+        memcpy(pidp_diag,  g_pidp_diag,  sizeof(pidp_diag));
         memcpy(sysid_diag, g_sysid_diag, sizeof(sysid_diag));
         armed = g_armed;
         chMtxUnlock(&state_mtx);
@@ -2237,6 +2267,16 @@ static THD_FUNCTION(LogThread, arg)
             logger.write(LOG_MSG_INDH, msg);
         }
 
+        /* ── SACC — strain vs IMU angular acceleration ────────────────── */
+        if (log_en.strn) {
+            LogMsgSACC msg;
+            chMtxLock(&state_mtx);
+            msg = s_sacc;
+            chMtxUnlock(&state_mtx);
+            msg.time_us = t_us;
+            logger.write(LOG_MSG_SACC, msg);
+        }
+
         /* ── JINDI — shadow AttitudeJINDI diagnostics ────────────────────── */
         if (log_en.jindi) {
             LogMsgJINDI msg = {};
@@ -2271,6 +2311,24 @@ static THD_FUNCTION(LogThread, arg)
             msg.cmd_pitch   = pidj_diag[7];
             msg.cmd_yaw     = pidj_diag[8];
             logger.write(LOG_MSG_JPID, msg);
+        }
+
+        /* ── PIDP — AttitudePIDPI cascade (shadow unless flying) ──────────── */
+        if (log_en.pidp) {
+            LogMsgPIDP msg = {};
+            msg.time_us          = t_us;
+            msg.roll_rate_tgt    = pidp_diag[0];
+            msg.roll_accel_tgt   = pidp_diag[1];
+            msg.roll_accel_meas  = pidp_diag[2];
+            msg.roll_accel_i     = pidp_diag[3];
+            msg.cmd_roll         = pidp_diag[4];
+            msg.pitch_rate_tgt   = pidp_diag[5];
+            msg.pitch_accel_tgt  = pidp_diag[6];
+            msg.pitch_accel_meas = pidp_diag[7];
+            msg.pitch_accel_i    = pidp_diag[8];
+            msg.cmd_pitch        = pidp_diag[9];
+            msg.cmd_yaw          = pidp_diag[10];
+            logger.write(LOG_MSG_PIDP, msg);
         }
 
 #if LOG_PTUN_ENABLED

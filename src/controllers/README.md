@@ -253,21 +253,36 @@ Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's outp
 ### Control loop (roll shown, pitch symmetric)
 
 ```
-1. Outer P:      angle_error [rad]   → rate_tgt [rad/s]
-2. SLC (rate PID): rate_error [rad/s] → accel_tgt [rad/s²]
-3. Inner PI:     accel_error [rad/s²] → out_cmds[0], accel_error = accel_tgt − p_dot_measured
+1. Outer P:        angle_error [rad]   → rate_tgt [rad/s]
+2. Rate PID:       rate_error [rad/s]  → accel_tgt [normalised cmd]   (ArduPilot's stock rate PID)
+3. Inner PI:       accel_error [cmd]   → out_cmds[0], accel_error = accel_tgt − p_dot / accel_norm
 ```
 
-`p_dot`/`q_dot` come from `g_state[P_DOT/Q_DOT]` — the same EKF-derived measured angular acceleration `AttitudeINDI` uses.
+This follows ArduPilot exactly: the rate PID's output is the same normalised command `AttitudePID` would send the mixer, and ArduPilot uses it directly as the "acceleration" target. Measured `p_dot` is brought into those units by `accel_norm` (`ArduCopter/Attitude.cpp` hardcodes `accel_scale = 1/80`, so `accel_norm = 80` rad/s² per unit command). The inner PI runs with no saturation anti-windup (ArduPilot passes `limit = false`); the rate and yaw PIDs get the mixer limits, as ArduPilot's `_motors.limit`.
+
+`p_dot`/`q_dot` come from `g_state[P_DOT/Q_DOT]` — the same measured angular acceleration `AttitudeINDI` uses (IMU or strain, `AngAccelFilterConfig::source`). ArduPilot fed it from `AP_AngularAccel` (IMU, 50 Hz LPF) and ran the rate loop at 100 Hz; here it runs every control tick (the PIDs are dt-aware).
 
 ### Gains
 
-Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`) — The outer angle-P and yaw loops are copied from `AttitudePID`'s gains; the rate loop ("SLC") is copied from `AttitudeINDI`'s rate loop (same role — its output is consumed as an acceleration-scale target, not a torque); the inner accel PI is ported verbatim from the ArduPilot source. **None of this has been bench/flight tuned for this specific three-stage combination.** Select it with `AttCtrl::PID_PI` in a drone's `ControllersConfig::switch_pos`. Like PID, it isn't anchored to `current_torque`, so `set_active_controller()` resets it on the switch edge into it.
+Gains live per-drone in `configs/<Drone>/drone_config.cpp` (`AttitudePidPiGains`, see `configs/DroneConfig.hpp`). Drone2 (the S500 the ArduPilot fork was tuned on) uses ArduPilot's values throughout; Drone1/Drone3 use their own `.pid` rate loop for stage 2 and ArduPilot's inner PI. **None of this has been bench/flight tuned in BPRL.** Select it with `AttCtrl::PID_PI` in a drone's `ControllersConfig::switch_pos`. Like PID, it isn't anchored to `current_torque`, so `set_active_controller()` resets it on the switch edge into it.
 
-Values below are Drone1/Drone3's (Drone2: angle P 4.5).
+Drone2's values:
 
-| Loop | Kp | Ki | Kd | T-filter | D-filter | Imax |
-|---|---|---|---|---|---|---|
+| Loop | Kp | Ki | Kd | T-filter | E-filter | D-filter | Imax |
+|---|---|---|---|---|---|---|---|
+| Roll/pitch attitude | 4.50 | 0 | 0 | off | off | 30 Hz | 0.5 |
+| Roll/pitch rate | 0.135 | 0.135 | 0.0036 | 20 Hz | off | 20 Hz | 0.5 |
+| Roll/pitch accel (inner PI) | 0.70 | 0.80 | 0 | 50 Hz | off | off | 0.5 |
+| Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 2.5 Hz | 5 Hz | 0.5 |
+| Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | off | 30 Hz | 0.3 |
+
+`yaw_stick_gain = 3.0`, same role as `AttitudePidGains::yaw_stick_gain`; `accel_norm = 80`.
+
+### Logging
+
+`PIDP` (`LogEnableConfig::pidp`): per axis the rate target, accel target, measured accel (both in normalised command units, so their difference is the PI's error), the inner PI integrator and the output command, plus the yaw command. Like `indi`, setting `pidp` also runs `AttitudePIDPI` in shadow mode when no switch position selects it, so the log compares it against whatever is flying.
+
+---|---|---|---|---|---|---|
 | Roll attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Pitch attitude | 4.00 | 0 | 0 | off | 30 Hz | 0.5 |
 | Roll rate ("SLC") | 6.50 | 0.20 | 0 | 30 Hz | 30 Hz | 10.0 |
@@ -542,7 +557,7 @@ D axis: `AltControl::alt_hold()` — the throttle stick commands climb rate outs
 
 Converts per-motor RPM to physical roll/pitch torques in N·m for INDI/JINDI/PIDJerk feedback. RPM comes from bidirectional DShot telemetry, or from the CAN shaft-encoder nodes (`src/sensors/EncoderRPM.hpp`) on a drone without DShot (Drone2). Constants are per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`): bench-fit on Drone1/Drone3, placeholders on Drone2 (its 12 in motors/props haven't been on the thrust stand).
 
-**RPM filtering** — each motor's RPM goes through the drone's `ang_accel_filt` — a 2nd-order lowpass at `lpf_hz` and an optional 1st-order stage at `lpf_extra_hz` (`<= 0` disables it) — before the motor model, at the fixed `CONTROL_DT_S`. It's the same config StateManager uses for p_dot/q_dot, so there's one place to change it.
+**RPM filtering** — each motor's RPM goes through the drone's `ang_accel_filt` — a 2nd-order lowpass at `lpf_hz` and an optional 1st-order stage at `lpf_extra_hz` (`<= 0` disables it) — before the motor model, at the fixed `CONTROL_DT_S`. It's the same config StateManager uses for p_dot/q_dot, so there's one place to change it. `lpf_hz <= 0` disables the 2nd-order stage too. On a strain drone (`ang_accel_filt.source = AngAccelSource::STRAIN`) the strain gauge p_dot/q_dot estimate (`StrainAngAccel`, `src/sensors/StrainGauge.hpp`) goes through the same chain.
 
 **Motor force model** — cubic fit directly against mechanical RPM (values below are Drone1's, shared with Drone3; each drone's `UnmixerConfig` has its own):
 ```

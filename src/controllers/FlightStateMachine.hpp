@@ -266,6 +266,15 @@ public:
     // be the controller actually driving out_cmds; see active_index().
     void get_pidj_diag(float diag[9]) const { memcpy(diag, _pidj_diag, sizeof(_pidj_diag)); }
 
+    // diag[11]: [roll_rate_tgt, roll_accel_tgt, roll_accel_meas, roll_accel_i, cmd_roll,
+    //            pitch_rate_tgt, pitch_accel_tgt, pitch_accel_meas, pitch_accel_i, cmd_pitch, cmd_yaw]
+    // AttitudePIDPI's cascade — see LogMsgPIDP. Accel fields are in
+    // normalised command units (p_dot / accel_norm), as the inner PI sees them.
+    // Populated when a ControllersConfig::switch_pos entry names AttCtrl::PID_PI
+    // or log_en.pidp is set, zeroed otherwise. May or may not be the
+    // controller actually driving out_cmds; see active_index().
+    void get_pidp_diag(float diag[11]) const { memcpy(diag, _pidp_diag, sizeof(_pidp_diag)); }
+
     // TEMP (PTUN tuning): diag[12] = [pos_n_tgt, pos_n_err, pos_e_tgt, pos_e_err,
     // vel_n_tgt, vel_n_err, vel_e_tgt, vel_e_err, roll_tgt, pitch_tgt,
     // climb_rate_tgt, climb_rate_err].
@@ -403,6 +412,9 @@ private:
     // [rate_tgt, accel_tgt, jerk_tgt, torque_pi_nm, torque_d_nm, torque_roll_nm, cmd_roll, cmd_pitch, cmd_yaw] — see get_pidj_diag()
     float _pidj_diag[9] = {};
 
+    // See get_pidp_diag()
+    float _pidp_diag[11] = {};
+
     // See get_traj_diag()
     float _traj_diag[8] = {};
 
@@ -427,8 +439,8 @@ private:
     AttitudeController *_controllers[MAX_ATTITUDE_CONTROLLERS];
     int _num_controllers;
     int _active_index;   // generalizes the old _use_indi bool
-    int _indi_index;     // INDI's list index if any switch position uses it, else -1 (see constructor)
-    int _pid_pi_index;   // PID+PI's list index if any switch position uses it, else -1 (see constructor)
+    int _indi_index;     // INDI's list index if any switch position uses it or log_en.indi is set, else -1 (see constructor)
+    int _pid_pi_index;   // PID+PI's list index if any switch position uses it or log_en.pidp is set, else -1 (see constructor)
     int _jindi_index;    // JINDI's list index if any switch position uses it, else -1 (see constructor)
     int _pid_jerk_index; // PIDJerk's list index if any switch position uses it, else -1 (see constructor)
     int _slot_index[3] = { 0, 0, 0 };  // ctrl_select switch position -> _controllers[] index

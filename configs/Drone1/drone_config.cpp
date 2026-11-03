@@ -67,17 +67,18 @@ const DroneConfig kDroneConfig = {
         3.0f,    // yaw_gain
     },
 
-    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
+    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm }
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate  ("SLC")
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate ("SLC")
+        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f }, // roll_rate  — this drone's .pid rate loop (normalised cmd out)
+        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f }, // pitch_rate — this drone's .pid rate loop
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold 
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — matches ArduPilot HEAD)
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — matches ArduPilot HEAD)
+        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_*)
+        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_*)
         3.0f,  // yaw_stick_gain
+        80.0f, // accel_norm — ArduPilot's 1/80 accel_scale, not measured for this airframe
     },
     
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -129,9 +130,9 @@ const DroneConfig kDroneConfig = {
         7.04f,                                              // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source }
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
-    { 20.0f, 15.0f },
+    { 20.0f, 15.0f, AngAccelSource::IMU },
    
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
@@ -156,7 +157,7 @@ const DroneConfig kDroneConfig = {
           true, // imu1
           true, // imu2
           true, // imu3
-          false, // indi (INDI not on any switch position — would log zeros)
+          false, // indi (true would also run INDI in shadow — it is on no switch position)
           false, // baro
           true, // ptun (POS_HOLD tuning)
           true, // mocp
@@ -166,7 +167,8 @@ const DroneConfig kDroneConfig = {
           true, // jindi
           true, // jpid
           false, // ctun (AttitudePID tuning)
-          true }, // sidd (system-ID sweep)
+          true, // sidd (system-ID sweep)
+          false }, // pidp (AttitudePIDPI cascade; also runs it in shadow)
     },
 
     // .sysid — SysIdConfig { rc_channel, axes[4], f_start_hz, f_stop_hz, duration_s, magnitude[4], fade_in_s, fade_out_s }

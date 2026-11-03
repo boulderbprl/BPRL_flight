@@ -82,6 +82,8 @@ void StateManager::init()
     _blended_ud   = _blended_vd   = _blended_wd   = 0.0f;
     _prev_p       = _prev_q       = _prev_r       = 0.0f;
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
+    _pdot_out     = _qdot_out     = 0.0f;
+    _ang_accel_from_strain = false;
     _p_filt       = _q_filt       = _r_filt       = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
     _ud_filt_state = _vd_filt_state = _wd_filt_state = Biquad2pState{};
@@ -523,6 +525,13 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
     _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
 
+    // Strain estimate in place of the IMU one when configured and usable
+    // (set_strain_ang_accel()). The IMU filters above keep running either
+    // way, so falling back to them never starts from a cold filter.
+    _ang_accel_from_strain = _ang_accel_filt.source == AngAccelSource::STRAIN && _strain_usable;
+    _pdot_out = _ang_accel_from_strain ? _strain_pdot : _pdot_filt;
+    _qdot_out = _ang_accel_from_strain ? _strain_qdot : _qdot_filt;
+
     const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_RDOT_HZ, dt);
     _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_r_dot);
 
@@ -617,8 +626,8 @@ void StateManager::get_state(float out[StateIdx::N]) const
     out[StateIdx::R] = _r_filt;
 
     // Angular acceleration (differentiated + lowpass filtered) → out[16–18]
-    out[StateIdx::P_DOT] = _pdot_filt;
-    out[StateIdx::Q_DOT] = _qdot_filt;
+    out[StateIdx::P_DOT] = _pdot_out;
+    out[StateIdx::Q_DOT] = _qdot_out;
     out[StateIdx::R_DOT] = _rdot_filt;
 }
 

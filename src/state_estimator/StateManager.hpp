@@ -136,7 +136,9 @@
  * p_dot/q_dot (feeding the INDI law) don't inherit that stage's extra lag —
  * then filtered by the drone's AngAccelFilterConfig: 2nd-order Butterworth
  * at lpf_hz, then an optional 1st-order stage at lpf_extra_hz (<=0 disables
- * it) — the same setting the Unmixer applies to RPM.
+ * it) — the same setting the Unmixer applies to RPM. With
+ * AngAccelFilterConfig::source == STRAIN, the strain gauge estimate
+ * (set_strain_ang_accel()) replaces it whenever that one is usable.
  * r_dot differentiates the fully-filtered r (post STATEMGR_LP_R_HZ) and keeps
  * the original 1st-order lowpass, since yaw has no INDI consumer for it.
  *
@@ -216,6 +218,21 @@ public:
     // comment). Disarmed is the bench case, where the stronger correction
     // still applies.
     void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us, bool armed);
+
+    // Strain-gauge angular acceleration (StrainAngAccel) for this tick — call
+    // before update(). usable: the estimate is ready and strain_gauge_health()
+    // isn't BAD. With AngAccelFilterConfig::source == STRAIN, P_DOT/Q_DOT are
+    // these whenever usable, the IMU estimate otherwise; with IMU it's ignored.
+    void set_strain_ang_accel(float p_dot, float q_dot, bool usable)
+    {
+        _strain_pdot = p_dot;  _strain_qdot = q_dot;  _strain_usable = usable;
+    }
+
+    // Both angular-acceleration estimates, whichever one P_DOT/Q_DOT carries
+    // (for the SACC log), and whether this tick's P_DOT/Q_DOT came from strain.
+    float imu_p_dot() const { return _pdot_filt; }
+    float imu_q_dot() const { return _qdot_filt; }
+    bool  ang_accel_from_strain() const { return _ang_accel_from_strain; }
 
     // Full 19-element state output — maps 16-state EKF lanes onto StateIdx ordering
     // and fills in the 6 derived quantities (uvw_dot, pqr_dot).
@@ -332,6 +349,13 @@ private:
     float _pdot_filt, _qdot_filt, _rdot_filt;
     Biquad2pState _pdot_filt_state, _qdot_filt_state;  // 2nd-order LPF state for p_dot/q_dot
     AngAccelFilterConfig _ang_accel_filt;               // p_dot/q_dot filter, from DroneConfig (shared with Unmixer)
+
+    // p_dot/q_dot actually output (P_DOT/Q_DOT): _pdot_filt/_qdot_filt
+    // above (IMU) or the strain estimate — see set_strain_ang_accel().
+    float _pdot_out = 0.0f, _qdot_out = 0.0f;
+    float _strain_pdot = 0.0f, _strain_qdot = 0.0f;
+    bool  _strain_usable = false;
+    bool  _ang_accel_from_strain = false;
 
     // Motor vibration notch, applied to p/q/r before the lowpass below.
     // _notch_freq_hz is the slew-limited tracked center frequency (average

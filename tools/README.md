@@ -28,6 +28,7 @@ pip install pyserial rich
 | `i2c_tools.py` | `i2c-scan` | No |
 | `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
+| `strain_fit_export.py` | *(positional .mat path — writes `src/sensors/StrainGaugeFit.hpp`)* | — |
 | *(raw serial, see [Timing](#timing--schedulability-bprl_timing-build) below)* | `TIM,status`, `TIM,reset` | Requires `-DBPRL_TIMING` |
 | *(raw serial, no wrapper script)* | `IOMCU,status`, `PWM,status`, `STRAIN_GAUGE,zero`, `STRAIN_GAUGE,reset` | No |
 
@@ -202,6 +203,20 @@ python3 tools/strain_rate.py strain-rate
 ```
 
 Polls `STRAIN_RATE,read` at ~5 Hz and shows a live panel. The `valid` flag reflects whether the sensor is actively reporting.
+
+---
+
+## strain_fit_export.py
+
+> Host-only — no FC connection.
+
+Turns the strain → p_dot/q_dot weights from the MATLAB calibration pipeline (`strain_pdot_pipeline.m`, which saves `strain_pdot_weights.mat`) into `src/sensors/StrainGaugeFit.hpp`, the static table `StrainAngAccel` applies every control tick. Re-run after every refit, then rebuild and reflash. Needs scipy.
+
+```bash
+python3 tools/strain_fit_export.py ~/Dropbox/PhD/New_Strain_Drone_2026/Calibration/strain_pdot_weights.mat
+```
+
+It checks the input ordering against the names in the .mat. It can't check the low-pass: the fit assumes the strain sees only a single pole at `STRAIN_FIT_LPF_HZ`, so set that drone's `ang_accel_filt` to `{ 0, STRAIN_FIT_LPF_HZ, ... }` (see `AngAccelFilterConfig` in `configs/DroneConfig.hpp`).
 
 ---
 

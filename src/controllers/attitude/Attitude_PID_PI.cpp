@@ -18,6 +18,7 @@ AttitudePIDPI::AttitudePIDPI(const AttitudePidPiGains &g)
     , _yaw_rate   (make_pid(g.yaw_rate))
     , _yaw_hold   (make_pid(g.yaw_hold))
     , _yaw_stick_gain(g.yaw_stick_gain)
+    , _accel_norm(g.accel_norm)
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}
@@ -38,16 +39,19 @@ void AttitudePIDPI::update(const float euler[3], const float state_full[], const
     const float roll_rate_tgt  = _roll_att.update(input[1], state6[0]);
     const float pitch_rate_tgt = _pitch_att.update(input[2], state6[1]);
 
-    // ── SLC: rate error -> angular-acceleration target ─────────────────────
-    const float roll_accel_tgt  = _roll_rate.update(roll_rate_tgt,  state6[3]);
-    const float pitch_accel_tgt = _pitch_rate.update(pitch_rate_tgt, state6[4]);
+    // ── Rate loop: rate error -> accel target (normalised command units) ──
+    _rate_tgt[0] = roll_rate_tgt;
+    _rate_tgt[1] = pitch_rate_tgt;
+    _accel_tgt[0] = _roll_rate.update(roll_rate_tgt,   state6[3], _mixer_limits.roll);
+    _accel_tgt[1] = _pitch_rate.update(pitch_rate_tgt, state6[4], _mixer_limits.pitch);
 
     // ── Inner loop: accel error -> normalised torque (PI on measured accel) ─
-    const float roll_accel_meas  = state_full[StateIdx::P_DOT];
-    const float pitch_accel_meas = state_full[StateIdx::Q_DOT];
+    // ArduPilot runs this PI with limit = false (no saturation anti-windup).
+    _accel_meas[0] = state_full[StateIdx::P_DOT] / _accel_norm;
+    _accel_meas[1] = state_full[StateIdx::Q_DOT] / _accel_norm;
 
-    out_cmds[0] = constrain_float(_roll_accel.update(roll_accel_tgt,   roll_accel_meas),  -1.0f, 1.0f);
-    out_cmds[1] = constrain_float(_pitch_accel.update(pitch_accel_tgt, pitch_accel_meas), -1.0f, 1.0f);
+    out_cmds[0] = constrain_float(_roll_accel.update(_accel_tgt[0],  _accel_meas[0]), -1.0f, 1.0f);
+    out_cmds[1] = constrain_float(_pitch_accel.update(_accel_tgt[1], _accel_meas[1]), -1.0f, 1.0f);
 
     // ── Yaw: rate PID + heading-lock trim (no inner accel loop) ────────────
     const float yaw_now = state6[2];
@@ -68,7 +72,7 @@ void AttitudePIDPI::update(const float euler[3], const float state_full[], const
         yaw_rate_tgt = _yaw_stick_gain * input[3] + yaw_hold_rate;
     }
 
-    out_cmds[2] = constrain_float(_yaw_rate.update(yaw_rate_tgt, state6[5]), -1.0f, 1.0f);
+    out_cmds[2] = constrain_float(_yaw_rate.update(yaw_rate_tgt, state6[5], _mixer_limits.yaw), -1.0f, 1.0f);
 }
 
 void AttitudePIDPI::reset_all()
@@ -78,4 +82,7 @@ void AttitudePIDPI::reset_all()
     _roll_accel.reset(); _pitch_accel.reset();
     _yaw_rate.reset();   _yaw_hold.reset();
     _yaw_target_valid = false;
+    for (int a = 0; a < 2; ++a) {
+        _rate_tgt[a] = 0.0f;  _accel_tgt[a] = 0.0f;  _accel_meas[a] = 0.0f;
+    }
 }

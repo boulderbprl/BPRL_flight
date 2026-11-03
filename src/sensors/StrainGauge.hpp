@@ -2,6 +2,9 @@
 #include "ch.h"
 #include "hal.h"
 #include "src/sensors/SensorHealth.hpp"
+#include "src/sensors/StrainGaugeFit.hpp"
+#include "src/math/math.hpp"
+#include "configs/DroneConfig.hpp"
 
 /*
  * Strain gauge array sensor — the ADC "ConBoard" (nRF52840), a single I2C
@@ -105,16 +108,72 @@ extern StrainGaugeRaw g_strain_gauge;
 SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
 
 /*
- * TODO — strain -> angular acceleration fit and per-channel health.
- * Strain is only logged today; nothing here feeds a controller yet. When
- * the fit goes in (in these StrainGauge files):
+ * Strain -> angular acceleration (p_dot, q_dot), the firmware half of the
+ * MATLAB strain calibration pipeline (strain_pdot_pipeline.m). Weights and
+ * gauge groups come from StrainGaugeFit.hpp, generated from that script's
+ * strain_pdot_weights.mat by tools/strain_fit_export.py. Per ControlThread
+ * tick, on that tick's snapshot of g_strain_gauge:
  *
- *  1. Fit. p_dot/q_dot = sum over the ~30 good channels of weight[i] x
- *     data[i] (+ bias), weights fitted in MATLAB (strain cal pipeline) and
- *     imported as a static table. Channels left out of the fit get weight 0.
- *     Applied every published frame: ~30 multiply-adds per axis, nothing.
- *     Keep the result's delay matched to the RPM -> torque path INDI
- *     differences it against (~10 ms target).
+ *  1. Per arm and axis (gauges {0,3,6}, {1,4,7}, {2,5,8} of each arm, live
+ *     ones only, each scaled by 1/gain to the group's first gauge):
+ *       mean     = average of the scaled gauges
+ *       gradient = (first - last scaled gauge) / node steps between them
+ *     -> 12 means + 12 gradients.
+ *  2. Each of the 24 signals: 1st-order high-pass at STRAIN_GAUGE_HPF_HZ
+ *     (always on — drift and the re-zero steps), then the drone's
+ *     AngAccelFilterConfig low-pass (2nd-order at lpf_hz, then 1st-order at
+ *     lpf_extra_hz), the same chain the Unmixer puts on RPM, so the strain
+ *     estimate and the RPM torque stay delay-matched. MATLAB filters the
+ *     gauges before grouping; the filters and the grouping are both linear,
+ *     so filtering the 24 group signals instead gives the same result for
+ *     less work.
+ *  3. A ring buffer keeps the filtered signals for the last
+ *     (STRAIN_FIT_N_TAPS - 1) x STRAIN_FIT_TAP_DT_S; the fit reads taps
+ *     STRAIN_FIT_TAP_DT_S apart (every 4th tick at 400 Hz) and
+ *       p_dot = kStrainFitBiasP + sum(kStrainFitWP x taps), same for q_dot.
+ *     The estimate still updates every tick.
+ *
+ * Gauges are sampled and held between I2C frames — the board and the I2C
+ * poll both run at ~400 Hz, so most ticks see a new frame.
+ * The output is 0 until the first valid frame plus the tap history.
+ * Health is strain_gauge_health()'s job, not this class's.
+ */
+#define STRAIN_GAUGE_HPF_HZ  0.2f   // strain high-pass cutoff — must match the fit's (STRAIN_FIT_HPF_HZ)
+
+class StrainAngAccel {
+public:
+    explicit StrainAngAccel(const AngAccelFilterConfig &filt) : _filt(filt) {}
+
+    // Once per ControlThread tick (filters run at the fixed CONTROL_DT_S).
+    // Does nothing until snap.valid.
+    void update(const StrainGaugeRaw &snap);
+
+    float p_dot() const { return _p_dot; }   // rad/s^2
+    float q_dot() const { return _q_dot; }   // rad/s^2
+    bool  ready() const { return _ticks >= kHistory; }  // tap history full
+
+private:
+    static constexpr int kSignals = 2 * STRAIN_FIT_N_GROUPS;   // means, then gradients
+    static constexpr int kHistory = 24;   // ring length in ticks, >= (N_TAPS-1) x tap stride + 1 (checked in the .cpp)
+
+    AngAccelFilterConfig _filt;
+    Highpass1pState      _hp[kSignals];
+    Biquad2pState        _lp2[kSignals];
+    float                _lp1[kSignals] = {};
+    float                _hist[kHistory][kSignals] = {};
+    int                  _head  = 0;   // _hist row written on the last update
+    uint32_t             _ticks = 0;   // updates since the first valid frame (saturates at kHistory)
+    float                _p_dot = 0.0f;
+    float                _q_dot = 0.0f;
+};
+
+/*
+ * TODO — per-channel health, and what the fit does when a channel dies.
+ * The fit itself (StrainAngAccel above) is in; it uses the channels that
+ * were live when it was fitted and nothing here checks them yet:
+ *
+ *  1. (Done — StrainAngAccel.) Measure its delay against the RPM -> torque
+ *     path INDI differences it against before flying INDI on it.
  *
  *  2. Per-channel freeze. A channel whose (max - min) over a 50 ms window
  *     (20 frames) is <= 1 count, two windows in a row (100 ms), is frozen.

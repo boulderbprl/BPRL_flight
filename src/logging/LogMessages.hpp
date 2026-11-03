@@ -55,6 +55,8 @@ constexpr uint8_t LOG_MSG_JPID = 0x1CU;  // AttitudePIDJerk diagnostics — angl
 constexpr uint8_t LOG_MSG_CTUN = 0x1DU;  // AttitudePID roll/pitch tuning: angle + rate targets, errors, rate integrators (0x10 is PTUN — old logs' "CTUN" at 0x10 was today's PTUN)
 constexpr uint8_t LOG_MSG_SIDD = 0x1EU;  // system-ID sweep: state, axis, sweep time, chirp frequency + output (SysId.hpp)
 constexpr uint8_t LOG_MSG_INDH = 0x1FU;  // INDI feedback-sensor health, INDI -> PID fallback state, controller blend
+constexpr uint8_t LOG_MSG_SACC = 0x20U;  // angular acceleration: strain-gauge fit vs IMU, and which one P_DOT/Q_DOT used
+constexpr uint8_t LOG_MSG_PIDP = 0x21U;  // AttitudePIDPI diagnostics — angle→rate→accel PI cascade, see Attitude_PID_PI.hpp
 
 /* ── Packed message bodies ───────────────────────────────────────────────── */
 
@@ -172,8 +174,9 @@ struct __attribute__((packed)) LogMsgINDI {
     float    g1_pitch;     // N·m per rad/s²  live NLMS-adapted G1_hat, pitch (seed: DroneConfig::AttitudeIndiGains::g1_seed_pitch)
 };
 // Format: "Qffffffff"   Body: 8+8×4 = 40 B   Record: 43 B
-// Always populated while a switch_pos entry names AttCtrl::INDI, whether or
-// not INDI is the controller actually flying (OUTP) — shadow mode.
+// Always populated while a switch_pos entry names AttCtrl::INDI, or (shadow
+// only, never flown) whenever log_en.indi is set — whether or not INDI is the
+// controller actually flying (OUTP).
 
 struct __attribute__((packed)) LogMsgPIDJ {
     uint64_t time_us;
@@ -224,6 +227,28 @@ struct __attribute__((packed)) LogMsgJPID {
     float    cmd_yaw;    // [-1, 1]  normalised yaw torque commanded by AttitudePIDJerk (same as AttitudePID)
 };
 // Format: "Qfffffffff"   Body: 8+9×4 = 44 B   Record: 47 B
+
+// AttitudePIDPI (Attitude_PID_PI.hpp). Accel target/measurement are in the
+// inner PI's own units — normalised command, i.e. p_dot / accel_norm (ArduPilot:
+// rad/s² / 80) — so ATgt vs AMs is exactly the error the PI acts on. Raw
+// p_dot/q_dot are ATT.Pdot/Qdot.
+struct __attribute__((packed)) LogMsgPIDP {
+    uint64_t time_us;
+    float    roll_rate_tgt;    // rad/s      angle loop output = rate loop target
+    float    roll_accel_tgt;   // norm. cmd  rate loop output = inner PI target
+    float    roll_accel_meas;  // norm. cmd  p_dot / accel_norm
+    float    roll_accel_i;     // norm. cmd  inner PI integrator (±imax)
+    float    cmd_roll;         // [-1, 1]    inner PI output = normalised roll torque commanded by AttitudePIDPI
+    float    pitch_rate_tgt;   // rad/s
+    float    pitch_accel_tgt;  // norm. cmd
+    float    pitch_accel_meas; // norm. cmd  q_dot / accel_norm
+    float    pitch_accel_i;    // norm. cmd
+    float    cmd_pitch;        // [-1, 1]
+    float    cmd_yaw;          // [-1, 1]    yaw rate PID (no inner accel loop)
+};
+// Format: "Qfffffffffff"   Body: 8+11×4 = 52 B   Record: 55 B
+// Gated by log_en.pidp, which also runs AttitudePIDPI in shadow mode (like
+// indi) — populated whether or not PID_PI is the controller flying (OUTP).
 
 // System-ID sweep (src/controllers/extras/SysId.hpp). Output is only the chirp
 // added this tick — OUTP is the full command (controller + chirp) and is
@@ -385,6 +410,22 @@ struct __attribute__((packed)) LogMsgINDH {
     float    model_res[4];   // RPM: measured (or held) - motor model, per motor — log-only until the model is measured
 };
 // Format: "QBBBBIHbfffff"   Body: 8+4+4+2+1+4+16 = 39 B   Record: 42 B
+
+/* ── SACC — strain vs IMU angular acceleration ───────────────────────────── */
+// Both p_dot/q_dot estimates every record, whichever one flies
+// (AngAccelFilterConfig::source) — ATT.Pdot/Qdot is the one that did.
+// Strain: StrainAngAccel (StrainGauge.hpp), 0 until it is ready. IMU:
+// StateManager's differentiated gyro. Gated by LogEnableConfig::strn.
+struct __attribute__((packed)) LogMsgSACC {
+    uint64_t time_us;
+    float    p_dot_strain;   // rad/s^2
+    float    q_dot_strain;   // rad/s^2
+    float    p_dot_imu;      // rad/s^2
+    float    q_dot_imu;      // rad/s^2
+    uint8_t  ready;          // 1 once the strain fit's tap history is full
+    uint8_t  from_strain;    // 1 if this tick's P_DOT/Q_DOT came from strain
+};
+// Format: "QffffBB"   Body: 8+4x4+2 = 26 B   Record: 29 B
 
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
@@ -575,6 +616,18 @@ constexpr LogDef kLogDefs[] = {
       "QBBBBIHbfffff",
       "TimeUS,RpmH,StrH,Gate,EncS,EncF,Trip,From,W,RsFR,RsRL,RsFL,RsRR",
       sizeof(LogMsgINDH) },
+
+    { LOG_MSG_SACC,
+      "SACC",
+      "QffffBB",
+      "TimeUS,PdS,QdS,PdI,QdI,Rdy,Src",
+      sizeof(LogMsgSACC) },
+
+    { LOG_MSG_PIDP,
+      "PIDP",
+      "Qfffffffffff",
+      "TimeUS,RTgt,RATgt,RAMs,RAI,CmdR,PTgt,PATgt,PAMs,PAI,CmdP,CmdY",
+      sizeof(LogMsgPIDP) },
 };
 
 constexpr size_t kNumLogDefs = sizeof(kLogDefs) / sizeof(kLogDefs[0]);

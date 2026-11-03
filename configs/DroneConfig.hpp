@@ -85,13 +85,16 @@ struct AttitudeJindiGains {
 
 // Gains for AttitudePIDPI (src/controllers/attitude/Attitude_PID_PI.hpp) — ported from
 // the BPRL ArduPilot fork's rate-PID + inner angular-acceleration-PI cascade
-// (AC_AttitudeControl_Multi, "switched to PID" commit). roll_accel/pitch_accel
-// are the inner PI loop closed on measured angular acceleration (kd expected
-// to be 0 — a plain PI, not a PID).
+// (AC_AttitudeControl_Multi::rate_controller_run_dt). roll_rate/pitch_rate are
+// a normal rate PID in normalised-command units (same units as AttitudePidGains'
+// rate loop); roll_accel/pitch_accel are the inner PI loop closed on measured
+// angular acceleration (kd expected to be 0 — a plain PI, not a PID), with
+// p_dot/q_dot divided by accel_norm to put them in those same units.
 struct AttitudePidPiGains {
     PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
     PidGains roll_accel, pitch_accel;
     float    yaw_stick_gain;
+    float    accel_norm;   // rad/s² of measured p_dot/q_dot that equal 1.0 normalised command (ArduPilot: 80, i.e. accel_scale = 1/80)
 };
 
 // Gains for AltControl (src/controllers/position/AltControl.hpp).
@@ -197,9 +200,27 @@ struct UnmixerConfig {
 // the Unmixer's torque model, so measured torque and measured angular
 // acceleration always carry the same filter delay — INDI's increment and its
 // live G1 estimator both depend on that.
+//
+// source picks where StateManager's p_dot/q_dot (StateIdx::P_DOT/Q_DOT, the
+// INDI/PID_PI/PID_JERK angular-acceleration feedback) comes from:
+//   IMU     differentiated gyro, as above.
+//   STRAIN  the strain gauge array's fitted estimate (StrainAngAccel,
+//           src/sensors/StrainGauge.hpp). Its low-pass is this same
+//           lpf_hz/lpf_extra_hz chain, so it stays delay-matched to the
+//           RPM torque. The fit (StrainGaugeFit.hpp) was made with a single
+//           pole at STRAIN_FIT_LPF_HZ only — set { 0, STRAIN_FIT_LPF_HZ } to
+//           fly it as fitted. Implies indi_requires_strain, and falls back
+//           to the IMU estimate whenever strain_gauge_health() is BAD.
+// Either way both estimates are computed and logged (SACC).
+enum class AngAccelSource : uint8_t {
+    IMU,
+    STRAIN,
+};
+
 struct AngAccelFilterConfig {
-    float lpf_hz;        // 2nd-order Butterworth cutoff
-    float lpf_extra_hz;  // optional cascaded 1st-order stage; <= 0 disables it
+    float          lpf_hz;        // 2nd-order Butterworth cutoff; <= 0 disables it
+    float          lpf_extra_hz;  // optional cascaded 1st-order stage; <= 0 disables it
+    AngAccelSource source;        // p_dot/q_dot from IMU or strain — see above
 };
 
 // Which sensors are physically populated on this airframe. has_can_imx5_ins/
@@ -302,13 +323,16 @@ struct ControllersConfig {
 // One enable flag per message type in LogMessages.hpp's kLogDefs[] — gates
 // LogThread's per-tick write() call sites. Does NOT affect
 // Logger::write_schema_header(), which still emits every type's FMT record
-// regardless (Logger itself stays config-agnostic).
+// regardless (Logger itself stays config-agnostic). One flag does more than
+// gate a write: indi and pidp also run AttitudeINDI / AttitudePIDPI in shadow
+// mode (never flown unless a switch_pos names it) so their records aren't all zeros.
 struct LogEnableConfig {
     bool att, lin, rcin, outp, rpms, strt, imu1, imu2, imu3, indi, baro, ptun, mocp, traj, mavl;
     bool strn;                // strain gauge array — gates all four of STN1..STN4 together
     bool jindi, jpid;         // jerk-controller diagnostics (JIND / JPID)
     bool ctun;                // AttitudePID roll/pitch tuning (CTUN); ptun above is POS_HOLD tuning (PTUN)
     bool sidd;                // system-ID sweep state + chirp output (SIDD), see SysId.hpp
+    bool pidp;                // AttitudePIDPI cascade (PIDP) — like indi, also runs PID_PI in shadow mode
 };
 
 struct LoggingConfig {

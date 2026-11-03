@@ -42,6 +42,19 @@ struct Biquad2pState {
 // lowpass_alpha()). fc_hz <= 0 disables filtering (returns input unchanged).
 float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s);
 
+// State for highpass1p() below.
+struct Highpass1pState {
+    float prev_in     = 0.0f;
+    float prev_out    = 0.0f;
+    bool  initialised = false;
+};
+
+// First-order IIR highpass, bilinear transform (MATLAB butter(1, ..., 'high')).
+// The first call seeds the state settled on that input (output 0), so a
+// constant offset never produces a startup transient. fc_hz <= 0 disables
+// filtering (returns input unchanged).
+float highpass1p(float input, Highpass1pState& state, float fc_hz, float dt_s);
+
 // Second-order notch (RBJ biquad form), tracking a moving center frequency —
 // e.g. a motor's blade-pass frequency. Split into a coefficient step and an
 // apply step so multiple axes sharing the same center_hz/bandwidth_hz/dt_s

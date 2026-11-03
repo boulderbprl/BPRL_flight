@@ -1,6 +1,7 @@
 #include "src/uptime.hpp"
 #include "src/sensors/StrainGauge.hpp"
 #include "src/coms/I2C.hpp"
+#include "src/threads.hpp"   // CONTROL_DT_S
 #include <cstring>
 #include <cstdint>
 
@@ -203,6 +204,61 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us)
         return SensorHealth::HOLDING;
     }
     return SensorHealth::GOOD;
+}
+
+// Fit taps are STRAIN_FIT_TAP_DT_S apart; at CONTROL_DT_S that's every
+// kTapStride-th tick.
+static constexpr int kTapStride = (int)(STRAIN_FIT_TAP_DT_S / CONTROL_DT_S + 0.5f);
+static_assert(kTapStride >= 1, "strain fit taps closer together than one control tick");
+static_assert((STRAIN_FIT_N_TAPS - 1) * kTapStride + 1 <= 24,
+              "StrainAngAccel::kHistory too short for the fit's tap history");
+static_assert(STRAIN_GAUGE_HPF_HZ == STRAIN_FIT_HPF_HZ,
+              "strain high-pass doesn't match the one the fit was made with");
+
+void StrainAngAccel::update(const StrainGaugeRaw &snap)
+{
+    if (!snap.valid) return;
+
+    // 1. Group signals, raw counts: means [0..11], gradients [12..23].
+    float sig[kSignals];
+    for (int k = 0; k < STRAIN_FIT_N_GROUPS; k++) {
+        const StrainFitGroup &g = kStrainFitGroups[k];
+        float sum = 0.0f, first = 0.0f, last = 0.0f;
+        for (int m = 0; m < g.n; m++) {
+            const float s = (float)snap.data[g.ch[m]] * g.inv_gain[m];
+            sum += s;
+            if (m == 0) first = s;
+            last = s;
+        }
+        sig[k]                       = (g.n > 0) ? sum / (float)g.n : 0.0f;
+        sig[STRAIN_FIT_N_GROUPS + k] = (first - last) * g.inv_steps;   // inv_steps is 0 for n < 2
+    }
+
+    // 2. High-pass, then the shared angular-acceleration low-pass chain, into
+    // the next ring row.
+    _head = (_head + 1) % kHistory;
+    const float alpha_extra = lowpass_alpha(_filt.lpf_extra_hz, CONTROL_DT_S);
+    for (int i = 0; i < kSignals; i++) {
+        const float hp  = highpass1p(sig[i], _hp[i], STRAIN_GAUGE_HPF_HZ, CONTROL_DT_S);
+        const float lp2 = lowpass2p(hp, _lp2[i], _filt.lpf_hz, CONTROL_DT_S);
+        _lp1[i]         = lowpass(lp2, _lp1[i], alpha_extra);
+        _hist[_head][i] = _lp1[i];
+    }
+    if (_ticks < kHistory) _ticks++;
+
+    // 3. Weighted taps, k, k - stride, ... Before the history fills the
+    // older rows are still 0 — don't use the estimate until ready().
+    float p = kStrainFitBiasP;
+    float q = kStrainFitBiasQ;
+    for (int j = 0; j < STRAIN_FIT_N_TAPS; j++) {
+        const float *row = _hist[(_head - j * kTapStride + kHistory) % kHistory];
+        for (int i = 0; i < kSignals; i++) {
+            p += kStrainFitWP[j][i] * row[i];
+            q += kStrainFitWQ[j][i] * row[i];
+        }
+    }
+    _p_dot = ready() ? p : 0.0f;
+    _q_dot = ready() ? q : 0.0f;
 }
 
 bool strain_gauge_reset(void)

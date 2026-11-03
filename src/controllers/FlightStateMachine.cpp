@@ -35,11 +35,14 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     auto used = [slots](AttCtrl c) {
         return slots[0] == c || slots[1] == c || slots[2] == c;
     };
-    if (used(AttCtrl::INDI)) {
+    // INDI also runs, shadow only, whenever its log is on — no switch
+    // position points at it then, so it can't fly, but the INDI log is live.
+    if (used(AttCtrl::INDI) || cfg.logging.enable.indi) {
         _indi_index = _num_controllers;
         _controllers[_num_controllers++] = &_indi;
     }
-    if (used(AttCtrl::PID_PI)) {
+    // Same for PID_PI and its PIDP log.
+    if (used(AttCtrl::PID_PI) || cfg.logging.enable.pidp) {
         _pid_pi_index = _num_controllers;
         _controllers[_num_controllers++] = &_pid_pi;
     }
@@ -238,6 +241,19 @@ void FlightStateMachine::run_attitude(const float euler[],
         _pidj_diag[8] = cmds[_pid_jerk_index][2];
     } else {
         memset(_pidj_diag, 0, sizeof(_pidj_diag));
+    }
+
+    if (_pid_pi_index >= 0) {
+        for (int a = 0; a < 2; ++a) {
+            _pidp_diag[a * 5 + 0] = _pid_pi.rate_tgt(a);
+            _pidp_diag[a * 5 + 1] = _pid_pi.accel_tgt(a);
+            _pidp_diag[a * 5 + 2] = _pid_pi.accel_meas(a);
+            _pidp_diag[a * 5 + 3] = _pid_pi.accel_i(a);
+            _pidp_diag[a * 5 + 4] = cmds[_pid_pi_index][a];
+        }
+        _pidp_diag[10] = cmds[_pid_pi_index][2];
+    } else {
+        memset(_pidp_diag, 0, sizeof(_pidp_diag));
     }
 
     const float *active = cmds[_active_index];

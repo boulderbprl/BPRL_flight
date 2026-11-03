@@ -14,10 +14,10 @@
  * .pid's roll_rate/pitch_rate) have since been updated to the S500-tuned
  * values from the ArduPilot fork (jd-hanley/ardupilot, Strain_rate branch,
  * AC_AttitudeControl_Multi.h) — angle P 4.5, rate P/I/D 0.135/0.135/0.0036,
- * rate D-term filter 20 Hz. .indi/.pid_pi's roll_rate/pitch_rate ("SLC",
+ * rate D-term filter 20 Hz. .indi's roll_rate/pitch_rate ("SLC",
  * 6.5 gain) are a different two-stage architecture with no ArduPilot rate-PID
- * equivalent, so they're untouched; their roll_accel/pitch_accel inner loop
- * already matched ArduPilot's tuned accel PI exactly. Yaw gains are also
+ * equivalent, so they're untouched. .pid_pi is the full ArduPilot cascade:
+ * angle P 4.5, stock rate PID, then the accel PI (0.7/0.8) on p_dot/80. Yaw gains are also
  * untouched — still Drone1's.
  *
  * Field order below matches each struct's declaration order in
@@ -39,12 +39,12 @@ const DroneConfig kDroneConfig = {
     
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
     {
-        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         0.043f,  // g1_seed_roll  — Ixx: RPM-torque / p_dot FRF ratio, cal flights 3+4 (was Drone1's 0.0035)
         0.046f,  // g1_seed_pitch — Iyy, same fit (was Drone1's 0.0045).
         1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
@@ -58,12 +58,12 @@ const DroneConfig kDroneConfig = {
     // Unused while no .controllers.switch_pos entry names AttCtrl::JINDI; copied from
     // this drone's .indi values only to keep the struct valid — see Drone1's .jindi comment for the full rationale.
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
-        { 0.065f, 0.02f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f }, // yaw_rate
-        { 0.60f, 0.05f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         { 1.0f,  0.0f,  0.0f, 0.5f, 0.0f, 20.0f, 20.0f },    // roll_accel
         0.043f,  // g1_seed_roll  — same as .indi
         0.046f,  // g1_seed_pitch — same as .indi
@@ -75,17 +75,18 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
-    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain }
+    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm }
     {
-        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att  — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 4.50f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att — S500 ArduPilot-tuned angle P (was Drone1's 4.00)
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate  ("SLC")
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate ("SLC")
-        { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
-        { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — matches ArduPilot HEAD)
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — matches ArduPilot HEAD)
-        3.0f,  // yaw_stick_gain
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
+        { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
+        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  
+        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate 
+        { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
+        { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
+        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_roll)
+        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_pitch)
+        4.0f,  // yaw_stick_gain
+        80.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
     },
     
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -141,9 +142,13 @@ const DroneConfig kDroneConfig = {
         14.7f,                                                  // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz }
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source }
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
-    { 20.0f, 15.0f },
+    // AngAccelSource::STRAIN flies the strain gauge fit instead (SACC logs both
+    // either way). The fit was made with a single 15 Hz pole only — replayed on
+    // cal flights 3/4, the extra 20 Hz 2nd-order stage here adds 10-20 ms and
+    // drops R^2 from ~0.65 to ~0.55; fly strain as { 0.0f, 15.0f, STRAIN }.
+    { 0.0f, 15.0f, AngAccelSource::STRAIN },
     
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
@@ -176,7 +181,7 @@ const DroneConfig kDroneConfig = {
     // .logging — LoggingConfig { log_rate_hz, prealloc_mb, enable } — one LogEnableConfig flag per message type
     {
         100.0f, // log_rate_hz
-        10,     // prealloc_mb — contiguous SD space reserved per log file
+        15,     // prealloc_mb — contiguous SD space reserved per log file
         { true, // att
           false, // lin
           true, // rcin
@@ -186,7 +191,7 @@ const DroneConfig kDroneConfig = {
           true, // imu1
           true, // imu2
           true, // imu3
-          false, // indi
+          true, // indi
           false, // baro
           false, // ptun
           false, // mocp
@@ -195,8 +200,9 @@ const DroneConfig kDroneConfig = {
           true, // strn (STN1..STN4)
           false, // jindi
           false, // jpid
-          true, // ctun (AttitudePID tuning)
-          true }, // sidd (system-ID sweep)
+          false, // ctun (AttitudePID tuning)
+          false, // sidd (system-ID sweep)
+          true }, // pidp (AttitudePIDPI cascade; also runs it in shadow)
     },
 
     // .sysid — SysIdConfig { rc_channel, axes[4], f_start_hz, f_stop_hz, duration_s, magnitude[4], fade_in_s, fade_out_s }

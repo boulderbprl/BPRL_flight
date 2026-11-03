@@ -69,6 +69,29 @@ float lowpass2p(float input, Biquad2pState& state, float fc_hz, float dt_s)
     return output;
 }
 
+float highpass1p(float input, Highpass1pState& state, float fc_hz, float dt_s)
+{
+    if (fc_hz <= 0.0f || dt_s <= 0.0f) return input;  // disabled -> passthrough
+
+    if (!state.initialised) {
+        state.prev_in     = input;
+        state.prev_out    = 0.0f;
+        state.initialised = true;
+        return 0.0f;
+    }
+
+    // y[k] = b0*(x[k] - x[k-1]) - a1*y[k-1],  K = tan(pi*fc*dt),
+    // b0 = 1/(1+K), a1 = (K-1)/(K+1).
+    const float K  = tanf(3.14159265f * fc_hz * dt_s);
+    const float b0 = 1.0f / (1.0f + K);
+    const float a1 = (K - 1.0f) / (K + 1.0f);
+
+    const float output = b0 * (input - state.prev_in) - a1 * state.prev_out;
+    state.prev_in  = input;
+    state.prev_out = output;
+    return output;
+}
+
 NotchCoeffs notch_coeffs(float center_hz, float bandwidth_hz, float dt_s)
 {
     if (center_hz <= 0.0f || bandwidth_hz <= 0.0f || dt_s <= 0.0f) {
