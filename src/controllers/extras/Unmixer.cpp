@@ -16,12 +16,21 @@ float Unmixer::motor_force_N(const UnmixerConfig &cfg, float rpm)
 void Unmixer::compute(const uint32_t rpm[4], float torque_Nm[2])
 {
     float rpm_filt[4];
-    const float alpha_extra = lowpass_alpha(_filt.lpf_extra_hz, CONTROL_DT_S);
-    for (int i = 0; i < 4; ++i) {
-        const float stage2p = lowpass2p(static_cast<float>(rpm[i]), _rpm_filt_state[i],
-                                         _filt.lpf_hz, CONTROL_DT_S);
-        _rpm_extra_filt[i] = lowpass(stage2p, _rpm_extra_filt[i], alpha_extra);
-        rpm_filt[i] = _rpm_extra_filt[i];
+    if (_filt.rpm_lpf_hz > 0.0f) {
+        // Own single pole, independent of the p_dot/strain chain (AngAccelFilterConfig::rpm_lpf_hz).
+        const float alpha_rpm = lowpass_alpha(_filt.rpm_lpf_hz, CONTROL_DT_S);
+        for (int i = 0; i < 4; ++i) {
+            _rpm_extra_filt[i] = lowpass(static_cast<float>(rpm[i]), _rpm_extra_filt[i], alpha_rpm);
+            rpm_filt[i] = _rpm_extra_filt[i];
+        }
+    } else {
+        const float alpha_extra = lowpass_alpha(_filt.lpf_extra_hz, CONTROL_DT_S);
+        for (int i = 0; i < 4; ++i) {
+            const float stage2p = lowpass2p(static_cast<float>(rpm[i]), _rpm_filt_state[i],
+                                             _filt.lpf_hz, CONTROL_DT_S);
+            _rpm_extra_filt[i] = lowpass(stage2p, _rpm_extra_filt[i], alpha_extra);
+            rpm_filt[i] = _rpm_extra_filt[i];
+        }
     }
 
     const float F0 = motor_force_N(_cfg, rpm_filt[0]);  // FR

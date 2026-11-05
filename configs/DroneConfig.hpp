@@ -217,10 +217,19 @@ enum class AngAccelSource : uint8_t {
     STRAIN,
 };
 
+// rpm_lpf_hz decouples the Unmixer's RPM filter from the chain above. > 0:
+// the Unmixer uses ONLY a single 1st-order pole at rpm_lpf_hz on each motor's
+// RPM (lpf_hz / lpf_extra_hz then apply to p_dot/q_dot and strain only).
+// <= 0: the Unmixer uses the shared lpf_hz/lpf_extra_hz chain (delay-matched
+// by construction, the original behaviour). RPM-derived torque is naturally
+// clean (~91% signal on Drone2 flight 7, unfiltered), so the shared 15 Hz
+// pole mostly bought ~10 ms of lag. A 1st-order pole delays by
+// ~1/(2*pi*fc) at low frequency: 30 Hz ≈ 5.3 ms, 15 Hz ≈ 10.6 ms.
 struct AngAccelFilterConfig {
     float          lpf_hz;        // 2nd-order Butterworth cutoff; <= 0 disables it
     float          lpf_extra_hz;  // optional cascaded 1st-order stage; <= 0 disables it
     AngAccelSource source;        // p_dot/q_dot from IMU or strain — see above
+    float          rpm_lpf_hz;    // Unmixer-only 1st-order RPM pole; <= 0 = use the shared chain
 };
 
 // Which sensors are physically populated on this airframe. has_can_imx5_ins/

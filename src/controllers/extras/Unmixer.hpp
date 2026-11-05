@@ -13,7 +13,9 @@
  * AngAccelFilterConfig — 2nd-order Butterworth at lpf_hz, then an optional
  * 1st-order stage at lpf_extra_hz (<=0 disables it) — the exact same
  * setting StateManager uses for p_dot/q_dot, so the two INDI feedback
- * signals stay delay-matched by construction. dt is a fixed constant rather than measured,
+ * signals stay delay-matched by construction — unless the drone sets
+ * AngAccelFilterConfig::rpm_lpf_hz > 0, which replaces that chain here with
+ * one 1st-order pole at rpm_lpf_hz (RPM only). dt is a fixed constant rather than measured,
  * since compute() is only ever called from ControlThread's fixed 400 Hz
  * period (CONTROL_DT_S in src/threads.hpp) — no self-timing needed.
  *

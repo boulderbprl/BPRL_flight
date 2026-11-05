@@ -41,16 +41,16 @@ const DroneConfig kDroneConfig = {
     {
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 14.0f,  0.2f, 0.3f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 14.0f,  0.2f, 0.3f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         0.043f,  // g1_seed_roll  — Ixx: RPM-torque / p_dot FRF ratio, cal flights 3+4 (was Drone1's 0.0035)
         0.046f,  // g1_seed_pitch — Iyy, same fit (was Drone1's 0.0045).
         1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
         1.0f,    // indi_output_gain_pitch (kappa)
-        0.05f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
-        0.005f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
+        0.0f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
+        0.0f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
         1.5f,    // yaw_gain
     },
 
@@ -70,8 +70,8 @@ const DroneConfig kDroneConfig = {
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
         40.0f,   // h_roll — 1000/25
         1.0f,    // alpha — fully accel-path for now, not yet characterized
-        0.05f,   // nlms_mu_pid
-        0.005f,  // nlms_mu_indi
+        0.0f,   // nlms_mu_pid
+        0.0f,  // nlms_mu_indi
         1.5f,    // yaw_gain
     },
 
@@ -83,10 +83,10 @@ const DroneConfig kDroneConfig = {
         { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate 
         { 0.2f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_roll)
-        { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_pitch)
+        { 0.5f, 4.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_roll)
+        { 0.5f, 4.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_pitch)
         4.0f,  // yaw_stick_gain
-        80.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
+        120.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
     },
     
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -142,13 +142,19 @@ const DroneConfig kDroneConfig = {
         14.7f,                                                  // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source }
-    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz }
+    // lpf_hz/lpf_extra_hz apply to p_dot/q_dot (IMU and strain). rpm_lpf_hz gives the
+    // Unmixer's RPM torque its own single pole: 30 Hz ≈ 5.3 ms delay (was the shared
+    // 15 Hz ≈ 10.6 ms). Raw-RPM torque is ~91% signal (flight 7), so it needs little filtering.
     // AngAccelSource::STRAIN flies the strain gauge fit instead (SACC logs both
     // either way). The fit was made with a single 15 Hz pole only — replayed on
     // cal flights 3/4, the extra 20 Hz 2nd-order stage here adds 10-20 ms and
     // drops R^2 from ~0.65 to ~0.55; fly strain as { 0.0f, 15.0f, STRAIN }.
-    { 0.0f, 15.0f, AngAccelSource::STRAIN },
+    { 0.0f, 15.0f, // lpf_hz, lpf_extra_hz, 0 to disable ( the first filter is 2nd-order, the second is 1st-order)
+      AngAccelSource::STRAIN, // source — IMU or STRAIN 
+      30.0f }, // rpm_lpf_hz — Unmixer's single-pole RPM torque filter
+
+
     
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
@@ -211,7 +217,7 @@ const DroneConfig kDroneConfig = {
     // Magnitudes are untested placeholders — start small and work up.
     { 6,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
       { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
-      0.1f, 10.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
+      0.5f, 12.0f,                          // f_start_hz, f_stop_hz — 0.3-10 Hz: this airframe's ~0-5 Hz bandwidth with margin
       40.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
       { 0.15f, 0.15f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
       5.0f, 2.0f },                         // fade_in_s, fade_out_s

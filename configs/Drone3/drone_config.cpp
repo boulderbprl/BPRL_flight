@@ -156,10 +156,10 @@ const DroneConfig kDroneConfig = {
         7.04f,                                              // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source }
-    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback).
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz }
+    // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback); rpm_lpf_hz 0 = RPM uses this same chain.
     // Extra stage off on this airframe (2nd-order only).
-    { 20.0f, 0.0f, AngAccelSource::IMU },
+    { 20.0f, 0.0f, AngAccelSource::IMU, 0.0f },
 
     // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU. Mocap over the MAVLink radio (UART7).
