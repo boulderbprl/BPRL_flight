@@ -9,14 +9,16 @@ the FC's telemetry UART, so point --master at whatever reaches that link
 
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 origin
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0
+    python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --yaw 90
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
     python3 tools/traj_cmd.py --master /dev/ttyUSB0,230400 stop
 
 All positions are NED offsets in metres from the origin (D positive down, so
 1 m above the origin is --d -1). Anything left out is sent as NaN = "not
-given" and takes the firmware's default: N/E 0, D the current altitude, a
-plain circle, positive direction (clockwise seen from above), default speed.
+given" and takes the firmware's default: N/E 0, D the current altitude, the
+current heading, a plain circle, positive direction (clockwise seen from
+above), default speed. --yaw is in degrees here and sent in radians.
 See src/controllers/position/TrajectoryTracker.hpp and src/coms/MAVLink.hpp.
 
 The vehicle only acts on point/circle while flying in POS_HOLD with a valid
@@ -26,6 +28,7 @@ Requires: pip install pymavlink
 """
 
 import argparse
+import math
 import sys
 import time
 
@@ -62,6 +65,7 @@ def main():
     p.add_argument("--n", type=float, help="North offset from the origin [m] (default 0)")
     p.add_argument("--e", type=float, help="East offset [m] (default 0)")
     p.add_argument("--d", type=float, help="Down offset [m], negative = above the origin (default: current altitude)")
+    p.add_argument("--yaw", type=float, help="heading [deg], 0 = North, positive clockwise seen from above; turns to it before moving (default: keep the current heading)")
 
     c = sub.add_parser("circle", help="fly a circle or ellipse, nose along the path")
     c.add_argument("radius", type=float, help="radius [m]; for an ellipse, focus-to-near-end distance")
@@ -79,7 +83,8 @@ def main():
     elif args.command == "stop":
         cmd, params = CMD_STOP, [0.0] * 7
     elif args.command == "point":
-        cmd, params = CMD_POINT, [opt(args.n), opt(args.e), opt(args.d), NAN, NAN, NAN, NAN]
+        yaw = NAN if args.yaw is None else math.radians(args.yaw)
+        cmd, params = CMD_POINT, [opt(args.n), opt(args.e), opt(args.d), yaw, NAN, NAN, NAN]
     else:
         cmd, params = CMD_CIRCLE, [args.radius, opt(args.n), opt(args.e), opt(args.d),
                                    opt(args.focus), opt(args.dir), opt(args.speed)]

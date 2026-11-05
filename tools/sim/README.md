@@ -75,6 +75,7 @@ does (unset parameters are NaN = "not given").
 | `heading_unit` | `HeadingControl` alone: 90° step, and 170° → −170° goes the short way |
 | `heading_stick` | POS_HOLD yaw stick: turns the right way, stops cleanly, holds heading and position |
 | `point` | Origin rules, default point, 2 m move, explicit D, throttle offset, floor, stick override, falling behind |
+| `point_heading` | Point with a heading: turns before moving, flies the line at it, keeps it on the next point, short way across ±180°, range check |
 | `circle_*`, `ellipse_*` | Approach, path error, nose along the path, lean, rotation sense, slowdown at tight ends, stop |
 | `circle_from_3m_off` | Joining a circle from well outside it |
 | `commands` | Every rejection rule and cancel condition, landing afterwards, origin surviving a disarm |

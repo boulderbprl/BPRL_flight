@@ -16,9 +16,9 @@
 const DroneConfig kDroneConfig = {
     // .pid — AttitudePidGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, yaw_stick_gain }
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
-        { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
+        { 5.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
+        { 5.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
+        { 0.08f, 0.06f, 0.0007f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
         { 0.09f, 0.06f, 0.002f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
@@ -52,11 +52,11 @@ const DroneConfig kDroneConfig = {
     {
         { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 5.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 10.5f,  0.50f, 0.25f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate P=7.0 was stable, and performed batter than base PID
+        { 10.0f,  0.50f, 0.25f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate P=7.0 was stable, and performed batter than base PID
         { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        { 25.00f,  40.0f,  0.0f, 1000.0f, 0.0f, 0.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; ki 10 -> 20 (LOG0084: Pdot only reached 0.44-0.60 of AccR at 0.15-0.9 Hz, JINDI rang after gusts)
+        { 20.00f,  40.0f,  0.0f, 1000.0f, 0.0f, 0.0f, 30.0f },    // roll_accel — accel error [rad/s^2] -> jerk target [rad/s^3]; ki 10 -> 20 (LOG0084: Pdot only reached 0.44-0.60 of AccR at 0.15-0.9 Hz, JINDI rang after gusts)
         0.0048f,  //0.006f,  // g1_seed_roll — shared by both of roll's paths, see class comment
         0.0065f, // g1_seed_pitch
         1.0f,    // indi_output_gain_pitch (kappa, pitch only)
@@ -176,9 +176,9 @@ const DroneConfig kDroneConfig = {
     // down mid-sweep cancels it and keeps the same axis. See src/controllers/extras/SysId.hpp.
     // Magnitudes are untested placeholders — start small and work up.
     { -1,                                    // rc_channel (0-based, like kRcMaps); -1 disables sysid
-      { SysIdAxis::ROLL, SysIdAxis::PITCH, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
+      { SysIdAxis::ROLL, SysIdAxis::NONE, SysIdAxis::NONE, SysIdAxis::NONE },  // axes, in order
       0.5f, 20.0f,                          // f_start_hz, f_stop_hz — 0.5-20 Hz: this airframe's ~0-10 Hz bandwidth with margin
-      60.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
-      { 0.05f, 0.05f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
+      40.0f,                                // duration_s (includes the 2-cycle start dwell and both fades)
+      { 0.1f, 0.05f, 0.05f, 0.05f },       // magnitude [roll, pitch, yaw, heave] — torque cmd / throttle fraction
       5.0f, 2.0f },                         // fade_in_s, fade_out_s
 };

@@ -22,9 +22,13 @@
  * the wire format). A NaN parameter means "not given"; zero is a value.
  *
  *   POINT   p[0..2] = N, E, D offset from the origin.
- *           Not given: N, E → 0 (the origin); D → the current altitude.
- *           Flies a straight line there and holds. Heading stays where it
- *           was when the command arrived.
+ *           p[3]    = heading [rad]: 0 = North, positive clockwise seen from
+ *                     above, |heading| <= 2π. Absolute, not an offset.
+ *           Not given: N, E → 0 (the origin); D → the current altitude;
+ *           heading → stays where it was when the command arrived.
+ *           With a heading, stops and turns the nose to it (the short way
+ *           round) before moving, so the whole line is flown at that
+ *           heading. Flies a straight line there and holds.
  *
  *   CIRCLE  p[0]    = radius r [m]                               (required)
  *           p[1..3] = centre N, E, D offset from the origin      (as POINT)
@@ -143,7 +147,7 @@ public:
     static constexpr float ERR_PAUSE_M    = 1.0f;    // m, ... and at which it stops
     static constexpr float ARRIVE_POS_M   = 0.15f;   // m, |  vehicle must be this close to the start of the circle,
     static constexpr float ARRIVE_VEL_MS  = 0.2f;    // m/s, | this slow,
-    static constexpr float ARRIVE_YAW_RAD = 0.26f;   // rad, | and pointing this close to along it, before the orbit starts (15°)
+    static constexpr float ARRIVE_YAW_RAD = 0.26f;   // rad, | and pointing this close to along it, before the orbit starts (15°); also how close to a commanded heading before a point's line starts
 
 private:
     struct PathPoint {
@@ -181,7 +185,8 @@ private:
     // MOVE / HOLD.
     float _goal_ne[2] = {};
     float _goal_D     = 0.0f;
-    float _hold_yaw   = 0.0f;      // heading while moving: as found (POINT) or along the path at its start (CIRCLE)
+    float _hold_yaw   = 0.0f;      // heading while moving: as commanded or found (POINT), or along the path at its start (CIRCLE)
+    bool  _yaw_first  = false;     // POINT: holding the reference still until the nose is on _hold_yaw
 
     // ORBIT: p(θ) = _centre + (_rN·cosθ, _rE·sinθ); θ increasing turns N → E.
     float _centre[2]       = {};

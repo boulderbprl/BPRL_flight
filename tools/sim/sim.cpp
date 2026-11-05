@@ -262,6 +262,53 @@ static void scenario_heading_stick()
     check(perr < 0.15f, "position error after yawing [m]", perr, 0.15);
 }
 
+// A point with a heading: the turn comes first, then the line at that heading.
+static void scenario_point_heading()
+{
+    printf("point heading: turns first, flies at it, keeps it, range check\n");
+    Sim s("point_heading");
+    s.takeoff_to(1.0f);
+    s.cmd(TrajCmdType::SET_ORIGIN);
+    const float o[3] = { s.plant.pos[0], s.plant.pos[1], s.plant.pos[2] };
+
+    const float yaw_a = wrap_pi(s.plant.yaw + 90.0f / RAD2DEG);
+    check(s.cmd(TrajCmdType::POINT, 2.0f, 0.0f, NANF, yaw_a) == TrajResult::ACCEPTED, "point 2 m North at +90 deg accepted", 1, 1);
+    float moved_turning = 0, yaw_dev_moving = 0;
+    s.run(14.0f, [&] {
+        const float dist    = hypotf(s.plant.pos[0] - o[0], s.plant.pos[1] - o[1]);
+        const float yaw_err = fabsf(wrap_pi(s.plant.yaw - yaw_a));
+        if (yaw_err > 2.0f * TrajectoryTracker::ARRIVE_YAW_RAD) moved_turning = fmaxf(moved_turning, dist);
+        if (dist > 0.2f) yaw_dev_moving = fmaxf(yaw_dev_moving, yaw_err); });
+    check(moved_turning < 0.05f, "  moved before the nose came round [m]", moved_turning, 0.05);
+    check(yaw_dev_moving * RAD2DEG < 8.0f, "  heading error along the line [deg]", yaw_dev_moving * RAD2DEG, 8.0);
+    const float arrive = hypotf(s.plant.pos[0] - (o[0] + 2.0f), s.plant.pos[1] - o[1]);
+    check(arrive < 0.15f, "  distance from the point after 14 s [m]", arrive, 0.15);
+    check(s.traj_state() == TrajState::HOLD, "  state is HOLD", (int)s.traj_state(), 2);
+
+    // No heading given: the one just commanded is kept.
+    check(s.cmd(TrajCmdType::POINT, 0.0f, 0.0f) == TrajResult::ACCEPTED, "point back to the origin, no heading", 1, 1);
+    float yaw_dev = 0;
+    s.run(14.0f, [&] { yaw_dev = fmaxf(yaw_dev, fabsf(wrap_pi(s.plant.yaw - yaw_a))); });
+    check(yaw_dev * RAD2DEG < 5.0f, "  heading kept [deg]", yaw_dev * RAD2DEG, 5.0);
+
+    // Across the ±180° wrap: 170 → -170 is 20° the short way, not 340°.
+    s.cmd(TrajCmdType::POINT, 0.0f, 0.0f, NANF, 170.0f / RAD2DEG);
+    s.run(6.0f);
+    s.cmd(TrajCmdType::POINT, 0.0f, 0.0f, NANF, -170.0f / RAD2DEG);
+    float wrong_way = 0;
+    s.run(6.0f, [&] { wrong_way = fmaxf(wrong_way, fabsf(wrap_pi(s.plant.yaw - 180.0f / RAD2DEG))); });
+    check(wrong_way * RAD2DEG < 15.0f, "  short way across +-180: most off 180 [deg]", wrong_way * RAD2DEG, 15.0);
+
+    const float yaw_now = s.plant.yaw;
+    check(s.cmd(TrajCmdType::POINT, 1.0f, 0.0f, NANF, 90.0f) == TrajResult::BAD_PARAM, "heading 90 rad (degrees sent by mistake): BAD_PARAM", 1, 1);
+    check(s.cmd(TrajCmdType::POINT, 1.0f, 0.0f, NANF, INFINITY) == TrajResult::BAD_PARAM, "heading inf: BAD_PARAM", 1, 1);
+    s.run(2.0f);
+    const float still = hypotf(s.plant.pos[0] - o[0], s.plant.pos[1] - o[1]);
+    check(still < 0.10f, "  refused point changed nothing: position [m]", still, 0.10);
+    check(fabsf(wrap_pi(s.plant.yaw - yaw_now)) * RAD2DEG < 3.0f, "  refused point changed nothing: heading [deg]",
+          fabsf(wrap_pi(s.plant.yaw - yaw_now)) * RAD2DEG, 3.0);
+}
+
 // Step 4: point moves, defaults, floor, override, falling behind.
 static void scenario_point()
 {
@@ -560,6 +607,7 @@ int main(int argc, char **argv)
     scenario_heading_unit();
     scenario_heading_stick();
     scenario_point();
+    scenario_point_heading();
     run_orbit("circle_r1_v05_cw",   1.0f,  0.0f,  1.0f, 0.5f, 0.0f, 0.0f);
     run_orbit("circle_r1_v05_ccw",  1.0f,  0.0f, -1.0f, 0.5f, 0.0f, 0.0f);
     run_orbit("circle_r1_v10_cw",   1.0f,  0.0f,  1.0f, 1.0f, 0.0f, 0.0f);

@@ -39,6 +39,7 @@ void TrajectoryTracker::begin(const float hold[3])
     _speed_pred      = 0.0f;
     _height_offset   = 0.0f;
     _theta_rate_prev = 0.0f;
+    _yaw_first       = false;
 }
 
 // Commanded D offset → altitude goal. Not given → the current altitude.
@@ -63,15 +64,20 @@ TrajResult TrajectoryTracker::start_point(const float p[7], const float hold[3],
 
     const float n = param_or(p[0], 0.0f);
     const float e = param_or(p[1], 0.0f);
+    const bool  has_yaw = !std::isnan(p[3]);
     float goal_D;
     if (!(fabsf(n) <= OFFSET_MAX_M) || !(fabsf(e) <= OFFSET_MAX_M) || !base_altitude(p[2], hold, goal_D))
+        return TrajResult::BAD_PARAM;
+    // Refused rather than wrapped: anything larger is most likely degrees.
+    if (has_yaw && !(fabsf(p[3]) <= TWO_PI))
         return TrajResult::BAD_PARAM;
 
     begin(hold);
     _goal_ne[0] = _origin[0] + n;
     _goal_ne[1] = _origin[1] + e;
     _goal_D     = goal_D;
-    _hold_yaw   = yaw;
+    _hold_yaw   = has_yaw ? wrap_pi(p[3]) : yaw;
+    _yaw_first  = has_yaw;
     _is_circle  = false;
     _state      = TrajState::MOVE;
     return TrajResult::ACCEPTED;
@@ -174,6 +180,7 @@ bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw
     if (_state == TrajState::ORBIT) {
         update_orbit(scale, ref);
     } else {
+        if (_yaw_first && fabsf(wrap_pi(_hold_yaw - yaw)) < ARRIVE_YAW_RAD) _yaw_first = false;
         update_move(scale, ref);
 
         const bool ref_arrived = (_ref_ne[0] == _goal_ne[0] && _ref_ne[1] == _goal_ne[1]);
@@ -209,6 +216,9 @@ bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw
 // makes up the gap by overspeeding, and the vehicle arrives too fast and
 // overshoots (seen in flight: 0.8 m/s against a 0.5 m/s reference). Same
 // reasoning as PosControl's _accel_pred for the sticks.
+//
+// The turn to a commanded heading needs no shaping here: HeadingControl limits
+// its rate and acceleration. While _yaw_first is set the reference stays put.
 void TrajectoryTracker::update_move(float scale, TrajRef &ref)
 {
     const float dt   = CONTROL_DT_S;
@@ -218,7 +228,7 @@ void TrajectoryTracker::update_move(float scale, TrajRef &ref)
     ref.vel[0] = ref.vel[1] = 0.0f;
     ref.acc[0] = ref.acc[1] = 0.0f;
 
-    if (dist > 0.0f) {
+    if (dist > 0.0f && !_yaw_first) {
         const float v_des = fminf(V_MOVE, fminf(sqrtf(2.0f * A_TAN_MAX * dist), MOVE_KP * dist));
         const float prev  = _speed;
         _speed += constrain_float(v_des - _speed, -A_TAN_MAX * dt, A_TAN_MAX * dt);

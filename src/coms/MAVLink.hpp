@@ -24,7 +24,7 @@
  *
  *   command                 p1      p2  p3  p4  p5        p6         p7
  *   MAV_CMD_USER_1 (31010)  set origin to the current position (no parameters)
- *   MAV_CMD_USER_2 (31011)  point:  N   E   D
+ *   MAV_CMD_USER_2 (31011)  point:  N   E   D   heading [rad]
  *   MAV_CMD_USER_3 (31012)  circle: radius  N   E   D   focus dist  direction  speed
  *   MAV_CMD_USER_4 (31013)  stop — back to plain position hold (no parameters)
  *

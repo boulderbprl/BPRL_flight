@@ -22,6 +22,7 @@
 #include "src/coms/DShot.hpp"
 #include "src/coms/IOMCU.hpp"
 #include "src/coms/Radio.hpp"
+#include "src/coms/CRSF.hpp"
 #include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/extras/MotorMixer.hpp"
 #include "src/state_estimator/StateManager.hpp"
@@ -1500,6 +1501,20 @@ static void usb_cmd_dispatch(const char *line)
                  (uint32_t)d.mocap_timeouts,
                  (uint32_t)d.traj_cmd_rx, (uint32_t)d.traj_cmd_rejected);
         chMtxUnlock(&s_usb_write_mtx);
+#if RADIO_PROTOCOL == RADIO_PROTO_CRSF
+    } else if (strcmp(line, "RC,raw") == 0) {
+        // All 16 raw CRSF channels as parsed (172-1811, centre 992) plus frame
+        // counters — for checking which channels actually reach the FC.
+        chMtxLock(&s_usb_write_mtx);
+        chprintf((BaseSequentialStream *)&SDU1, "RC,RAW");
+        for (uint8_t n = 0; n < 16; n++)
+            chprintf((BaseSequentialStream *)&SDU1, ",ch%u=%u", (unsigned)(n + 1), (unsigned)g_crsf.channel(n));
+        chprintf((BaseSequentialStream *)&SDU1,
+                 ",rc_frames=%lu,other_frames=%lu,last_other_type=0x%02x,bad_crc=%lu\r\n",
+                 (uint32_t)g_crsf.rc_frames(), (uint32_t)g_crsf.other_frames(),
+                 (unsigned)g_crsf.last_other_type(), (uint32_t)g_crsf.bad_crc_frames());
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
     } else if (strcmp(line, "CAN,scan,start") == 0 || strcmp(line, "CAN,scan,start,2") == 0) {
         can_scan_start(line[14] == ',' ? CAN_BUS_2 : CAN_BUS_1);
         chMtxLock(&s_usb_write_mtx);

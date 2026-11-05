@@ -29,6 +29,14 @@ public:
     uint16_t channel(uint8_t n) const; // raw 11-bit value for channel n (0–15)
     bool     data_valid() const { return _valid; }
 
+    // Diagnostics (RC,raw USB command): frames that passed CRC, split into
+    // RC_CHANNELS_PACKED (0x16) and everything else; CRC failures; and the
+    // type of the most recent non-RC frame.
+    uint32_t rc_frames()      const { return _rc_frames; }
+    uint32_t other_frames()   const { return _other_frames; }
+    uint32_t bad_crc_frames() const { return _bad_crc; }
+    uint8_t  last_other_type() const { return _last_other_type; }
+
 private:
     static uint8_t crc8_dvb_s2(const uint8_t *data, uint8_t len);
     static void    unpack(const uint8_t *payload, uint16_t *ch);
@@ -39,6 +47,10 @@ private:
     uint8_t  _count{0};
     uint16_t _ch[16]{};
     bool     _valid{false};
+    uint32_t _rc_frames{0};
+    uint32_t _other_frames{0};
+    uint32_t _bad_crc{0};
+    uint8_t  _last_other_type{0};
 };
 
 extern CrsfParser g_crsf;

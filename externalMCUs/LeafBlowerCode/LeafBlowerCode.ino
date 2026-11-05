@@ -21,19 +21,25 @@
 
     All timing uses exact integer arithmetic (no rounding drift between pulses).
     Resolution is 1 ms (millis()).
+
+    Holding the button for TOGGLE_HOLD_MS toggles continuous running: the main output
+    stays ON with boost OFF until the next hold of TOGGLE_HOLD_MS. A shorter press
+    starts a burst when the button is released, so a hold never fires a burst first.
+    Short presses are ignored while running continuously.
 */
 
 #include <Arduino.h>
 
 // ============================== USER SETTINGS ==============================
-const uint32_t LB_time         = 1000;  // [ms] how long the leaf blower burst is on
-const uint16_t Boost_num       = 3;     // number of boost pulses per burst (0 = no boost)
-const uint32_t Boost_time      = 300;   // [ms] TOTAL boost on-time per burst, must be <= LB_time
+const uint32_t LB_time         = 1100;  // [ms] how long the leaf blower burst is on
+const uint16_t Boost_num       = 1;     // number of boost pulses per burst (0 = no boost)
+const uint32_t Boost_time      = LB_time;  // [ms] TOTAL boost on-time per burst, must be <= LB_time (= LB_time: boost on for the whole burst)
 const uint8_t  Boost_phase_pct = 50;    // pulse position inside its slot: 0 = start, 50 = centre, 100 = end
 
 const bool     BUTTON_ABORTS   = true;  // true: pressing the button during a burst stops it early
 const uint32_t COOLDOWN_MS     = 500;   // [ms] dead time after a burst before a new press is accepted
 const uint32_t DEBOUNCE_MS     = 30;    // [ms] button must be stable this long to count
+const uint32_t TOGGLE_HOLD_MS  = 5000;  // [ms] hold the button this long to toggle continuous running (no boost)
 const bool     DEBUG_SERIAL    = false;  // print schedule + edge timestamps at 115200 baud
 // ===========================================================================
 
@@ -72,8 +78,8 @@ bool     btnStable     = LOW;
 bool     btnLastRaw    = LOW;
 uint32_t btnLastChange = 0;
 
-// Returns true once per debounced LOW->HIGH transition.
-bool buttonPressedEdge(uint32_t now) {
+// Returns +1 once per debounced press, -1 once per debounced release, otherwise 0.
+int8_t buttonEdge(uint32_t now) {
   const bool raw = digitalRead(PIN_BUTTON);
   if (raw != btnLastRaw) {
     btnLastRaw = raw;
@@ -81,16 +87,18 @@ bool buttonPressedEdge(uint32_t now) {
   }
   if ((now - btnLastChange) >= DEBOUNCE_MS && raw != btnStable) {
     btnStable = raw;
-    return btnStable == HIGH;
+    return btnStable == HIGH ? 1 : -1;
   }
-  return false;
+  return 0;
 }
 
 // ---------------------------- State machine ---------------------------------
-enum State : uint8_t { IDLE, RUNNING, COOLDOWN };
+enum State : uint8_t { IDLE, RUNNING, COOLDOWN, CONTINUOUS };
 State    state      = IDLE;
 uint32_t stateStart = 0;
 bool     boostOut   = false;
+bool     holdActive = false;  // a press from IDLE/CONTINUOUS is being timed
+uint32_t holdStart  = 0;
 
 void setMain(bool on) { digitalWrite(PIN_MAIN, on ? HIGH : LOW); }
 
@@ -151,14 +159,39 @@ void setup() {
 
 void loop() {
   const uint32_t now = millis();
-  const bool pressed = buttonPressedEdge(now);
+  const int8_t edge = buttonEdge(now);
+  const bool pressed  = edge > 0;
+  const bool released = edge < 0;
 
-  if (state == IDLE && pressed) {
-    state = RUNNING;
-    stateStart = now;
-    if (DEBUG_SERIAL) Serial.println(F("Burst start"));
-    setMain(true);
-    // fall through to RUNNING so boost is evaluated in this same pass
+  if (pressed && (state == IDLE || state == CONTINUOUS)) {
+    holdActive = true;
+    holdStart = now;
+  }
+
+  if (holdActive && now - holdStart >= TOGGLE_HOLD_MS) {
+    holdActive = false;
+    if (state == IDLE) {
+      state = CONTINUOUS;
+      setMain(true);
+      if (DEBUG_SERIAL) Serial.println(F("Continuous on"));
+    } else {
+      allOff();
+      state = COOLDOWN;
+      stateStart = now;
+      if (DEBUG_SERIAL) Serial.println(F("Continuous off"));
+    }
+    return;
+  }
+
+  if (released && holdActive) {
+    holdActive = false;
+    if (state == IDLE) {
+      state = RUNNING;
+      stateStart = now;
+      if (DEBUG_SERIAL) Serial.println(F("Burst start"));
+      setMain(true);
+      // fall through to RUNNING so boost is evaluated in this same pass
+    }
   } else if (state == RUNNING && BUTTON_ABORTS && pressed) {
     allOff();
     state = COOLDOWN;

@@ -164,11 +164,12 @@ Diagnoses the RX side of the MAVLink/TELEM2 link independent of the radio and an
 
 > Speaks MAVLink to the FC's telemetry UART (not the USB port). Needs `pip install pymavlink`.
 
-Sends a trajectory command and prints the FC's `COMMAND_ACK`. Positions are NED offsets in metres from the origin; anything left out is sent as NaN and takes the firmware default (N/E 0, D = current altitude, plain circle, clockwise seen from above, default speed).
+Sends a trajectory command and prints the FC's `COMMAND_ACK`. Positions are NED offsets in metres from the origin; anything left out is sent as NaN and takes the firmware default (N/E 0, D = current altitude, current heading, plain circle, clockwise seen from above, default speed).
 
 ```bash
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 origin
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --e 0.5
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --yaw 90   # heading in degrees, turns first
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 stop

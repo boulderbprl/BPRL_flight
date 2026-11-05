@@ -88,10 +88,16 @@ void CrsfParser::update()
                 const uint8_t crc_len = _frame_len - 3u; // skip sync, len, crc
                 const uint8_t crc_calc = crc8_dvb_s2(&_buf[2], crc_len);
                 const uint8_t crc_recv = _buf[_frame_len - 1u];
-                if (crc_calc == crc_recv && _buf[2] == 0x16u) {
+                if (crc_calc != crc_recv) {
+                    _bad_crc++;
+                } else if (_buf[2] == 0x16u) {
                     /* type 0x16 = RC_CHANNELS_PACKED; payload starts at buf[3] */
                     unpack(&_buf[3], _ch);
                     _valid = true;
+                    _rc_frames++;
+                } else {
+                    _other_frames++;
+                    _last_other_type = _buf[2];
                 }
                 _count = 0;
             }

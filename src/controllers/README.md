@@ -521,7 +521,7 @@ Commands arrive over MAVLink (`COMMAND_LONG`, see `src/coms/README.md`), cross t
 | Command | Parameters | Behaviour |
 |---|---|---|
 | Set origin | — | Origin := current position. Refused while a trajectory is active. Survives disarm. |
-| Point | N, E, D | Straight line at `V_MOVE`, then hold. Defaults: N/E 0, D = current altitude. Heading held. |
+| Point | N, E, D, heading | Turn to the heading if one is given, then straight line at `V_MOVE`, then hold. Defaults: N/E 0, D = current altitude, heading held where it was. |
 | Circle | radius, N, E, D, focus distance, direction, speed | Fly to the nearest point of the path, turn the nose along it, then follow it nose-first. Only the radius is required. |
 | Stop | — | Back to plain position hold. |
 
