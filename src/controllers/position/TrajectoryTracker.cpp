@@ -37,6 +37,7 @@ void TrajectoryTracker::begin(const float hold[3])
     }
     _speed           = 0.0f;
     _speed_pred      = 0.0f;
+    _accel           = 0.0f;
     _height_offset   = 0.0f;
     _theta_rate_prev = 0.0f;
     _yaw_first       = false;
@@ -195,6 +196,7 @@ bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw
                 _state           = TrajState::ORBIT;
                 _speed           = 0.0f;
                 _speed_pred      = 0.0f;
+                _accel           = 0.0f;
                 _theta_rate_prev = 0.0f;
             }
         }
@@ -204,9 +206,20 @@ bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw
     return true;
 }
 
-// Straight line toward _goal_ne: speed limited to V_MOVE, slowing on a
-// constant-deceleration (sqrt) profile into the goal, with speed changes
-// limited to A_TAN_MAX.
+// Straight line toward _goal_ne: speed limited to V_MOVE, braking into the
+// goal, with the acceleration limited to A_MOVE_MAX and its rate of change to
+// J_MOVE_MAX (an S-curve). The acceleration is fed forward as a lean target,
+// so without the jerk limit every start, cruise and braking edge was a
+// one-tick lean step (~6° at 1 m/s², seen in flight 2026-11-05 as a lurch at
+// each phase of a go-to move).
+//
+// Braking: from speed v with the deceleration still to be built up at
+// J_MOVE_MAX, the stopping distance is v²/2A + v·A/2J; v_brake(d) inverts it.
+// Close in, the speed is MOVE_KP·d (exponential final approach). Both use the
+// distance left for the un-lagged speed (see below).
+// Speed changes: the acceleration asked for is A·min(1, sqrt(2J|Δv|)/A) —
+// the largest that can still be ramped back to zero by the time the speed
+// gets there — and the actual acceleration slews toward it at J.
 //
 // The reference itself moves at _speed_pred — the commanded speed through a
 // first-order lag matching the attitude loop — while the commanded
@@ -229,9 +242,20 @@ void TrajectoryTracker::update_move(float scale, TrajRef &ref)
     ref.acc[0] = ref.acc[1] = 0.0f;
 
     if (dist > 0.0f && !_yaw_first) {
-        const float v_des = fminf(V_MOVE, fminf(sqrtf(2.0f * A_TAN_MAX * dist), MOVE_KP * dist));
-        const float prev  = _speed;
-        _speed += constrain_float(v_des - _speed, -A_TAN_MAX * dt, A_TAN_MAX * dt);
+        constexpr float A = A_MOVE_MAX, J = J_MOVE_MAX;
+        constexpr float k = A * A / (2.0f * J);                        // m/s
+        // Brake on the distance left for the un-lagged speed: the reference
+        // trails it by exactly ATT_LAG_S·_speed_pred (first-order lag), so
+        // braking on the reference's own distance arrives still moving and
+        // stops in one tick at the goal.
+        const float d_u     = fmaxf(0.0f, dist - PosControl::ATT_LAG_S * _speed_pred);
+        const float v_brake = sqrtf(k * k + 2.0f * A * d_u) - k;      // inverse of d = v²/2A + v·A/2J
+        const float v_des   = fminf(V_MOVE, fminf(v_brake, MOVE_KP * d_u));
+        const float dv      = v_des - _speed;
+        const float a_des   = copysignf(fminf(A, sqrtf(2.0f * J * fabsf(dv))), dv);
+        _accel += constrain_float(a_des - _accel, -J * dt, J * dt);
+        _speed  = fmaxf(0.0f, _speed + _accel * dt);
+        if (_speed == 0.0f && _accel < 0.0f) _accel = 0.0f;
 
         _speed_pred += (dt / (PosControl::ATT_LAG_S + dt)) * (_speed - _speed_pred);
 
@@ -241,9 +265,10 @@ void TrajectoryTracker::update_move(float scale, TrajRef &ref)
             _ref_ne[1]  = _goal_ne[1];
             _speed      = 0.0f;
             _speed_pred = 0.0f;
+            _accel      = 0.0f;
         } else {
             const float dir[2] = { d[0] / dist, d[1] / dist };
-            const float accel  = (_speed - prev) / dt;
+            const float accel  = _accel;
             _ref_ne[0] += dir[0] * step;
             _ref_ne[1] += dir[1] * step;
             ref.vel[0]  = dir[0] * _speed_pred * scale;
@@ -323,7 +348,7 @@ void TrajectoryTracker::update_vertical(float stick_thr, TrajRef &ref)
 
     const float d    = _goal_D - _ref_D;
     const float dist = fabsf(d);
-    const float v_des = fminf(V_VERT_MAX, fminf(sqrtf(2.0f * A_VERT_MAX * dist), MOVE_KP * dist));
+    const float v_des = fminf(V_VERT_MAX, fminf(sqrtf(2.0f * A_VERT_MAX * dist), VERT_KP * dist));
     _vspeed += constrain_float((d < 0.0f ? -v_des : v_des) - _vspeed, -A_VERT_MAX * dt, A_VERT_MAX * dt);
     if (dist < 1.0e-3f && fabsf(_vspeed) < 0.01f) {
         _ref_D  = _goal_D;

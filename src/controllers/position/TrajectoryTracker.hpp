@@ -133,9 +133,11 @@ public:
     // ── Limits — starting values, flight-tune here ──────────────────────────
     static constexpr float V_DEFAULT      = 0.5f;    // m/s, circle speed when none is given
     static constexpr float V_MAX          = 2.0f;    // m/s, cap on a commanded circle speed
-    static constexpr float V_MOVE         = 0.5f;    // m/s, straight-line speed to a point / to the start of a circle
+    static constexpr float V_MOVE         = 1.0f;    // m/s, straight-line speed to a point / to the start of a circle (was 0.5; 2026-11-05 go-to moves felt slow)
     static constexpr float V_VERT_MAX     = 0.5f;    // m/s, climb/descent speed toward a commanded D
-    static constexpr float A_TAN_MAX      = 1.0f;    // m/s², speeding up / slowing down along the path
+    static constexpr float A_TAN_MAX      = 1.0f;    // m/s², speeding up / slowing down along a circle
+    static constexpr float A_MOVE_MAX     = 1.5f;    // m/s², same on a straight move (jerk-limited, so the lean ramps in: ~8.7° at full accel)
+    static constexpr float J_MOVE_MAX     = 4.5f;    // m/s³, straight move: how fast that acceleration may change (full accel in 0.33 s)
     static constexpr float A_VERT_MAX     = 1.0f;    // m/s², same, vertically
     static constexpr float A_LAT_MAX      = 2.0f;    // m/s², turning (PosControl's 40° lean limit allows ~8.2; ArduPilot's AC_Circle also keeps to under half)
     static constexpr float YAW_RATE_MAX   = 0.8f;    // rad/s, how fast the path may ask the nose to turn — keep below HeadingGains::max_rate
@@ -178,6 +180,7 @@ private:
     float _ref_ne[2]     = {};     // horizontal reference position [m]
     float _speed         = 0.0f;   // commanded speed along the path [m/s]
     float _speed_pred    = 0.0f;   // MOVE: _speed lagged by the attitude loop's response — what the reference actually moves at
+    float _accel         = 0.0f;   // MOVE: d(_speed)/dt, slewed at J_MOVE_MAX [m/s²]
     float _ref_D         = 0.0f;   // altitude reference before the pilot's offset [m]
     float _vspeed        = 0.0f;   // its rate [m/s]
     float _height_offset = 0.0f;   // pilot's throttle-stick offset on top of _ref_D [m]
@@ -197,7 +200,8 @@ private:
     float _theta           = 0.0f;
     float _theta_rate_prev = 0.0f;
 
-    static constexpr float MOVE_KP        = 2.0f;   // 1/s, final approach to a point (linear end of the sqrt speed profile)
+    static constexpr float MOVE_KP        = 3.0f;   // 1/s, final approach to a point (linear end of the braking profile; was 2)
+    static constexpr float VERT_KP        = 2.0f;   // 1/s, same for the climb/descent toward a commanded D
     static constexpr int   NEAREST_STEPS  = 90;     // samples of θ when looking for the nearest point of the path
     static constexpr int   LOOKAHEAD_STEPS = 10;    // samples of the path ahead when deciding how fast it is safe to go
 };

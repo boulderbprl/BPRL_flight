@@ -153,7 +153,7 @@ constexpr RcChannelMap kRcMaps[2] = {
       2,   // yaw
       4,   // arm
       5,   // ctrl_select
-      8,   // poshold_switch
+      6,   // poshold_switch
       7 }, // strain_cal_switch (momentary)
 };
 

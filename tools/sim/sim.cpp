@@ -9,6 +9,7 @@
 // linear drag, a steady wind). It is good for catching logic errors, sign
 // errors, target jumps and gross mistuning — not for final gains.
 #include "src/controllers/FlightStateMachine.hpp"
+#include "src/controllers/extras/MotorMixer.hpp"
 #include "src/controllers/position/HeadingControl.hpp"
 #include "src/FlightState.hpp"
 #include "src/math/math.hpp"
@@ -106,6 +107,7 @@ struct Plant {
 struct Sim {
     Plant              plant;
     FlightStateMachine fsm{ kDroneConfig };
+    MotorMixer         mixer{ kDroneConfig.mixer };   // saturation flags for the rate-I anti-windup, as ControlThread
     float t = 0;
     // Pilot
     bool  armed = false, pos_valid = true;
@@ -155,6 +157,13 @@ struct Sim {
         const uint32_t rpm[4] = { 0, 0, 0, 0 };
         float cmds[3];
         fsm.update(state_full, euler, input, armed, pos_valid, rpm, 0.0f, cmds, thrust_out);   // roll_jerk: no strain-rate sensor in the sim
+        {   // ControlThread feeds the mixer's limit flags back every tick; without it they stay
+            // at MixerLimits' default ("limited") and the PID rate integrators never run.
+            const float safety[2] = { euler[0], euler[1] };
+            int32_t motor_out[4];
+            mixer.update(cmds, thrust_out, armed, safety, motor_out);
+            fsm.set_mixer_limits(mixer.limits());
+        }
         fsm.get_ptun_diag(ptun);
         fsm.get_traj_diag(traj);
         if (csv) fprintf(csv, "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.4f,%.4f,%.5f,%.5f,"
@@ -397,7 +406,7 @@ static void scenario_point()
 
     // Override mid-move: roll stick tap → trajectory off, stays off, no lean step.
     s.cmd(TrajCmdType::POINT, 3.0f, 0.0f);
-    s.run(3.0f);
+    s.run(1.5f / TrajectoryTracker::V_MOVE);   // well before the end of the move at any V_MOVE (was 3 s at 0.5 m/s)
     const float roll_tgt_before = s.ptun[8], pitch_tgt_before = s.ptun[9];
     s.roll_stick = 0.3f;
     s.tick();
