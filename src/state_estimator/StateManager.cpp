@@ -519,9 +519,11 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // delay-matched. r_dot is
     // unchanged — differentiates the fully-filtered r with the original
     // 1st-order lowpass, since yaw has no INDI path consuming it.
-    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, _ang_accel_filt.lpf_hz, CONTROL_DT_S);
-    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, _ang_accel_filt.lpf_hz, CONTROL_DT_S);
-    const float alpha_pqdot_extra = lowpass_alpha(_ang_accel_filt.lpf_extra_hz, CONTROL_DT_S);
+    // IMU-only chain when AngAccelFilterConfig::imu_lpf_hz/imu_lpf_extra_hz
+    // are set (the strain fit keeps lpf_hz/lpf_extra_hz).
+    const float pdot_2p = lowpass2p(derivative(p_notched, _prev_p, dt), _pdot_filt_state, _ang_accel_filt.imu_lp2_hz(), CONTROL_DT_S);
+    const float qdot_2p = lowpass2p(derivative(q_notched, _prev_q, dt), _qdot_filt_state, _ang_accel_filt.imu_lp2_hz(), CONTROL_DT_S);
+    const float alpha_pqdot_extra = lowpass_alpha(_ang_accel_filt.imu_lp1_hz(), CONTROL_DT_S);
     _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
     _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
 

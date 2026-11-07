@@ -142,8 +142,11 @@ const DroneConfig kDroneConfig = {
         14.7f,                                                  // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz }
-    // lpf_hz/lpf_extra_hz apply to p_dot/q_dot (IMU and strain). rpm_lpf_hz gives the
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }
+    // lpf_hz/lpf_extra_hz apply to the strain fit (and to the IMU p_dot/q_dot when both
+    // imu_ fields are 0). imu_lpf_hz/imu_lpf_extra_hz: the IMU estimate's own chain —
+    // 2-pole 20 Hz + 1-pole 15 Hz (≈ 11 + 10.6 ms at low frequency), since the IMU estimate
+    // with a single 15 Hz pole is too noisy to fly. rpm_lpf_hz gives the
     // Unmixer's RPM torque its own single pole: 30 Hz ≈ 5.3 ms delay (was the shared
     // 15 Hz ≈ 10.6 ms). Raw-RPM torque is ~91% signal (flight 7), so it needs little filtering.
     // AngAccelSource::STRAIN flies the strain gauge fit instead (SACC logs both
@@ -152,7 +155,8 @@ const DroneConfig kDroneConfig = {
     // drops R^2 from ~0.65 to ~0.55; fly strain as { 0.0f, 15.0f, STRAIN }.
     { 0.0f, 15.0f, // lpf_hz, lpf_extra_hz, 0 to disable ( the first filter is 2nd-order, the second is 1st-order)
       AngAccelSource::STRAIN, // source — IMU or STRAIN 
-      30.0f }, // rpm_lpf_hz — Unmixer's single-pole RPM torque filter
+      30.0f,   // rpm_lpf_hz — Unmixer's single-pole RPM torque filter
+      20.0f, 15.0f }, // imu_lpf_hz, imu_lpf_extra_hz — IMU p_dot/q_dot only (2nd-order, then 1st-order)
 
 
     
@@ -194,16 +198,16 @@ const DroneConfig kDroneConfig = {
           true, // outp
           true, // rpms
           false, // strt
-          false, // imu1
+          true, // imu1
           false, // imu2
           false, // imu3
           true, // indi
           false, // baro
           true, // ptun
-          true, // mocp
-          true, // traj
+          false, // mocp
+          false, // traj
           false, // mavl
-          false, // strn (STN1..STN4)
+          true, // strn (STN1..STN4)
           false, // jindi
           false, // jpid
           false, // ctun (AttitudePID tuning)

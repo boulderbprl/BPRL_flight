@@ -674,10 +674,15 @@ static THD_FUNCTION(ControlThread, arg)
         chMtxLock(&strainGauge_mtx);
         sg_snap = g_strain_gauge;
         chMtxUnlock(&strainGauge_mtx);
-        s_strain_acc.update(sg_snap);
+        s_strain_acc.update(sg_snap, rpm);
+        // A fit with RPM inputs (StrainGaugeFit.hpp STRAIN_FIT_RPM_TAPS > 0) is
+        // only as good as the RPM: a BAD motor reads 0 here, so the estimate is
+        // not used then (StateManager falls back to the IMU p_dot/q_dot).
         const SensorHealth sg_health = strain_gauge_health(sg_snap, now_us);
+        const bool strain_fit_rpm_ok = !StrainAngAccel::uses_rpm() || rpm_health != SensorHealth::BAD;
         state_mgr.set_strain_ang_accel(s_strain_acc.p_dot(), s_strain_acc.q_dot(),
-                                       s_strain_acc.ready() && sg_health != SensorHealth::BAD);
+                                       s_strain_acc.ready() && sg_health != SensorHealth::BAD
+                                       && strain_fit_rpm_ok);
 
         const bool indi_needs_strain = kDroneConfig.sensors.indi_requires_strain
                                     || kDroneConfig.ang_accel_filt.source == AngAccelSource::STRAIN;

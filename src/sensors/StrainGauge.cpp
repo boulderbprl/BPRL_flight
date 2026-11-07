@@ -212,10 +212,12 @@ static constexpr int kTapStride = (int)(STRAIN_FIT_TAP_DT_S / CONTROL_DT_S + 0.5
 static_assert(kTapStride >= 1, "strain fit taps closer together than one control tick");
 static_assert((STRAIN_FIT_N_TAPS - 1) * kTapStride + 1 <= 24,
               "StrainAngAccel::kHistory too short for the fit's tap history");
+static_assert((STRAIN_FIT_RPM_TAPS > 0 ? STRAIN_FIT_RPM_TAPS - 1 : 0) * kTapStride + 1 <= 24,
+              "StrainAngAccel::kHistory too short for the fit's RPM tap history");
 static_assert(STRAIN_GAUGE_HPF_HZ == STRAIN_FIT_HPF_HZ,
               "strain high-pass doesn't match the one the fit was made with");
 
-void StrainAngAccel::update(const StrainGaugeRaw &snap)
+void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
 {
     if (!snap.valid) return;
 
@@ -244,6 +246,11 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap)
         _lp1[i]         = lowpass(lp2, _lp1[i], alpha_extra);
         _hist[_head][i] = _lp1[i];
     }
+    // RPM inputs, unfiltered — as the fit used the logged RPMS.
+    for (int m = 0; m < 4; m++) {
+        const float r = (float)rpm[m] * STRAIN_FIT_RPM_SCALE;
+        _rpm_hist[_head][m] = STRAIN_FIT_RPM_SQUARE ? r * r : r;
+    }
     if (_ticks < kHistory) _ticks++;
 
     // 3. Weighted taps, k, k - stride, ... Before the history fills the
@@ -255,6 +262,13 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap)
         for (int i = 0; i < kSignals; i++) {
             p += kStrainFitWP[j][i] * row[i];
             q += kStrainFitWQ[j][i] * row[i];
+        }
+    }
+    for (int j = 0; j < STRAIN_FIT_RPM_TAPS; j++) {
+        const float *row = _rpm_hist[(_head - j * kTapStride + kHistory) % kHistory];
+        for (int m = 0; m < 4; m++) {
+            p += kStrainFitRpmWP[j][m] * row[m];
+            q += kStrainFitRpmWQ[j][m] * row[m];
         }
     }
     _p_dot = ready() ? p : 0.0f;

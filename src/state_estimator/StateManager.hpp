@@ -136,7 +136,8 @@
  * p_dot/q_dot (feeding the INDI law) don't inherit that stage's extra lag —
  * then filtered by the drone's AngAccelFilterConfig: 2nd-order Butterworth
  * at lpf_hz, then an optional 1st-order stage at lpf_extra_hz (<=0 disables
- * it) — the same setting the Unmixer applies to RPM. With
+ * it) — the same setting the Unmixer applies to RPM — or, when set, its own
+ * imu_lpf_hz / imu_lpf_extra_hz chain (AngAccelFilterConfig). With
  * AngAccelFilterConfig::source == STRAIN, the strain gauge estimate
  * (set_strain_ang_accel()) replaces it whenever that one is usable.
  * r_dot differentiates the fully-filtered r (post STATEMGR_LP_R_HZ) and keeps

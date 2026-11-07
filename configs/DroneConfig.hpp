@@ -225,11 +225,26 @@ enum class AngAccelSource : uint8_t {
 // clean (~91% signal on Drone2 flight 7, unfiltered), so the shared 15 Hz
 // pole mostly bought ~10 ms of lag. A 1st-order pole delays by
 // ~1/(2*pi*fc) at low frequency: 30 Hz ≈ 5.3 ms, 15 Hz ≈ 10.6 ms.
+//
+// imu_lpf_hz / imu_lpf_extra_hz give the IMU p_dot/q_dot (StateManager) its
+// own chain, same shape: 2nd-order Butterworth at imu_lpf_hz, then a 1st-order
+// stage at imu_lpf_extra_hz (each <= 0 disables that stage). Either > 0: the
+// IMU estimate uses ONLY these two (lpf_hz / lpf_extra_hz then apply to the
+// strain fit only). Both <= 0: the IMU estimate uses the shared lpf_hz /
+// lpf_extra_hz chain, the original behaviour. A heavier IMU chain is more
+// delay on whatever flies the IMU estimate — including the strain->IMU
+// fallback when source is STRAIN — against the Unmixer's RPM torque.
 struct AngAccelFilterConfig {
     float          lpf_hz;        // 2nd-order Butterworth cutoff; <= 0 disables it
     float          lpf_extra_hz;  // optional cascaded 1st-order stage; <= 0 disables it
     AngAccelSource source;        // p_dot/q_dot from IMU or strain — see above
     float          rpm_lpf_hz;    // Unmixer-only 1st-order RPM pole; <= 0 = use the shared chain
+    float          imu_lpf_hz;        // IMU-only 2nd-order stage (see above); both IMU fields <= 0 = shared chain
+    float          imu_lpf_extra_hz;  // IMU-only 1st-order stage
+
+    bool  imu_own_chain()    const { return imu_lpf_hz > 0.0f || imu_lpf_extra_hz > 0.0f; }
+    float imu_lp2_hz()       const { return imu_own_chain() ? imu_lpf_hz       : lpf_hz; }
+    float imu_lp1_hz()       const { return imu_own_chain() ? imu_lpf_extra_hz : lpf_extra_hz; }
 };
 
 // Which sensors are physically populated on this airframe. has_can_imx5_ins/

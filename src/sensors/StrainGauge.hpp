@@ -111,7 +111,8 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
  * Strain -> angular acceleration (p_dot, q_dot), the firmware half of the
  * MATLAB strain calibration pipeline (strain_pdot_pipeline.m). Weights and
  * gauge groups come from StrainGaugeFit.hpp, generated from that script's
- * strain_pdot_weights.mat by tools/strain_fit_export.py. Per ControlThread
+ * weights .mat (gust_calibration.m: gust_fit_weights.mat) by
+ * tools/strain_fit_export.py. Per ControlThread
  * tick, on that tick's snapshot of g_strain_gauge:
  *
  *  1. Per arm and axis (gauges {0,3,6}, {1,4,7}, {2,5,8} of each arm, live
@@ -132,6 +133,15 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
  *     STRAIN_FIT_TAP_DT_S apart (every 4th tick at 400 Hz) and
  *       p_dot = kStrainFitBiasP + sum(kStrainFitWP x taps), same for q_dot.
  *     The estimate still updates every tick.
+ *  4. Fits from gust_calibration.m (use_rpm) also take the 4 motor RPMs:
+ *     STRAIN_FIT_RPM_TAPS taps, same spacing, of |rpm[i]| x
+ *     STRAIN_FIT_RPM_SCALE (squared if STRAIN_FIT_RPM_SQUARE), unfiltered —
+ *     the fit was made on the logged RPMS (= |rpm_raw|, which is
+ *     EncoderNodeHealth::rpm_abs while the encoder is GOOD), with no filter.
+ *     rpm[] is the ControlThread's logical-order rpm[] (FR, RL, FL, RR =
+ *     RPMS.RPM0..3), so the estimate is only valid while the RPM health
+ *     isn't BAD — the caller gates on that (threads.cpp). With
+ *     STRAIN_FIT_RPM_TAPS 0 (a strain-only fit) rpm is ignored.
  *
  * Gauges are sampled and held between I2C frames — the board and the I2C
  * poll both run at ~400 Hz, so most ticks see a new frame.
@@ -145,8 +155,11 @@ public:
     explicit StrainAngAccel(const AngAccelFilterConfig &filt) : _filt(filt) {}
 
     // Once per ControlThread tick (filters run at the fixed CONTROL_DT_S).
-    // Does nothing until snap.valid.
-    void update(const StrainGaugeRaw &snap);
+    // Does nothing until snap.valid. rpm = this tick's logical-order motor
+    // RPM (step 4 above; unused by a strain-only fit).
+    void update(const StrainGaugeRaw &snap, const uint32_t rpm[4]);
+
+    static constexpr bool uses_rpm() { return STRAIN_FIT_RPM_TAPS > 0; }
 
     float p_dot() const { return _p_dot; }   // rad/s^2
     float q_dot() const { return _q_dot; }   // rad/s^2
@@ -161,6 +174,7 @@ private:
     Biquad2pState        _lp2[kSignals];
     float                _lp1[kSignals] = {};
     float                _hist[kHistory][kSignals] = {};
+    float                _rpm_hist[kHistory][4] = {};   // RPM inputs (step 4), same ring index as _hist
     int                  _head  = 0;   // _hist row written on the last update
     uint32_t             _ticks = 0;   // updates since the first valid frame (saturates at kHistory)
     float                _p_dot = 0.0f;
