@@ -47,9 +47,14 @@
  *
  * From MAVProxy (which fills omitted parameters with 0, so spell them out):
  *   long 31010 0 0 0 0 0 0 0                 set origin
- *   long 31011 1.0 0 nan 0 0 0 0             point 1 m North at the current height
+ *   long 31011 1.0 0 nan nan 0 0 0           point 1 m North at the current height and heading
  *   long 31012 1.0 nan nan nan nan nan nan   1 m circle about the origin, defaults
  *   long 31013 0 0 0 0 0 0 0                 stop
+ *
+ * Attitude controller: STATUSTEXT (severity INFO) reading CTRL:<name>, sent at
+ * 1 Hz and straight away on a change. <name> is PID, INDI, PID_PI, PID_JERK or
+ * JINDI — the controller actually flying, so PID after an INDI sensor fallback
+ * even with the switch still on INDI.
  *
  * Coordinate convention: both messages are expected in NED (x=North, y=East,
  * z=Down), which maps directly to MocapRaw fields consumed by the EKF.

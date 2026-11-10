@@ -291,6 +291,24 @@ static void handle_message(const mavlink_message_t *msg)
     }
 }
 
+// STATUSTEXT naming the attitude controller flying (see MAVLink.hpp).
+static void send_active_controller(int ctrl)
+{
+    // The _send() helper copies the whole field, so the text has to sit in a
+    // buffer of that size rather than a string literal.
+    char text[MAVLINK_MSG_STATUSTEXT_FIELD_TEXT_LEN] = "CTRL:";
+    const char *name = "UNKNOWN";
+    switch ((AttCtrl)ctrl) {
+    case AttCtrl::PID:      name = "PID";      break;
+    case AttCtrl::INDI:     name = "INDI";     break;
+    case AttCtrl::PID_PI:   name = "PID_PI";   break;
+    case AttCtrl::PID_JERK: name = "PID_JERK"; break;
+    case AttCtrl::JINDI:    name = "JINDI";    break;
+    }
+    strncat(text, name, sizeof(text) - strlen(text) - 1);
+    mavlink_msg_statustext_send(MAVLINK_COMM_0, MAV_SEVERITY_INFO, text, 0, 0);
+}
+
 /* ── Main update (called each thread tick) ───────────────────────────────── */
 
 void mavlink_comms_update()
@@ -352,6 +370,16 @@ void mavlink_comms_update()
          * VISION_POSITION_ESTIMATE/VISION_SPEED_ESTIMATE at all.
          */
         mavlink_msg_system_time_send(MAVLINK_COMM_0, 0, now_ms);
+    }
+
+    /* Attitude controller at 1 Hz, and straight away when it changes. */
+    static uint32_t last_ctrl_ms = 0;
+    static int      last_ctrl    = -1;
+    const int ctrl = g_active_controller;
+    if (ctrl != last_ctrl || now_ms - last_ctrl_ms >= 1000U) {
+        last_ctrl    = ctrl;
+        last_ctrl_ms = now_ms;
+        send_active_controller(ctrl);
     }
 
     /* Echo received vision data as LOCAL_POSITION_NED at 2 Hz (was 10 Hz —
