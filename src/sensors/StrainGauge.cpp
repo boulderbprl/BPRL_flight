@@ -216,6 +216,14 @@ static_assert((STRAIN_FIT_RPM_TAPS > 0 ? STRAIN_FIT_RPM_TAPS - 1 : 0) * kTapStri
               "StrainAngAccel::kHistory too short for the fit's RPM tap history");
 static_assert(STRAIN_GAUGE_HPF_HZ == STRAIN_FIT_HPF_HZ,
               "strain high-pass doesn't match the one the fit was made with");
+static_assert(STRAIN_FIT_N_SIG == 2 * STRAIN_FIT_N_GROUPS * (1 + STRAIN_FIT_USE_SQ),
+              "StrainGaugeFit.hpp inputs per tap don't match STRAIN_FIT_USE_SQ");
+static_assert(STRAIN_FIT_Q_N_SIG == 2 * STRAIN_FIT_N_GROUPS * (1 + STRAIN_FIT_Q_USE_SQ),
+              "StrainGaugeFit.hpp q_dot inputs per tap don't match STRAIN_FIT_Q_USE_SQ");
+static_assert(STRAIN_FIT_Q_SEPARATE ||
+              (STRAIN_FIT_Q_N_SIG == STRAIN_FIT_N_SIG && STRAIN_FIT_Q_HPF_HZ == STRAIN_FIT_HPF_HZ &&
+               STRAIN_FIT_Q_USE_SQ == STRAIN_FIT_USE_SQ),
+              "q_dot shares the roll block but StrainGaugeFit.hpp gives it a different layout/high-pass");
 
 void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
 {
@@ -245,7 +253,26 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
         const float lp2 = lowpass2p(hp, _lp2[i], _filt.lpf_hz, CONTROL_DT_S);
         _lp1[i]         = lowpass(lp2, _lp1[i], alpha_extra);
         _hist[_head][i] = _lp1[i];
+        // 2b. signed square, fixed scale (STRAIN_FIT_USE_SQ), after the 24 signals
+#if STRAIN_FIT_USE_SQ
+        const float v = _lp1[i];
+        _hist[_head][kSignals + i] = v * (v < 0.0f ? -v : v) * kStrainFitSqInvScale[i];
+#endif
     }
+#if STRAIN_FIT_Q_SEPARATE
+    // 2c. Pitch block: same group signals, the pitch fit's own high-pass, the
+    // same low-pass chain, its own signed squares — after the roll block.
+    for (int i = 0; i < kSignals; i++) {
+        const float hp  = highpass1p(sig[i], _hpq[i], STRAIN_FIT_Q_HPF_HZ, CONTROL_DT_S);
+        const float lp2 = lowpass2p(hp, _lp2q[i], _filt.lpf_hz, CONTROL_DT_S);
+        _lp1q[i]        = lowpass(lp2, _lp1q[i], alpha_extra);
+        _hist[_head][kQOffset + i] = _lp1q[i];
+#if STRAIN_FIT_Q_USE_SQ
+        const float v = _lp1q[i];
+        _hist[_head][kQOffset + kSignals + i] = v * (v < 0.0f ? -v : v) * kStrainFitSqInvScaleQ[i];
+#endif
+    }
+#endif
     // RPM inputs, unfiltered — as the fit used the logged RPMS.
     for (int m = 0; m < 4; m++) {
         const float r = (float)rpm[m] * STRAIN_FIT_RPM_SCALE;
@@ -259,10 +286,8 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
     float q = kStrainFitBiasQ;
     for (int j = 0; j < STRAIN_FIT_N_TAPS; j++) {
         const float *row = _hist[(_head - j * kTapStride + kHistory) % kHistory];
-        for (int i = 0; i < kSignals; i++) {
-            p += kStrainFitWP[j][i] * row[i];
-            q += kStrainFitWQ[j][i] * row[i];
-        }
+        for (int i = 0; i < kFitSignals; i++) p += kStrainFitWP[j][i] * row[i];
+        for (int i = 0; i < kFitSignalsQ; i++) q += kStrainFitWQ[j][i] * row[kQOffset + i];
     }
     for (int j = 0; j < STRAIN_FIT_RPM_TAPS; j++) {
         const float *row = _rpm_hist[(_head - j * kTapStride + kHistory) % kHistory];

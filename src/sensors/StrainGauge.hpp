@@ -128,10 +128,22 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
  *     gauges before grouping; the filters and the grouping are both linear,
  *     so filtering the 24 group signals instead gives the same result for
  *     less work.
+ *  2b. Fits with STRAIN_FIT_USE_SQ (gust_calibration.m use_sq) also take the
+ *     signed square of every filtered signal, s * |s| * kStrainFitSqInvScale[i]
+ *     (a fixed per-signal scale from fit time), stored after the 24 signals in
+ *     the same ring row -> STRAIN_FIT_N_SIG = 48 inputs per tap.
+ *  2c. With a separate pitch fit (STRAIN_FIT_Q_SEPARATE, strain_fit_export.py
+ *     --pitch) the same 24 group signals also go through a second chain —
+ *     high-pass at STRAIN_FIT_Q_HPF_HZ, the same low-pass — plus their own
+ *     signed squares (STRAIN_FIT_Q_USE_SQ, kStrainFitSqInvScaleQ), stored
+ *     after the roll block in the ring row. Only q_dot reads this block; roll
+ *     (p_dot) is computed exactly as without it.
  *  3. A ring buffer keeps the filtered signals for the last
  *     (STRAIN_FIT_N_TAPS - 1) x STRAIN_FIT_TAP_DT_S; the fit reads taps
  *     STRAIN_FIT_TAP_DT_S apart (every 4th tick at 400 Hz) and
- *       p_dot = kStrainFitBiasP + sum(kStrainFitWP x taps), same for q_dot.
+ *       p_dot = kStrainFitBiasP + sum(kStrainFitWP x taps of the roll block),
+ *       q_dot = kStrainFitBiasQ + sum(kStrainFitWQ x taps of the pitch block
+ *               — the roll block when STRAIN_FIT_Q_SEPARATE is 0).
  *     The estimate still updates every tick.
  *  4. Fits from gust_calibration.m (use_rpm) also take the 4 motor RPMs:
  *     STRAIN_FIT_RPM_TAPS taps, same spacing, of |rpm[i]| x
@@ -148,7 +160,9 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
  * The output is 0 until the first valid frame plus the tap history.
  * Health is strain_gauge_health()'s job, not this class's.
  */
-#define STRAIN_GAUGE_HPF_HZ  0.2f   // strain high-pass cutoff — must match the fit's (STRAIN_FIT_HPF_HZ)
+// Strain high-pass cutoff: always the one the fit was made with (fit B: 1 Hz).
+// A separate pitch fit has its own, STRAIN_FIT_Q_HPF_HZ (pitch fit P: 0.2 Hz).
+#define STRAIN_GAUGE_HPF_HZ  STRAIN_FIT_HPF_HZ
 
 class StrainAngAccel {
 public:
@@ -166,14 +180,24 @@ public:
     bool  ready() const { return _ticks >= kHistory; }  // tap history full
 
 private:
-    static constexpr int kSignals = 2 * STRAIN_FIT_N_GROUPS;   // means, then gradients
+    static constexpr int kSignals    = 2 * STRAIN_FIT_N_GROUPS;   // means, then gradients (filtered)
+    static constexpr int kFitSignals = STRAIN_FIT_N_SIG;          // + their signed squares (STRAIN_FIT_USE_SQ)
+    static constexpr int kFitSignalsQ = STRAIN_FIT_Q_N_SIG;       // q_dot inputs per tap
+    // q_dot's inputs start here in a ring row: after the roll block if pitch has its own (step 2c)
+    static constexpr int kQOffset = STRAIN_FIT_Q_SEPARATE ? kFitSignals : 0;
+    static constexpr int kRowLen  = kFitSignals + (STRAIN_FIT_Q_SEPARATE ? kFitSignalsQ : 0);
     static constexpr int kHistory = 24;   // ring length in ticks, >= (N_TAPS-1) x tap stride + 1 (checked in the .cpp)
 
     AngAccelFilterConfig _filt;
     Highpass1pState      _hp[kSignals];
     Biquad2pState        _lp2[kSignals];
     float                _lp1[kSignals] = {};
-    float                _hist[kHistory][kSignals] = {};
+#if STRAIN_FIT_Q_SEPARATE
+    Highpass1pState      _hpq[kSignals];    // pitch block (step 2c)
+    Biquad2pState        _lp2q[kSignals];
+    float                _lp1q[kSignals] = {};
+#endif
+    float                _hist[kHistory][kRowLen] = {};
     float                _rpm_hist[kHistory][4] = {};   // RPM inputs (step 4), same ring index as _hist
     int                  _head  = 0;   // _hist row written on the last update
     uint32_t             _ticks = 0;   // updates since the first valid frame (saturates at kHistory)
