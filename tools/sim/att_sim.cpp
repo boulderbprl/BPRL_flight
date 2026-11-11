@@ -17,9 +17,25 @@
 //   att_sim replay <sticks.csv> <slot> <out.csv>
 //                                         fly logged sticks (t,roll,pitch,yaw columns,
 //                                         normalised [-1,1]) and write the response
+//   att_sim gust <gust.csv> <slot>        replay external angular-accel events (t,a_r,a_p
+//                                         rad/s^2, one event per 4 s, onset at +0.5 s):
+//                                         push peak, 0-1 s / 0-3 s attitude rms, rate peak
+//   att_sim noise <slot>                  30 s quiet hover, sensor noise on: attitude error
+//                                         and command rms, command rms above 12 Hz
 //
 // Every plant / sensor number can be overridden from the environment
 // (K_R=140 att_sim margins). Names are listed in struct Model.
+//
+// p_dot/q_dot sensor the controllers see (SENS):
+//   unset / model   the parametric strain model below (SA/SC/SDEL/SNOISE) — the default
+//   imu             the firmware's IMU chain: d/dt of the filtered gyro, then a 1-pole
+//                   IMU_LP1 (15 Hz)
+//   <path>          an identified sensor: <path>.fir and <path>.noise (format in
+//                   tools/sim/README.md, "Identified sensor models"); FNOISE scales the
+//                   noise (0 = off)
+// DHP=<Hz> (default off) high-passes the disturbance part of the sensor: motor accel
+// through a 30 Hz pole + HP(sensor - that). GSCALE scales a gust file, GOUT=<csv> writes
+// the gust run, QUIET=1 skips the model printout.
 #include "src/controllers/FlightStateMachine.hpp"
 #include "src/controllers/extras/MotorMixer.hpp"
 #include "src/FlightState.hpp"
@@ -87,6 +103,20 @@ struct Plant {
     float rate_meas[3] = { 0, 0, 0 }, strain[2] = { 0, 0 };
     uint32_t rpm[4] = { 0, 0, 0, 0 };
     float dist[2] = { 0, 0 }, dist_f[2] = { 0, 0 };
+    // ── study additions: external accel input, sensor models ──
+    float ext[2] = { 0, 0 };                 // external angular accel from a gust file [rad/s^2]
+    float acc_e[2] = { 0, 0 };               // external part of the true accel
+    float ah_tot[H][2] = {}, ah_ext[H][2] = {};
+    int   sens = 0;                          // 0 = parametric strain (att_sim), 1 = IMU chain, 2 = identified FIR
+    float noise_on = 1.0f;
+    float imu_lp1_hz = 15.0f, fnoise = 1.0f, dhp_hz = 0.0f;   // IMU_LP1, FNOISE, DHP (read once)
+    // IMU chain: d/dt(rate_meas) (rate_meas is already the 2-pole GLPF) -> 1-pole IMU_LP1
+    float prev_rate[2] = { 0, 0 }, imu_pd[2] = { 0, 0 };
+    // FIR: est = sum h_tot[k] acc(n-4k) + sum h_x[k] acc_e(n-4k) + noise ; k from FK0..FK1 (k<0 folded to 0)
+    int FK0 = 0, FK1 = -1; std::vector<float> h_tot[2], h_x[2]; std::vector<float> nz[2];
+    float fir_out[2] = { 0, 0 };
+    // disturbance high-pass: used = m_hat + HP_dhp(raw - m_hat), m_hat = motor accel through a 30 Hz pole
+    float m_hat[2] = { 0, 0 }, d_lp[2] = { 0, 0 }, pd_used[2] = { 0, 0 };
     unsigned seed = 777u;
     float urand() { seed = seed * 1103515245u + 12345u; return ((seed >> 8) & 0xffff) / 65535.0f - 0.5f; }   // uniform, rms 0.289
 
@@ -117,8 +147,9 @@ struct Plant {
             dist_f[i] += al * (urand() * m.TDIST * 45.6f - dist_f[i]);   // 45.6: makes TDIST the rms of dist[]
             dist[i]   += al * (dist_f[i] - dist[i]);
         }
-        acc[0] = k_scale * m.K[0] * mot[0] + dist[0] / m.INERTIA;
-        acc[1] = k_scale * m.K[1] * mot[1] + dist[1] / m.INERTIA;
+        acc_e[0] = dist[0] / m.INERTIA + ext[0]; acc_e[1] = dist[1] / m.INERTIA + ext[1];
+        acc[0] = k_scale * m.K[0] * mot[0] + acc_e[0];
+        acc[1] = k_scale * m.K[1] * mot[1] + acc_e[1];
         acc[2] = k_scale * m.K_YAW * mot[2];
         p += acc[0] * DT; q += acc[1] * DT; r += acc[2] * DT;
         const float sr = sinf(roll), cr = cosf(roll), cp = cosf(pitch), tp = tanf(pitch);
@@ -139,6 +170,45 @@ struct Plant {
             strain[i] = m.SA[i] * aq[k][i] + m.SC[i] * rq[k][i] + urand() * 3.464f * m.SNOISE;
         }
 
+        // Study sensors
+        {
+            float *ht = ah_tot[n % H], *hx = ah_ext[n % H];
+            for (int i = 0; i < 2; ++i) { ht[i] = acc[i]; hx[i] = acc_e[i]; }
+            const float a15 = DT / (1.0f / (6.2832f * imu_lp1_hz) + DT);
+            for (int i = 0; i < 2; ++i) {
+                const float d = (rate_meas[i] - prev_rate[i]) / DT; prev_rate[i] = rate_meas[i];
+                imu_pd[i] += a15 * (d - imu_pd[i]);
+            }
+            if (sens == 2) {
+                const float tn = n * DT * 100.0f;                 // noise index at 100 Hz
+                for (int i = 0; i < 2; ++i) {
+                    float y = 0;
+                    for (int k = FK0; k <= FK1; ++k) {
+                        const int lag = (k < 0 ? 0 : k) * 4;
+                        const long j = (n - lag + 8 * H) % H;
+                        y += h_tot[i][k - FK0] * ah_tot[j][i] + h_x[i][k - FK0] * ah_ext[j][i];
+                    }
+                    if (!nz[i].empty()) {
+                        const size_t L = nz[i].size(); const size_t a = (size_t)tn % L; const float fr = tn - floorf(tn);
+                        y += noise_on * fnoise * ((1 - fr) * nz[i][a] + fr * nz[i][(a + 1) % L]);
+                    }
+                    fir_out[i] = y;
+                }
+            }
+        }
+        {
+            const float *raw = sens == 1 ? imu_pd : (sens == 2 ? fir_out : strain);
+            const float dhp = dhp_hz;
+            const float am = DT / (1.0f / (6.2832f * 30.0f) + DT);
+            for (int i = 0; i < 2; ++i) {
+                m_hat[i] += am * (k_scale * m.K[i] * mot[i] - m_hat[i]);
+                if (dhp > 0) {
+                    const float ad = DT / (1.0f / (6.2832f * dhp) + DT);
+                    const float d = raw[i] - m_hat[i]; d_lp[i] += ad * (d - d_lp[i]);
+                    pd_used[i] = m_hat[i] + (d - d_lp[i]);
+                } else pd_used[i] = raw[i];
+            }
+        }
         // Per-motor RPM from the real torque (GU N·m per unit of lagged command), sampled ENC_DELAY late
         {
             const float L  = kDroneConfig.unmixer.arm_length_m * 0.70710678f;
@@ -159,7 +229,7 @@ struct Plant {
         memset(state_full, 0, sizeof(float) * StateIdx::N);
         state_full[StateIdx::Z_POS] = -1.0f;
         state_full[StateIdx::P] = rate_meas[0]; state_full[StateIdx::Q] = rate_meas[1]; state_full[StateIdx::R] = rate_meas[2];
-        state_full[StateIdx::P_DOT] = strain[0]; state_full[StateIdx::Q_DOT] = strain[1]; state_full[StateIdx::R_DOT] = acc[2];
+        state_full[StateIdx::P_DOT] = pd_used[0]; state_full[StateIdx::Q_DOT] = pd_used[1]; state_full[StateIdx::R_DOT] = acc[2];
         euler[0] = roll; euler[1] = pitch; euler[2] = yaw;
     }
 };
@@ -176,7 +246,24 @@ struct Sim {
     float state_full[StateIdx::N], euler[3];
     float t = 0;
 
-    explicit Sim(int s) : slot(s) { plant.fill(state_full, euler); }
+    explicit Sim(int s) : slot(s) { setup_sensor(plant); plant.fill(state_full, euler); }
+    static void setup_sensor(Plant &pl)
+    {
+        pl.imu_lp1_hz = envf("IMU_LP1", 15.0f);
+        pl.fnoise     = envf("FNOISE", 1.0f);
+        pl.dhp_hz     = envf("DHP", 0.0f);
+        const char *sv = getenv("SENS");
+        if (!sv || !strcmp(sv, "model")) { pl.sens = 0; return; }
+        if (!strcmp(sv, "imu")) { pl.sens = 1; return; }
+        pl.sens = 2;                                   // SENS=<base path> of <base>.fir / <base>.noise
+        std::string b(sv); FILE *f = fopen((b + ".fir").c_str(), "r"); if (!f) { fprintf(stderr, "no %s.fir\n", sv); exit(2); }
+        if (fscanf(f, "%d %d", &pl.FK0, &pl.FK1) != 2) exit(2);
+        for (int k = pl.FK0; k <= pl.FK1; ++k) { float a, b2, c, d; if (fscanf(f, "%f %f %f %f", &a, &b2, &c, &d) != 4) exit(2);
+            pl.h_tot[0].push_back(a); pl.h_x[0].push_back(b2); pl.h_tot[1].push_back(c); pl.h_x[1].push_back(d); }
+        fclose(f);
+        f = fopen((b + ".noise").c_str(), "r");
+        if (f) { float a, c; while (fscanf(f, "%f %f", &a, &c) == 2) { pl.nz[0].push_back(a); pl.nz[1].push_back(c); } fclose(f); }
+    }
 
     void tick()
     {
@@ -241,7 +328,7 @@ static std::complex<double> loop_at(int slot, int axis, float f, float amp)
 {
     Sim s(slot);
     Model &m = s.plant.m;
-    m.SNOISE = 0; m.GNOISE = 0; m.RPM_NOISE = 0; m.TDIST = 0;
+    m.SNOISE = 0; m.GNOISE = 0; m.RPM_NOISE = 0; m.TDIST = 0; s.plant.noise_on = 0;
     s.airborne();
     const double w = 2 * M_PI * f;
     const int per = (int)ceil(1.0 / (f * DT));
@@ -456,6 +543,57 @@ static void mode_replay(const char *in_csv, int slot, const char *out_csv)
     fclose(fo);
 }
 
+// ── Gust replay: external accel file (t, a_r, a_p rad/s^2), one event per 4 s, onset at +0.5 s ──
+static void mode_gust(const char *in_csv, int slot)
+{
+    FILE *fi = fopen(in_csv, "r"); if (!fi) { fprintf(stderr, "can't open %s\n", in_csv); exit(2); }
+    std::vector<float> T, X, Y; char line[256]; if (!fgets(line, sizeof(line), fi)) exit(2);
+    while (fgets(line, sizeof(line), fi)) { float a, b, c; if (sscanf(line, "%f,%f,%f", &a, &b, &c) == 3) { T.push_back(a); X.push_back(b); Y.push_back(c); } }
+    fclose(fi);
+    const float gsc = envf("GSCALE", 1.0f);
+    Sim s(slot); s.plant.m.TDIST = 0; s.airborne();
+    const float tend = T.back(); size_t j = 0; int k = 0;
+    const int nev = (int)(tend / 4.0f + 0.01f);
+    std::vector<double> pk(nev, 0), ss(nev, 0), rpk(nev, 0), e1(nev, 0); std::vector<int> cnt(nev, 0), c1(nev, 0);
+    bool bad = false;
+    FILE *fo = getenv("GOUT") ? fopen(getenv("GOUT"), "w") : nullptr;
+    if (fo) fprintf(fo, "t,roll,pitch,p,q,u_r,u_p,ax,ay,pd_r,pd_p,acc_r,acc_p\n");
+    for (float tt = 0; tt < tend; tt += DT, ++k) {
+        while (j + 1 < T.size() && T[j + 1] <= tt) ++j;
+        s.plant.ext[0] = X[j] * gsc; s.plant.ext[1] = Y[j] * gsc;
+        s.tick();
+        const int e = (int)(tt / 4.0f); if (e >= nev) break;
+        const float te = tt - 4.0f * e - 0.5f;
+        const double em = sqrt(s.plant.roll * s.plant.roll + s.plant.pitch * s.plant.pitch) * R2D;
+        if (te >= 0 && te < 3.0f) { ss[e] += em * em; cnt[e]++; rpk[e] = std::max(rpk[e], (double)(hypotf(s.plant.p, s.plant.q) * R2D)); }
+        if (te >= 0 && te < 1.0f) { e1[e] += em * em; c1[e]++; }
+        if (te >= 0 && te < 0.5f) pk[e] = std::max(pk[e], em);
+        bad |= fabsf(s.plant.roll) > 0.8f || fabsf(s.plant.pitch) > 0.8f;
+        if (fo && k % 2 == 0) fprintf(fo, "%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n", tt, s.plant.roll * R2D, s.plant.pitch * R2D,
+                                     s.plant.p * R2D, s.plant.q * R2D, s.u_plant[0], s.u_plant[1], X[j] * gsc, Y[j] * gsc,
+                                     s.state_full[StateIdx::P_DOT], s.state_full[StateIdx::Q_DOT], s.plant.acc[0], s.plant.acc[1]);
+    }
+    if (fo) fclose(fo);
+    double a = 0, c = 0, d = 0, f1 = 0;
+    for (int e = 0; e < nev; ++e) { a += pk[e]; c += sqrt(ss[e] / std::max(1, cnt[e])); d += rpk[e]; f1 += sqrt(e1[e] / std::max(1, c1[e])); }
+    printf("%-7s %-22s push_pk %5.2f deg  rms0-1s %5.2f  rms0-3s %5.2f deg  rate_pk %5.0f dps%s\n", slot_name(slot),
+           getenv("SENS") ? getenv("SENS") + std::max(0, (int)strlen(getenv("SENS")) - 22) : "model", a / nev, f1 / nev, c / nev, d / nev, bad ? " DIVERGED" : "");
+}
+
+// ── Quiet hover, all sensor noise on: how much noise reaches the motors ──
+static void mode_noise(int slot)
+{
+    Sim s(slot); s.plant.m.TDIST = 0; s.airborne();
+    double ur = 0, up = 0, hr = 0, hp = 0, er = 0; int c = 0; Biquad2pState lr = {}, lp = {};
+    s.run(30.0f, [&] {
+        ur += s.u_ctrl[0] * s.u_ctrl[0]; up += s.u_ctrl[1] * s.u_ctrl[1]; ++c;
+        const float a = s.u_ctrl[0] - lowpass2p(s.u_ctrl[0], lr, 12.0f, DT), b = s.u_ctrl[1] - lowpass2p(s.u_ctrl[1], lp, 12.0f, DT);
+        hr += a * a; hp += b * b; er += s.plant.roll * s.plant.roll + s.plant.pitch * s.plant.pitch;
+    });
+    printf("%-7s %-22s hover: att err rms %.3f deg  u rms %.4f/%.4f  u>12Hz rms %.4f/%.4f\n", slot_name(slot),
+           getenv("SENS") ? getenv("SENS") + std::max(0, (int)strlen(getenv("SENS")) - 22) : "model", sqrt(er / c) * R2D, sqrt(ur / c), sqrt(up / c), sqrt(hr / c), sqrt(hp / c));
+}
+
 static void print_model()
 {
     Model m;
@@ -471,13 +609,16 @@ static void print_model()
 int main(int argc, char **argv)
 {
     const std::string mode = argc > 1 ? argv[1] : "margins";
-    print_model();
+    if (!getenv("QUIET")) print_model();
     if (mode == "model") return 0;
     if (mode == "margins") { mode_margins(argc > 2 ? atoi(argv[2]) : -1); return 0; }
     if (mode == "robust")  { mode_robust(); return 0; }
     if (mode == "step")    { mode_step(); return 0; }
     if (mode == "dist")    { mode_dist(); return 0; }
     if (mode == "replay" && argc > 4) { mode_replay(argv[2], atoi(argv[3]), argv[4]); return 0; }
-    fprintf(stderr, "usage: att_sim margins [0|1] | robust | step | dist | model | replay <sticks.csv> <slot> <out.csv>\n");
+    if (mode == "gust" && argc > 3) { mode_gust(argv[2], atoi(argv[3])); return 0; }
+    if (mode == "noise" && argc > 2) { mode_noise(atoi(argv[2])); return 0; }
+    fprintf(stderr, "usage: att_sim margins [0|1] | robust | step | dist | model | replay <sticks.csv> <slot> <out.csv>\n"
+                    "              | gust <gust.csv> <slot> | noise <slot>   (slot 0/1/2 = switch low/mid/high)\n");
     return 2;
 }

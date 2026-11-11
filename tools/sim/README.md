@@ -85,6 +85,44 @@ does (unset parameters are NaN = "not given").
 | `commands` | Every rejection rule and cancel condition, landing afterwards, origin surviving a disarm |
 | `degraded_link` | Position hold and a point move with the position 100 ms late and refreshed at 23 Hz — a stability check for the position gains on a poor mocap link |
 
+`MDELAY` / `MHOLD` (ticks) change `degraded_link`'s delay and refresh.
+
+### Real plant and position-hold tuning runs (`PLANT=real`, `TUNE`, `ATTD`)
+
+`PLANT=real` swaps the simple plant for Drone2 as identified on 2026-11-05. Without it,
+every logic check runs exactly as before.
+
+| Setting | Simple (default) | `PLANT=real` |
+|---|---|---|
+| `K_RP` / `K_YAW` [rad/s² per unit] | 400 / 40 | 115 / 10 |
+| `MLAG` motor lag [s] | 0.03 | 0.052 |
+| `DEAD` command dead time [ticks] | 0 | 4 |
+| `GLPF` / `RLPF` gyro LPF the controller sees [Hz] | off | 20 / 5 |
+| p_dot/q_dot | true accel | strain model: `SGAIN_R`/`SGAIN_P` 0.9/0.75, `SDELAY` 2 ticks, `SNOISE` 3 rad/s², 15 Hz pole |
+| RPM to the Unmixer | zeros | per motor from the drone's motor curve, one tick late |
+| `TDIST` external torque [N·m rms, ~1.5 Hz] | 0 | 0 |
+
+Every name is an environment variable, and `INERTIA` (0.045 kg m²) sets the torque scale.
+- **`CTRL=0/1/2`** flies that switch slot through `set_active_controller()`.
+- **INDI needs `PLANT=real`**, because the simple plant sends no RPM.
+
+Two tuning runs, which print one summary line each instead of pass/fail. They use the real plant unless
+`PLANT=simple`, and `CTRL` defaults to 0:
+
+```bash
+B=/tmp/simout/sim                     # the binary run.sh just built
+CTRL=1 TUNE=1 $B /tmp/simout          # shove, wind step, 20 s gusts, 1 m move; mocap MDELAY 20 / MHOLD 6 ticks
+CTRL=2 CTRL0=0 ATTD=1 TD=0.13 $B /tmp/simout   # PID -> INDI switch transient, then 20 s under 0.13 N·m torque
+```
+
+- **`TUNE`:** shove peak / overshoot / 3 cm settling, wind-step peak and settling, gust position
+  rms, and the 1 m move's tracking error and overshoot.
+- **`ATTD`:** the switch transient, then roll/pitch error rms against the lean target, position
+  rms, and the peak torque command.
+
+These replace the Nov 5 scratch sims (`sim_d2.cpp`, `sim_dl.cpp`). Their results move by a
+few percent, because those sims lacked the `MotorMixer` limit feedback.
+
 ### CSV columns
 
 `t`, position `n e d`, velocity `vn ve vd`, `roll pitch yaw` (rad),
@@ -139,3 +177,58 @@ margin in the time domain; the two agree within a few ms.
 
 Only the drone's own data supports these defaults. Re-fit them (or override
 them) for another airframe before trusting the numbers.
+
+### Gust replay, noise, and identified sensor models
+
+Two more modes came out of the strain-sensor study (2026-11-06 to 11-10):
+
+```bash
+tools/sim/att_run.sh Drone2 gust gust.csv 1   # replay external accel events on switch slot 1: push peak, 0-1 s / 0-3 s rms, rate peak
+tools/sim/att_run.sh Drone2 noise 2           # 30 s quiet hover with all sensor noise: attitude error, command rms (all / >12 Hz)
+```
+
+A gust file is a CSV `t,a_r,a_p` with the external angular acceleration
+[rad/s²] (what the airframe gets on top of the motors). There is one event every 4 s,
+with its onset 0.5 s into the slot. `GSCALE` scales it, and `GOUT=run.csv` writes the
+response.
+
+`SENS` picks the p_dot/q_dot signal the controllers get (`StateIdx::P_DOT/Q_DOT`;
+the gyro and RPM paths are unchanged):
+
+| `SENS` | p_dot/q_dot model |
+|---|---|
+| unset / `model` | the parametric strain model in the table above (the default; existing results are unchanged) |
+| `imu` | the firmware's IMU chain: d/dt of the filtered gyro, then a 1-pole `IMU_LP1` (15 Hz) |
+| `<path>` | an identified sensor model, `<path>.fir` + `<path>.noise` |
+
+The identified-model files work like this:
+- **`<path>.fir`** starts with a line `K0 K1`. It then has one row per tap k = K0..K1:
+  `h_tot_r h_ext_r h_tot_p h_ext_p`.
+- **The estimate** is Σ h_tot[k]·accel(t − 10k ms) + Σ h_ext[k]·external_accel(t − 10k ms).
+  Taps with k < 0 are applied at lag 0.
+- **The `h_ext` term** is what lets a sensor see external torque differently from motor
+  torque. That difference is the point of the strain study.
+- **`<path>.noise`** holds two columns (roll, pitch) of the model's residual at 100 Hz.
+  It is replayed on a loop; `FNOISE` scales it, and `FNOISE=0` turns it off.
+
+`DHP=<Hz>` high-passes the disturbance part of the sensor:
+- motor accel through a 30 Hz pole, plus HP(sensor − that);
+- off by default.
+
+`QUIET=1` skips the model printout (for sweeps).
+
+The models and gust sets are flight data, so they live with the strain study in
+Dropbox, not in git: `Strain_Drone_2026/Calibration/strain_study/sim/`.
+- **Sensor models (`sens/`):**
+  - `flownB_n9`: fit B as flown, identified on Flight3_nov9;
+  - `imu_n9`, `imu_all`, `imu_bench`: the IMU chain;
+  - `B_lofo`: fit B, leave-one-flight-out;
+  - `fusedF_lofo`, `fusedF_d10`, `fusedF_d20`: the fused fit, plus 10 / 20 ms extra delay.
+- **Gust sets:** `gust_n9.csv` holds Flight3_nov9's 33 gusts; `gust_all.csv` has all the flights.
+
+`strain_study/ident.py` `identify(pred, name)` makes new models from flight data.
+
+```bash
+DB=~/Dropbox/PhD/Strain_Drone_2026/Calibration/strain_study/sim
+QUIET=1 SENS=$DB/sens/flownB_n9 tools/sim/att_run.sh Drone2 gust $DB/gust_n9.csv 2
+```

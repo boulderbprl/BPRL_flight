@@ -26,7 +26,7 @@ pip install pyserial rich
 | `encoder_rpm.py` | `encoder-rpm` | No |
 | `dshot_tools.py` | `dshot-diag` | No |
 | `i2c_tools.py` | `i2c-scan` | No |
-| `logs.py` | `logs list/download/decode/erase`, `log-status` | No |
+| `logs.py` | `logs list/download/decode/check/erase`, `log-status` | No |
 | `flash_upload.py` | *(positional firmware path)* | — |
 | `strain_fit_export.py` | *(positional .mat path — writes `src/sensors/StrainGaugeFit.hpp`)* | — |
 | *(raw serial, see [Timing](#timing--schedulability-bprl_timing-build) below)* | `TIM,status`, `TIM,reset` | Requires `-DBPRL_TIMING` |
@@ -265,6 +265,7 @@ Useful for diagnosing DShot issues: no DMA fires → DMA init problem; DMA fires
 | `logs download [FILE]` | Download a log file (default: latest completed) |
 | `logs download FILE --decode` | Download and immediately decode to CSV |
 | `logs decode FILE.bin` | Offline: decode a binary log to CSV files |
+| `logs check FILE.bin ...` | Offline: integrity report — torn/corrupt records, per-message counts and rates, duplicate / backward timestamps, non-finite values, logging gaps, arm/disarm times. Exits 1 if something is wrong |
 | `logs erase` | Erase all completed log files |
 | `log-status` | Query SD card logger status (ready / error code) |
 
@@ -273,9 +274,22 @@ python3 tools/logs.py logs list
 python3 tools/logs.py logs download
 python3 tools/logs.py logs download LOG0042.BIN
 python3 tools/logs.py logs decode LOG0042.BIN
+python3 tools/logs.py logs check LOG0042.BIN
 python3 tools/logs.py logs erase
 python3 tools/logs.py log-status
 ```
+
+`logs check` is offline too. It reads the log the same way `decode` does and reports:
+- **Bytes the decoder had to skip.** Inside the recorded data that means torn or corrupt
+  records (for example `cal_flight1_oct22`). After the last record it is just stale data in
+  the preallocated file.
+- **Per message:** records, span, rate, duplicate and backward timestamps, non-finite values.
+  Junk messages with one or two records or an absurd span are a sign of corruption too.
+- **Logging gaps** on the busiest per-tick message (ATT on most logs): median step, steps
+  over 1.5× the median and over 50 ms, and the longest.
+- **The armed window.**
+
+Run it before trusting a log for analysis.
 
 `logs decode` is offline — no serial port needed. It reads the ArduPilot DataFlash schema from the file header (FMT records) and writes one CSV per message type:
 

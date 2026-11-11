@@ -9,6 +9,7 @@ Usage:
     python3 tools/logs.py logs list              # list log files on SD card
     python3 tools/logs.py logs download [FILE]   # download a log file (default: latest completed)
     python3 tools/logs.py logs decode FILE.bin   # decode binary log to CSV
+    python3 tools/logs.py logs check FILE.bin    # integrity report: corrupt/torn records, gaps, rates
     python3 tools/logs.py logs erase             # erase completed log files
     python3 tools/logs.py log-status             # query SD card logger status
 
@@ -246,13 +247,14 @@ def _fmt_to_struct(fmt_str: str) -> str:
     return '<' + ''.join(_FMT_CODE.get(c, '') for c in fmt_str if c and c != '\x00')
 
 
-def _decode_log(src: Path, out_dir: Optional[Path] = None) -> None:
-    if not src.exists():
-        console.print(f"[red]File not found: {src}")
-        return
+def _parse_log(data: bytes):
+    """Parse a BPRL (DataFlash-format) log.
 
-    dest = out_dir if out_dir is not None else Path.cwd()
-    data = src.read_bytes()
+    Returns (schema, rows, stats). schema maps type_id -> (name, body_size,
+    struct_fmt, labels); rows maps type_id -> list of decoded tuples; stats has
+    'skipped' (non-sync bytes stepped over), 'first_skip' (offset of the first
+    one, or None) and 'end' (offset just past the last good record).
+    """
     n    = len(data)
     pos  = 0
 
@@ -272,15 +274,15 @@ def _decode_log(src: Path, out_dir: Optional[Path] = None) -> None:
         schema[type_id] = (name, body_size, _fmt_to_struct(fmt_str), labels)
         pos += _FMT_HDR_SIZE
 
-    if not schema:
-        console.print("[red]No FMT records found — may be old log format (pre-UAV-Log-Viewer).")
-        return
-
     # Step 2: Decode data records.
     rows: dict[int, list] = {t: [] for t in schema}
     skipped = 0
+    first_skip = None
+    end_good = pos
     while pos < n - 3:
         if data[pos] != 0xA3 or data[pos + 1] != 0x95:
+            if first_skip is None:
+                first_skip = pos
             pos     += 1
             skipped += 1
             continue
@@ -298,9 +300,25 @@ def _decode_log(src: Path, out_dir: Optional[Path] = None) -> None:
             break
         try:
             rows[msg_id].append(struct.unpack(struct_fmt, data[start:end]))
+            end_good = end
         except struct.error:
             pass
         pos = end
+
+    return schema, rows, {'skipped': skipped, 'first_skip': first_skip, 'end': end_good}
+
+
+def _decode_log(src: Path, out_dir: Optional[Path] = None) -> None:
+    if not src.exists():
+        console.print(f"[red]File not found: {src}")
+        return
+
+    dest = out_dir if out_dir is not None else Path.cwd()
+    schema, rows, stats = _parse_log(src.read_bytes())
+    skipped = stats['skipped']
+    if not schema:
+        console.print("[red]No FMT records found — may be old log format (pre-UAV-Log-Viewer).")
+        return
 
     # Step 3: Write one CSV per message type.
     import csv
@@ -327,6 +345,93 @@ def cmd_logs_decode(_, args):
     _decode_log(Path(args.decode_file), out_dir)
 
 
+# ── Log health check ──────────────────────────────────────────────────────────
+
+def _check_log(src: Path) -> bool:
+    """Integrity report for a local log. Returns False if something looks wrong."""
+    import numpy as np
+    if not src.exists():
+        console.print(f"[red]File not found: {src}")
+        return False
+    data = src.read_bytes()
+    schema, rows, st = _parse_log(data)
+    if not schema:
+        console.print("[red]No FMT records found — not a BPRL log, or the header is corrupt.")
+        return False
+    ok = True
+    n = len(data)
+    tail = data[st['end']:]
+    console.print(f"[bold]{src}[/]  {n:,} bytes, records parse to byte {st['end']:,} "
+                  f"({100.0 * st['end'] / n:.1f} %)")
+    if st['skipped']:
+        mid = st['first_skip'] is not None and st['first_skip'] < st['end']
+        where = f"first at byte {st['first_skip']:,}" if st['first_skip'] is not None else ""
+        console.print(f"  skipped {st['skipped']:,} non-sync bytes ({where})"
+                      + ("  [yellow]— inside the recorded data: corrupt or torn records[/]" if mid else ""))
+        ok &= not mid
+    zeros = tail.count(0) == len(tail)
+    console.print(f"  after the last record: {len(tail):,} bytes"
+                  + (" (all zero — unused preallocated space)" if zeros and tail else
+                     " (not zero — stale data in the preallocated file, normal; or unflushed records if the board"
+                     " lost power mid-write)" if tail else ""))
+
+    # Per message
+    t_ref = None
+    tbl = Table(show_header=True, header_style="bold")
+    for c in ("msg", "records", "span [s]", "rate [Hz]", "dup t", "back t", "non-finite"):
+        tbl.add_column(c, justify="right" if c != "msg" else "left")
+    arrays = {}
+    for tid, (name, _bs, _sf, labels) in schema.items():
+        r = rows[tid]
+        if not r:
+            continue
+        a = np.array([[float(x) if not isinstance(x, (bytes, str)) else np.nan for x in row] for row in r])
+        arrays[name] = (a, labels)
+        t = a[:, 0] / 1e6
+        dt = np.diff(t)
+        span = t[-1] - t[0] if len(t) > 1 else 0.0
+        nonfin = int((~np.isfinite(a[:, 1:])).sum())
+        back = int((dt < 0).sum())
+        tbl.add_row(name, f"{len(r):,}", f"{span:.1f}", f"{(len(t) - 1) / span:.1f}" if span > 0 else "-",
+                    str(int((dt == 0).sum())), f"[red]{back}[/]" if back else "0",
+                    f"[yellow]{nonfin}[/]" if nonfin else "0")
+        ok &= back == 0
+        if t_ref is None or len(t) > len(t_ref[1]):
+            t_ref = (name, t)        # the per-tick message with the most records (ATT on most logs)
+    console.print(tbl)
+
+    # Timing gaps on that message
+    if t_ref is not None and len(t_ref[1]) > 10:
+        ref_name, tu = t_ref[0], np.unique(t_ref[1])
+        dt = np.diff(tu) * 1e3
+        med = float(np.median(dt))
+        big = dt > 1.5 * med
+        console.print(f"  {ref_name}: median step {med:.1f} ms; steps > 1.5x median: {int(big.sum())}, "
+                      f"> 50 ms: {int((dt > 50).sum())}, longest {dt.max():.0f} ms at t = {tu[np.argmax(dt)] - tu[0]:.1f} s")
+        ok &= dt.max() < 250
+
+    # Armed window
+    if "RCIN" in arrays and "Armed" in arrays["RCIN"][1]:
+        a, labels = arrays["RCIN"]
+        arm = a[:, labels.index("Armed")] > 0.5
+        t = a[:, 0] / 1e6 - a[0, 0] / 1e6
+        edges = np.nonzero(np.diff(arm.astype(int)))[0]
+        if arm.any():
+            console.print(f"  armed {arm.mean() * 100:.0f} % of the log; arm/disarm at "
+                          + ", ".join(f"{t[i + 1]:.1f} s" for i in edges))
+        else:
+            console.print("  never armed")
+    console.print("[green]Looks healthy." if ok else "[yellow]Problems found — see above.")
+    return ok
+
+
+def cmd_logs_check(_, args):
+    all_ok = True
+    for f in args.check_files:
+        all_ok &= _check_log(Path(f))
+    raise SystemExit(0 if all_ok else 1)
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def main():
@@ -351,6 +456,9 @@ def main():
     dec_p.add_argument("--out-dir", default=None, metavar="DIR",
                        help="Output directory (default: current directory)")
 
+    chk_p = logs_sub.add_parser("check", help="Integrity report for local binary log(s)")
+    chk_p.add_argument("check_files", metavar="FILE.bin", nargs="+")
+
     logs_sub.add_parser("erase", help="Erase completed log files from SD card")
 
     sub.add_parser("log-status", help="Query SD card logger status")
@@ -366,6 +474,9 @@ def main():
     # decode is offline — no serial needed
     if args.command == "logs" and args.logs_cmd == "decode":
         cmd_logs_decode(None, args)
+        return
+    if args.command == "logs" and args.logs_cmd == "check":
+        cmd_logs_check(None, args)
         return
 
     ser = open_port(args.port, args.baud)

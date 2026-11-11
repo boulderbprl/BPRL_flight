@@ -18,11 +18,21 @@
 #include "configs/DroneConfig.hpp"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <functional>
 
 uint64_t g_sim_time_us = 1000000;
+
+static float envf(const char *k, float d) { const char *v = getenv(k); return v ? (float)atof(v) : d; }
+
+// Optional realistic Drone2 attitude plant (PLANT=real, and the TUNE / ATTD runs).
+// Off by default: the logic checks keep their simple, fast plant.
+static bool g_real_plant = false;
+// Controller switch slot (CTRL=0/1/2 → ctrl_select low/mid/high). -1 = never
+// call set_active_controller(), as the logic checks always have.
+static int  g_ctrl_pos = -1;
 
 static const float DT = CONTROL_DT_S;
 static const float G  = 9.80665f;
@@ -49,16 +59,58 @@ struct Plant {
     float wind[2] = { 0.25f, -0.15f };            // m/s² steady disturbance, N/E
     bool  stuck = false;                          // hold the vehicle in place (N/E) — "can't keep up" test
 
-    static constexpr float K_RP = 400.0f, K_YAW = 40.0f;   // rad/s² per unit torque command
-    static constexpr float MOTOR_LAG = 0.03f, DRAG = 0.15f;
-
-    void step(const float cmd[3], float thr)
+    // Simple plant (default): fast, no delay, perfect sensors. PLANT=real switches every
+    // default below to Drone2 as identified on 2026-11-05 (K_RP / MLAG / DEAD as in
+    // att_sim, StateManager's gyro LPFs, strain p_dot and per-motor RPM models), each
+    // still env-overridable. Use it for gain tuning; the logic checks use the simple one.
+    const bool  real = g_real_plant;
+    float K_RP      = envf("K_RP",  real ? 115.0f : 400.0f);   // rad/s² per unit torque command
+    float K_YAW     = envf("K_YAW", real ?  10.0f :  40.0f);
+    float MOTOR_LAG = envf("MLAG",  real ? 0.052f : 0.03f), DRAG = 0.15f;
+    int   DEAD      = (int)envf("DEAD", real ? 4 : 0);          // ticks of command dead time
+    float GLPF      = envf("GLPF", real ? 20.0f : 0.0f);        // gyro p/q 2-pole LPF the controller sees [Hz], 0 = off
+    float RLPF      = envf("RLPF", real ?  5.0f : 0.0f);        // gyro r, same
+    // Sensor models (real plant): strain p_dot/q_dot = gain x true accel, SDELAY ticks late,
+    // SNOISE rad/s² rms, then the firmware's 15 Hz pole; RPM from the per-motor forces
+    // through the drone's motor curve, one tick late (INDI's Unmixer input).
+    float INERTIA = envf("INERTIA", 0.045f);                    // Ixx = Iyy [kg m²]
+    float SGAIN_R = envf("SGAIN_R", 0.9f), SGAIN_P = envf("SGAIN_P", 0.75f), SNOISE = envf("SNOISE", 3.0f);
+    int   SDELAY  = (int)envf("SDELAY", 2);
+    float TDIST   = envf("TDIST", 0.0f);                        // external torque rms [N·m], ~1.5 Hz band
+    float cq[64][4] = {}; long n = 0;
+    float pf = 0, qf = 0, rf = 0, pf2 = 0, qf2 = 0, rf2 = 0;
+    float sq[64][2] = {}, sf[2] = { 0, 0 }, dist[2] = { 0, 0 }, dist_f[2] = { 0, 0 };
+    uint32_t rpm[4] = { 0, 0, 0, 0 }, rpm_prev[4] = { 0, 0, 0, 0 };
+    unsigned seed = 777u;
+    float urand() { seed = seed * 1103515245u + 12345u; return ((seed >> 8) & 0xffff) / 65535.0f - 0.5f; }
+    static float rpm_of(float F)   // motor curve inverse (Newton), N → RPM
     {
+        const auto &c = kDroneConfig.unmixer; float w = 6000.0f;
+        for (int i = 0; i < 20; ++i) {
+            const float f = ((c.motor_c3 * w + c.motor_c2) * w + c.motor_c1) * w + c.motor_c0 - F;
+            const float df = (3 * c.motor_c3 * w + 2 * c.motor_c2) * w + c.motor_c1;
+            w -= f / df;
+        }
+        return w < 0 ? 0 : w;
+    }
+
+    void step(const float cmd_in[3], float thr_in)
+    {
+        float *slot = cq[n % 64]; slot[0] = cmd_in[0]; slot[1] = cmd_in[1]; slot[2] = cmd_in[2]; slot[3] = thr_in;
+        const float *dl = cq[(n - DEAD + 64) % 64]; ++n;
+        const float cmd[3] = { dl[0], dl[1], dl[2] }; const float thr = dl[3];
         const float a = DT / (MOTOR_LAG + DT);
         for (int i = 0; i < 3; ++i) torque[i] += a * (cmd[i] - torque[i]);
         thrust += a * (thr - thrust);
 
         p_dot = K_RP * torque[0]; q_dot = K_RP * torque[1]; r_dot = K_YAW * torque[2];
+        if (TDIST > 0.0f) {        // white noise through two 1st-order 1.5 Hz poles
+            const float al = DT / (1.0f / (6.2832f * 1.5f) + DT);
+            for (int i = 0; i < 2; ++i) {
+                dist_f[i] += al * (urand() * TDIST * 20.0f - dist_f[i]); dist[i] += al * (dist_f[i] - dist[i]);
+            }
+            p_dot += dist[0] / INERTIA; q_dot += dist[1] / INERTIA;
+        }
         p += p_dot * DT; q += q_dot * DT; r += r_dot * DT;
 
         const float sr = sinf(roll), cr = cosf(roll), sp = sinf(pitch), cp = cosf(pitch);
@@ -82,6 +134,32 @@ struct Plant {
             vel[0] = vel[1] = 0.0f;
             roll = pitch = 0.0f; p = q = r = 0.0f;
         }
+        if (GLPF > 0.0f) {         // two cascaded 1st-order poles ≈ the 2-pole LPF on the rates
+            const float ag = DT / (1.0f / (6.2832f * GLPF) + DT);
+            pf += ag * (p - pf); pf2 += ag * (pf - pf2);
+            qf += ag * (q - qf); qf2 += ag * (qf - qf2);
+        }
+        if (RLPF > 0.0f) {
+            const float ar = DT / (1.0f / (6.2832f * RLPF) + DT);
+            rf += ar * (r - rf); rf2 += ar * (rf - rf2);
+        }
+        if (real) {
+            // per-motor RPM from the lagged torque state, encoder one tick late
+            const float KT = K_RP * INERTIA, L = kDroneConfig.unmixer.arm_length_m * 0.70710678f;
+            const float Fb = 2.7f * G * thrust / kDroneConfig.alt.hover_thr / 4.0f;
+            const float tr = KT * torque[0], tp = KT * torque[1];
+            const float sr_[4] = { -1, +1, +1, -1 }, sp_[4] = { +1, -1, +1, -1 };
+            for (int i = 0; i < 4; ++i) {
+                rpm[i] = rpm_prev[i];
+                rpm_prev[i] = (uint32_t)lroundf(rpm_of(Fb + (sr_[i] * tr + sp_[i] * tp) / (4.0f * L)) + urand() * 20.0f);
+            }
+            // strain p_dot/q_dot: gain, delay, noise, then the firmware's 15 Hz pole
+            float *s_ = sq[n % 64];
+            s_[0] = p_dot * SGAIN_R + urand() * SNOISE * 3.46f; s_[1] = q_dot * SGAIN_P + urand() * SNOISE * 3.46f;
+            const float *o_ = sq[(n - SDELAY + 64) % 64];
+            const float al = DT / (1.0f / (6.2832f * 15.0f) + DT);
+            sf[0] += al * (o_[0] - sf[0]); sf[1] += al * (o_[1] - sf[1]);
+        }
     }
 
     void fill(float state_full[StateIdx::N], float euler[3]) const
@@ -97,8 +175,10 @@ struct Plant {
         state_full[StateIdx::X] = pos[0]; state_full[StateIdx::Y] = pos[1]; state_full[StateIdx::Z_POS] = pos[2];
         for (int b = 0; b < 3; ++b)
             state_full[StateIdx::U + b] = R[0][b] * vel[0] + R[1][b] * vel[1] + R[2][b] * vel[2];
-        state_full[StateIdx::P] = p; state_full[StateIdx::Q] = q; state_full[StateIdx::R] = r;
-        state_full[StateIdx::P_DOT] = p_dot; state_full[StateIdx::Q_DOT] = q_dot; state_full[StateIdx::R_DOT] = r_dot;
+        state_full[StateIdx::P] = GLPF > 0.0f ? pf2 : p; state_full[StateIdx::Q] = GLPF > 0.0f ? qf2 : q;
+        state_full[StateIdx::R] = RLPF > 0.0f ? rf2 : r;
+        state_full[StateIdx::P_DOT] = real ? sf[0] : p_dot; state_full[StateIdx::Q_DOT] = real ? sf[1] : q_dot;
+        state_full[StateIdx::R_DOT] = r_dot;
         euler[0] = roll; euler[1] = pitch; euler[2] = yaw;
     }
 };
@@ -154,7 +234,12 @@ struct Sim {
         input[InputIdx::THRUST] = thr; input[InputIdx::ROLL_TGT] = roll_stick;
         input[InputIdx::PITCH_TGT] = pitch_stick; input[InputIdx::YAW_RATE] = yaw_stick;
         input[InputIdx::FLIGHT_MODE] = mode_sw;
-        const uint32_t rpm[4] = { 0, 0, 0, 0 };
+        static const uint32_t no_rpm[4] = { 0, 0, 0, 0 };
+        const uint32_t *rpm = plant.real ? plant.rpm : no_rpm;
+        if (g_ctrl_pos >= 0) {     // fly a chosen switch slot; the real plant's RPM/strain are "GOOD"
+            fsm.set_indi_sensor_health(SensorHealth::GOOD);
+            fsm.set_active_controller(g_ctrl_pos);
+        }
         float cmds[3];
         fsm.update(state_full, euler, input, armed, pos_valid, rpm, 0.0f, cmds, thrust_out);   // roll_jerk: no strain-rate sensor in the sim
         {   // ControlThread feeds the mixer's limit flags back every tick; without it they stay
@@ -509,8 +594,8 @@ static void scenario_degraded_link()
     printf("degraded_link: POS_HOLD + point move with position 100 ms late, refreshed at 23 Hz\n");
     Sim s("degraded_link");
     s.takeoff_to(1.0f);
-    s.meas_delay = 40;     // 100 ms
-    s.meas_hold  = 17;     // 400 / 17 = 23.5 Hz
+    s.meas_delay = (int)envf("MDELAY", 40);   // 100 ms
+    s.meas_hold  = (int)envf("MHOLD", 17);    // 400 / 17 = 23.5 Hz
     s.run(3.0f);
     const float n0 = s.plant.pos[0], e0 = s.plant.pos[1];
     // Shove it: 0.5 m/s sideways.
@@ -530,6 +615,76 @@ static void scenario_degraded_link()
     check(max_n - 1.0f < 0.08f, "1 m point move: overshoot past the point [m]", max_n - 1.0f, 0.08);
     check(max_speed < 1.5f * TrajectoryTracker::V_MOVE, "  peak speed [m/s]", max_speed, 1.5 * TrajectoryTracker::V_MOVE);
     check(hypotf(s.plant.pos[0] - (o[0] + 1.0f), s.plant.pos[1] - o[1]) < 0.05f, "  final error [m]", hypotf(s.plant.pos[0] - (o[0] + 1.0f), s.plant.pos[1] - o[1]), 0.05);
+}
+
+// ── Tuning runs (not pass/fail; TUNE=1 / ATTD=1, real plant) ─────────────────
+// TUNE: POS_HOLD disturbance rejection with the mocap link MDELAY/MHOLD ticks late /
+// held (default 50 ms, 67 Hz): a 0.5 m/s shove, a 0.5 m/s² wind step, 20 s of random
+// gusts (0.4 m/s² rms), a 1 m point move. One summary line for gain sweeps.
+static void scenario_tune()
+{
+    Sim s("tune");
+    s.takeoff_to(1.0f);
+    s.meas_delay = (int)envf("MDELAY", 20); s.meas_hold = (int)envf("MHOLD", 6);
+    s.run(8.0f);
+    float n0 = s.plant.pos[0], e0 = s.plant.pos[1];
+    // 1) shove 0.5 m/s East
+    s.plant.vel[1] += 0.5f;
+    float peak = 0, over = 0; int last_out = 0, k = 0; bool unstable = false;
+    s.run(10.0f, [&] { const float de = s.plant.pos[1] - e0, r = hypotf(s.plant.pos[0] - n0, de);
+                       peak = fmaxf(peak, r); over = fminf(over, de);
+                       ++k; if (r > 0.03f) last_out = k; if (r > 3) unstable = true; });
+    printf("TUNE shove_peak_cm %.1f overshoot_cm %.1f settle3cm_s %.2f", peak * 100, -over * 100, last_out * DT);
+    // 2) wind step +0.5 m/s² North (~3° lean)
+    s.run(2.0f); n0 = s.plant.pos[0]; e0 = s.plant.pos[1];
+    s.plant.wind[0] += 0.5f; peak = 0; last_out = 0; k = 0;
+    s.run(12.0f, [&] { const float r = hypotf(s.plant.pos[0] - n0, s.plant.pos[1] - e0); peak = fmaxf(peak, r);
+                       ++k; if (r > 0.03f) last_out = k; if (r > 3) unstable = true; });
+    printf(" | wind_peak_cm %.1f wind_settle3cm_s %.2f", peak * 100, last_out * DT);
+    s.plant.wind[0] -= 0.5f; s.run(10.0f);
+    // 3) random gusts: low-passed noise, 0.4 m/s² rms, 20 s
+    n0 = s.plant.pos[0]; e0 = s.plant.pos[1];
+    unsigned seed = 12345; float g[2] = { 0, 0 }; double ss = 0; int c = 0;
+    const float base[2] = { s.plant.wind[0], s.plant.wind[1] };
+    s.run(20.0f, [&] { for (int i = 0; i < 2; ++i) {
+                           seed = seed * 1103515245u + 12345u; const float u = ((seed >> 8) & 0xffff) / 65535.0f - 0.5f;
+                           g[i] += DT / (0.3f + DT) * (u * 2.2f * 4.0f - g[i]); s.plant.wind[i] = base[i] + g[i]; }
+                       const float r = hypotf(s.plant.pos[0] - n0, s.plant.pos[1] - e0); ss += r * r; ++c;
+                       if (r > 3) unstable = true; });
+    s.plant.wind[0] = base[0]; s.plant.wind[1] = base[1];
+    printf(" | gust_rms_cm %.1f", sqrt(ss / c) * 100);
+    s.run(5.0f);
+    // 4) 1 m point move
+    s.cmd(TrajCmdType::SET_ORIGIN); const float o[2] = { s.plant.pos[0], s.plant.pos[1] };
+    s.cmd(TrajCmdType::POINT, 1.0f, 0.0f); float mx = -9, terr = 0;
+    s.run(10.0f, [&] { mx = fmaxf(mx, s.plant.pos[0] - o[0]);
+                       if (s.traj_state() == TrajState::MOVE)
+                           terr = fmaxf(terr, hypotf(s.traj[1] - s.plant.pos[0], s.traj[2] - s.plant.pos[1])); });
+    printf(" | move_err_max_cm %.1f move_overshoot_cm %.1f%s\n", terr * 100, (mx - 1) * 100, unstable ? " UNSTABLE" : "");
+}
+
+// ATTD: POS_HOLD hover; switch from slot CTRL0 to CTRL (transient), then 20 s under a
+// TD N·m rms external torque: attitude error vs the lean target, position rms.
+static void scenario_attdist()
+{
+    Sim s("attdist");
+    s.takeoff_to(1.0f);
+    s.meas_delay = 20; s.meas_hold = 6;
+    const int ctrl = g_ctrl_pos < 0 ? 0 : g_ctrl_pos;
+    g_ctrl_pos = (int)envf("CTRL0", ctrl); s.run(5.0f);
+    g_ctrl_pos = ctrl;
+    float mx = 0;
+    s.run(2.0f, [&] { mx = fmaxf(mx, fmaxf(fabsf(s.plant.roll - s.ptun[8]), fabsf(s.plant.pitch - s.ptun[9]))); });
+    printf("switch_transient_deg %.2f | ", mx * RAD2DEG);
+    s.plant.TDIST = envf("TD", 0.13f);
+    double er = 0, ep = 0, pr = 0; int c = 0; float cmax = 0; bool bad = false;
+    const float n0 = s.plant.pos[0], e0 = s.plant.pos[1];
+    s.run(20.0f, [&] { const float a = s.plant.roll - s.ptun[8], b = s.plant.pitch - s.ptun[9]; er += a * a; ep += b * b; ++c;
+                       const float r = hypotf(s.plant.pos[0] - n0, s.plant.pos[1] - e0); pr += r * r;
+                       cmax = fmaxf(cmax, fmaxf(fabsf(s.plant.torque[0]), fabsf(s.plant.torque[1])));
+                       if (fabsf(s.plant.roll) > 0.7f || fabsf(s.plant.pitch) > 0.7f) bad = true; });
+    printf("ATT roll_err_rms_deg %.2f pitch_err_rms_deg %.2f pos_rms_cm %.1f max_torque_cmd %.2f%s\n",
+           sqrt(er / c) * RAD2DEG, sqrt(ep / c) * RAD2DEG, sqrt(pr / c) * 100, cmax, bad ? " DIVERGED" : "");
 }
 
 // Step 6: command acceptance rules and cancel conditions.
@@ -613,6 +768,15 @@ static void scenario_commands()
 int main(int argc, char **argv)
 {
     if (argc > 1) g_out_dir = argv[1];
+    g_ctrl_pos = (int)envf("CTRL", -1);
+    const char *plant = getenv("PLANT");
+    const bool tuning = getenv("TUNE") || getenv("ATTD");
+    g_real_plant = plant ? !strcmp(plant, "real") : tuning;   // tuning runs default to the real plant
+    if (tuning) {
+        if (g_ctrl_pos < 0) g_ctrl_pos = 0;
+        if (getenv("ATTD")) scenario_attdist(); else scenario_tune();
+        return 0;
+    }
     scenario_heading_unit();
     scenario_heading_stick();
     scenario_point();
