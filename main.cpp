@@ -164,7 +164,8 @@ int main(void)
     motor_output_init();
     can_drv_init();        // start FDCAN1 (+FDCAN2 per can2_enable), register IMX5 callbacks on imx5_can_bus
     i2c_drv_init();        // start I2CD2 at 400 kHz
-    strain_gauge_init();   // register I2C 0x09 strain gauge array node
+    if (kDroneConfig.sensors.has_strain_gauges)
+        strain_gauge_init();   // register I2C 0x09 strain gauge array node
     // strain_rate_init(); // mutually exclusive with strain_gauge_init() above
     encoder_rpm_init();    // register CAN 0x70-0x73 shaft-angle encoder nodes
     radio_input_init();    // start USART3 CRSF receiver at 420000 baud

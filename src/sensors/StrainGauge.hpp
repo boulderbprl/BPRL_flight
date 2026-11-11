@@ -154,6 +154,16 @@ SensorHealth strain_gauge_health(const StrainGaugeRaw &snap, uint32_t now_us);
  *     RPMS.RPM0..3), so the estimate is only valid while the RPM health
  *     isn't BAD — the caller gates on that (threads.cpp). With
  *     STRAIN_FIT_RPM_TAPS 0 (a strain-only fit) rpm is ignored.
+ *  5. Fused strain + IMU estimate (STRAIN_FIT_FUSE, strain_fit_export.py
+ *     --fuse): a second weight set on the same ring rows as p_dot (the roll
+ *     block) and the same RPM history — kStrainFuseW*, kStrainFuseRpmW* —
+ *     plus STRAIN_FIT_FUSE_IMU_TAPS taps, same spacing, of the IMU p_dot and
+ *     q_dot chain (StateManager::imu_p_dot()/imu_q_dot() = SACC.PdI/QdI),
+ *     both axes into each output. update() sums the strain + RPM part;
+ *     fuse(), called once the tick's IMU estimate exists (after
+ *     StateManager::update()), adds the IMU taps. The fit was trained on
+ *     the logged PdI/QdI chain, so the IMU chain config
+ *     (AngAccelFilterConfig::imu_lpf_hz/imu_lpf_extra_hz) must stay as it was.
  *
  * Gauges are sampled and held between I2C frames — the board and the I2C
  * poll both run at ~400 Hz, so most ticks see a new frame.
@@ -173,11 +183,21 @@ public:
     // RPM (step 4 above; unused by a strain-only fit).
     void update(const StrainGaugeRaw &snap, const uint32_t rpm[4]);
 
-    static constexpr bool uses_rpm() { return STRAIN_FIT_RPM_TAPS > 0; }
+    // Fused strain + IMU estimate (step 5): once per tick, after update()
+    // and after this tick's IMU p_dot/q_dot are computed. No-op (and
+    // fused_ready() stays false) when StrainGaugeFit.hpp has no fused fit.
+    void fuse(float imu_p_dot, float imu_q_dot);
+
+    // Either fit reads RPM (the fused fit's RPM taps are a subset of these).
+    static constexpr bool uses_rpm() { return STRAIN_FIT_RPM_TAPS > 0 || STRAIN_FIT_FUSE_RPM_TAPS > 0; }
+    static constexpr bool has_fused() { return STRAIN_FIT_FUSE != 0; }
 
     float p_dot() const { return _p_dot; }   // rad/s^2
     float q_dot() const { return _q_dot; }   // rad/s^2
     bool  ready() const { return _ticks >= kHistory; }  // tap history full
+    float fused_p_dot() const { return _pf_dot; }   // rad/s^2, 0 until fused_ready()
+    float fused_q_dot() const { return _qf_dot; }
+    bool  fused_ready() const { return has_fused() && ready() && _imu_ticks >= kHistory; }
 
 private:
     static constexpr int kSignals    = 2 * STRAIN_FIT_N_GROUPS;   // means, then gradients (filtered)
@@ -203,6 +223,15 @@ private:
     uint32_t             _ticks = 0;   // updates since the first valid frame (saturates at kHistory)
     float                _p_dot = 0.0f;
     float                _q_dot = 0.0f;
+#if STRAIN_FIT_FUSE
+    float                _imu_hist[kHistory][2] = {};   // IMU p_dot, q_dot (step 5), fuse()'s own ring
+    int                  _imu_head = 0;
+    float                _fz_part_p = 0.0f;   // fused fit's strain + RPM part, from update()
+    float                _fz_part_q = 0.0f;
+#endif
+    uint32_t             _imu_ticks = 0;      // fuse() calls (saturates at kHistory)
+    float                _pf_dot = 0.0f;
+    float                _qf_dot = 0.0f;
 };
 
 /*
@@ -231,7 +260,7 @@ private:
  *
  *  5. What a bad channel does. For now: any weighted channel frozen,
  *     railed or repeatedly clamped -> strain_gauge_health() returns BAD, so
- *     INDI falls back to PID — refit with fewer channels in MATLAB rather
+ *     the STRAIN/FUSED axes fly the IMU estimate — refit with fewer channels in MATLAB rather
  *     than fly a fit missing a term. Dropout tolerance (re-solved weight
  *     sets per dropped channel, or rescaling the rest) is out of scope; note
  *     that just zeroing a weight shifts the estimate by weight x value, and

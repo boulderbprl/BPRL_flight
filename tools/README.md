@@ -217,6 +217,12 @@ Turns the strain → p_dot/q_dot weights from the MATLAB calibration pipeline (`
 python3 tools/strain_fit_export.py ~/Dropbox/PhD/New_Strain_Drone_2026/Calibration/strain_pdot_weights.mat
 ```
 
+`--pitch P.mat` takes q_dot from a separate pitch fit (its own strain high-pass). `--fuse F.mat` adds the fused strain + IMU fit, exported as `kStrainFuse*`. That fit uses the main fit's strain inputs plus taps of the IMU p_dot/q_dot chain (SACC.PdI/QdI), and the exporter checks the strain inputs match. The current Drone2 header is:
+
+```bash
+python3 tools/strain_fit_export.py .../Calibration/weights/gust_fit_B_py.mat --fuse .../Calibration/weights/gust_fit_F_fused_py.mat
+```
+
 It checks the input ordering against the names in the .mat. It can't check the low-pass: the fit assumes the strain sees only a single pole at `STRAIN_FIT_LPF_HZ`, so set that drone's `ang_accel_filt` to `{ 0, STRAIN_FIT_LPF_HZ, ... }` (see `AngAccelFilterConfig` in `configs/DroneConfig.hpp`).
 
 ---

@@ -110,7 +110,7 @@ Handover on the switch edge into a controller: PID seeds its rate integrators so
 
 Every controller change blends rather than steps: `out = w·new + (1−w)·(old + offset)`, `w` ramping 0 → 1 over 50 ms into PID or 300 ms into anything else (`BLEND_TO_PID_TICKS` / `BLEND_TO_OTHER_TICKS`). `offset` carries whatever an interrupted blend was still adding, so switching again mid-blend is continuous too.
 
-**INDI sensor fallback.** ControlThread passes the worst health of INDI's feedback sensors to `set_indi_sensor_health()` every tick: encoder RPM (`EncoderRpmMonitor`, `src/sensors/EncoderRPM.hpp`), plus the strain gauge array where `SensorsConfig::indi_requires_strain` is set. The health levels are `SensorHealth` (`src/sensors/SensorHealth.hpp`):
+**INDI sensor fallback.** ControlThread passes the health of INDI's RPM feedback to `set_indi_sensor_health()` every tick: encoder RPM (`EncoderRpmMonitor`, `src/sensors/EncoderRPM.hpp`), or DShot telemetry. PID_PI doesn't use RPM and isn't gated. The strain gauge array doesn't gate INDI. It only decides whether an axis whose `ang_accel_filt.source_roll`/`source_pitch` is `STRAIN` or `FUSED` can use that estimate. While it can't (array BAD, tap history filling, or RPM BAD, since both strain fits read RPM), the axis crossfades to the IMU p_dot/q_dot over 50 ms. It fades back after 1 s of the source being usable again (`StateManager::select_ang_accel()`). The health levels are `SensorHealth` (`src/sensors/SensorHealth.hpp`):
 
 | Health | Meaning | INDI |
 |---|---|---|
@@ -557,7 +557,7 @@ D axis: `AltControl::alt_hold()` — the throttle stick commands climb rate outs
 
 Converts per-motor RPM to physical roll/pitch torques in N·m for INDI/JINDI/PIDJerk feedback. RPM comes from bidirectional DShot telemetry, or from the CAN shaft-encoder nodes (`src/sensors/EncoderRPM.hpp`) on a drone without DShot (Drone2). Constants are per-drone via `UnmixerConfig` (`configs/DroneConfig.hpp`): bench-fit on Drone1/Drone3, placeholders on Drone2 (its 12 in motors/props haven't been on the thrust stand).
 
-**RPM filtering** — each motor's RPM goes through the drone's `ang_accel_filt` — a 2nd-order lowpass at `lpf_hz` and an optional 1st-order stage at `lpf_extra_hz` (`<= 0` disables it) — before the motor model, at the fixed `CONTROL_DT_S`. It's the same config StateManager uses for p_dot/q_dot, so there's one place to change it. `lpf_hz <= 0` disables the 2nd-order stage too. On a strain drone (`ang_accel_filt.source = AngAccelSource::STRAIN`) the strain gauge p_dot/q_dot estimate (`StrainAngAccel`, `src/sensors/StrainGauge.hpp`) goes through the same chain.
+**RPM filtering** — each motor's RPM goes through the drone's `ang_accel_filt` — a 2nd-order lowpass at `lpf_hz` and an optional 1st-order stage at `lpf_extra_hz` (`<= 0` disables it) — before the motor model, at the fixed `CONTROL_DT_S`. It's the same config StateManager uses for p_dot/q_dot, so there's one place to change it. `lpf_hz <= 0` disables the 2nd-order stage too. On a strain drone (`SensorsConfig::has_strain_gauges`), the strain gauge p_dot/q_dot estimates go through the same chain: the strain + RPM fit and the fused strain + IMU fit (`StrainAngAccel`, `src/sensors/StrainGauge.hpp`). Each axis picks IMU, `STRAIN` or `FUSED` with `ang_accel_filt.source_roll`/`source_pitch`.
 
 **Motor force model** — cubic fit directly against mechanical RPM (values below are Drone1's, shared with Drone3; each drone's `UnmixerConfig` has its own):
 ```

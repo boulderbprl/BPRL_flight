@@ -201,20 +201,29 @@ struct UnmixerConfig {
 // acceleration always carry the same filter delay — INDI's increment and its
 // live G1 estimator both depend on that.
 //
-// source picks where StateManager's p_dot/q_dot (StateIdx::P_DOT/Q_DOT, the
-// INDI/PID_PI/PID_JERK angular-acceleration feedback) comes from:
+// source_roll / source_pitch pick, per axis, where StateManager's p_dot and
+// q_dot (StateIdx::P_DOT/Q_DOT, the INDI/PID_PI/PID_JERK angular-acceleration
+// feedback) come from:
 //   IMU     differentiated gyro, as above.
 //   STRAIN  the strain gauge array's fitted estimate (StrainAngAccel,
-//           src/sensors/StrainGauge.hpp). Its low-pass is this same
-//           lpf_hz/lpf_extra_hz chain, so it stays delay-matched to the
-//           RPM torque. The fit (StrainGaugeFit.hpp) was made with a single
+//           src/sensors/StrainGauge.hpp, StrainGaugeFit.hpp kStrainFitW*).
+//           Its low-pass is this same lpf_hz/lpf_extra_hz chain, so it stays
+//           delay-matched to the RPM torque. The fit was made with a single
 //           pole at STRAIN_FIT_LPF_HZ only — set { 0, STRAIN_FIT_LPF_HZ } to
-//           fly it as fitted. Implies indi_requires_strain, and falls back
-//           to the IMU estimate whenever strain_gauge_health() is BAD.
-// Either way both estimates are computed and logged (SACC).
+//           fly it as fitted.
+//   FUSED   the fused strain + IMU fit (StrainAngAccel::fuse(),
+//           kStrainFuseW*): the strain inputs above plus taps of the IMU
+//           estimate. Needs STRAIN_FIT_FUSE in StrainGaugeFit.hpp.
+// STRAIN and FUSED need SensorsConfig::has_strain_gauges. Whenever the strain
+// array isn't usable (not ready, strain_gauge_health() BAD, or — both fits
+// read RPM — RPM health BAD) that axis crossfades to the IMU estimate over
+// STATEMGR_ANG_ACCEL_FADE_TICKS and comes back only after the source has been
+// usable for STATEMGR_ANG_ACCEL_DWELL_TICKS (StateManager::select_ang_accel()).
+// All three are computed and logged (SACC) whenever the drone has strain gauges.
 enum class AngAccelSource : uint8_t {
     IMU,
     STRAIN,
+    FUSED,
 };
 
 // rpm_lpf_hz decouples the Unmixer's RPM filter from the chain above. > 0:
@@ -233,11 +242,13 @@ enum class AngAccelSource : uint8_t {
 // strain fit only). Both <= 0: the IMU estimate uses the shared lpf_hz /
 // lpf_extra_hz chain, the original behaviour. A heavier IMU chain is more
 // delay on whatever flies the IMU estimate — including the strain->IMU
-// fallback when source is STRAIN — against the Unmixer's RPM torque.
+// fallback — against the Unmixer's RPM torque. The fused fit (FUSED) was
+// trained on this IMU chain: refit it after changing these.
 struct AngAccelFilterConfig {
     float          lpf_hz;        // 2nd-order Butterworth cutoff; <= 0 disables it
     float          lpf_extra_hz;  // optional cascaded 1st-order stage; <= 0 disables it
-    AngAccelSource source;        // p_dot/q_dot from IMU or strain — see above
+    AngAccelSource source_roll;   // p_dot from IMU, STRAIN or FUSED — see above
+    AngAccelSource source_pitch;  // q_dot from IMU, STRAIN or FUSED
     float          rpm_lpf_hz;    // Unmixer-only 1st-order RPM pole; <= 0 = use the shared chain
     float          imu_lpf_hz;        // IMU-only 2nd-order stage (see above); both IMU fields <= 0 = shared chain
     float          imu_lpf_extra_hz;  // IMU-only 1st-order stage
@@ -279,14 +290,13 @@ struct AngAccelFilterConfig {
 // sign a CW motor gives depends on how the encoder faces the magnet — check
 // it with ENC,read while spinning each motor on the bench.
 //
-// indi_requires_strain: INDI may only fly while its sensors are healthy;
-// otherwise FlightStateMachine flies PID in its place (see
-// FlightStateMachine::set_indi_sensor_health()). RPM health is always
-// required. With this set, the strain gauge array (StrainGauge.hpp,
-// strain_gauge_health()) must be healthy too — set it on airframes whose
-// INDI angular-acceleration feedback comes from strain. Only the CubeBlue
-// build starts the strain gauge array (main.cpp), so on any other board
-// this keeps INDI permanently on PID.
+// has_strain_gauges: the strain gauge array (StrainGauge.hpp) is fitted.
+// Gates starting its I2C poll (main.cpp, CubeBlue build only) and running the
+// strain fits (StrainAngAccel) every control tick — false skips both, logs 0
+// for the strain/fused SACC fields, and flies every axis on the IMU estimate
+// whatever AngAccelFilterConfig says. INDI only needs RPM health (otherwise
+// FlightStateMachine flies PID in its place, see set_indi_sensor_health());
+// a bad strain array just moves the strain/fused axes onto the IMU estimate.
 //
 // imx5_mount_rpy_deg is how the IMX5/IMX6 sensor frame sits on the airframe,
 // as roll/pitch/yaw in degrees applied in Z,Y,X order (R = Rz·Ry·Rx,
@@ -311,7 +321,7 @@ struct SensorsConfig {
     int8_t  encoder_motor_map[4];   // [node0..node3] -> logical motor index, or -1
     bool    can2_enable;
     uint8_t imx5_can_bus;           // 1 = CAN1 (FDCAN1), 2 = CAN2 (FDCAN2)
-    bool    indi_requires_strain;   // INDI also needs strain_gauge_health() — see above
+    bool    has_strain_gauges;      // strain gauge array fitted: run its poll + fits — see above
     int8_t  encoder_rpm_sign[4];    // [FR, RL, FL, RR] expected encoder RPM sign in flight, 0 = unchecked — see above
     float   imx5_mount_rpy_deg[3];  // IMX sensor frame → body, [roll, pitch, yaw] deg, applied Z,Y,X — see above
     float   imx5_r_quat;            // IMX quaternion component variance, per update — see above

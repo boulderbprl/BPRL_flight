@@ -83,7 +83,10 @@ void StateManager::init()
     _prev_p       = _prev_q       = _prev_r       = 0.0f;
     _pdot_filt    = _qdot_filt    = _rdot_filt    = 0.0f;
     _pdot_out     = _qdot_out     = 0.0f;
-    _ang_accel_from_strain = false;
+    for (int ax = 0; ax < 2; ++ax) {
+        _src_w[ax] = _src_diff[ax] = 0.0f;
+        _src_ok_ticks[ax] = 0;
+    }
     _p_filt       = _q_filt       = _r_filt       = 0.0f;
     _ud_filt      = _vd_filt      = _wd_filt      = 0.0f;
     _ud_filt_state = _vd_filt_state = _wd_filt_state = Biquad2pState{};
@@ -527,12 +530,11 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _pdot_filt = lowpass(pdot_2p, _pdot_filt, alpha_pqdot_extra);
     _qdot_filt = lowpass(qdot_2p, _qdot_filt, alpha_pqdot_extra);
 
-    // Strain estimate in place of the IMU one when configured and usable
-    // (set_strain_ang_accel()). The IMU filters above keep running either
-    // way, so falling back to them never starts from a cold filter.
-    _ang_accel_from_strain = _ang_accel_filt.source == AngAccelSource::STRAIN && _strain_usable;
-    _pdot_out = _ang_accel_from_strain ? _strain_pdot : _pdot_filt;
-    _qdot_out = _ang_accel_from_strain ? _strain_qdot : _qdot_filt;
+    // IMU estimate out until select_ang_accel() picks the configured sources.
+    // The IMU filters above keep running either way, so falling back to them
+    // never starts from a cold filter.
+    _pdot_out = _pdot_filt;
+    _qdot_out = _qdot_filt;
 
     const float alpha_r_dot = lowpass_alpha(STATEMGR_LP_RDOT_HZ, dt);
     _rdot_filt = lowpass(derivative(_r_filt, _prev_r, dt), _rdot_filt, alpha_r_dot);
@@ -540,6 +542,34 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     _prev_p = p_notched;
     _prev_q = q_notched;
     _prev_r = _r_filt;
+}
+
+void StateManager::select_ang_accel(const AngAccelCandidates &c)
+{
+    const AngAccelSource src[2] = { _ang_accel_filt.source_roll, _ang_accel_filt.source_pitch };
+    const float imu[2] = { _pdot_filt, _qdot_filt };
+    constexpr float kStep = 1.0f / (float)STATEMGR_ANG_ACCEL_FADE_TICKS;
+    float out[2];
+    for (int ax = 0; ax < 2; ++ax) {
+        bool  ok = false;
+        float v  = imu[ax];
+        if (src[ax] == AngAccelSource::STRAIN) { ok = c.strain_ok; v = c.strain[ax]; }
+        else if (src[ax] == AngAccelSource::FUSED) { ok = c.fused_ok; v = c.fused[ax]; }
+
+        if (ok) {
+            if (_src_ok_ticks[ax] < STATEMGR_ANG_ACCEL_DWELL_TICKS) ++_src_ok_ticks[ax];
+            _src_diff[ax] = v - imu[ax];          // held while not usable
+        } else {
+            _src_ok_ticks[ax] = 0;
+        }
+        const float target = (ok && _src_ok_ticks[ax] >= STATEMGR_ANG_ACCEL_DWELL_TICKS) ? 1.0f : 0.0f;
+        if (_src_w[ax] < target)      _src_w[ax] = fminf(_src_w[ax] + kStep, target);
+        else if (_src_w[ax] > target) _src_w[ax] = fmaxf(_src_w[ax] - kStep, target);
+        // = w * source + (1 - w) * IMU while usable; the held difference decays out otherwise
+        out[ax] = imu[ax] + _src_w[ax] * _src_diff[ax];
+    }
+    _pdot_out = out[0];
+    _qdot_out = out[1];
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

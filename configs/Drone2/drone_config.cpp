@@ -46,7 +46,7 @@ const DroneConfig kDroneConfig = {
         { 0.4f, 0.1f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         0.050f,  // g1_seed_roll  (was 0.043 = Ixx from cal flights 3+4)
-        0.062f,  // g1_seed_pitch (was 0.046 = Iyy; raised for the pitch strain under-read)
+        0.050f,  // g1_seed_pitch (was 0.062 for the poor pitch fit; fit B pitch tracks better, 2026-11-10; 0.046 = Iyy)
         1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
         1.0f,    // indi_output_gain_pitch (kappa)
         0.0f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
@@ -79,14 +79,14 @@ const DroneConfig kDroneConfig = {
     {
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
-        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  
-        { 0.135f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate 
+        { 0.17f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // roll_rate  
+        { 0.17f, 0.135f, 0.006f, 0.5f, 20.0f, 0.0f, 20.0f }, // pitch_rate 
         { 0.4f, 0.1f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         { 0.7f, 6.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_roll)
         { 0.7f, 6.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_pitch)
         4.0f,  // yaw_stick_gain
-        100.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
+        140.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
     },
     
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -142,25 +142,30 @@ const DroneConfig kDroneConfig = {
         14.7f,                                                  // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source_roll, source_pitch, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }
     // lpf_hz/lpf_extra_hz apply to the strain fit (and to the IMU p_dot/q_dot when both
     // imu_ fields are 0). imu_lpf_hz/imu_lpf_extra_hz: the IMU estimate's own chain —
     // 2-pole 20 Hz + 1-pole 15 Hz (≈ 11 + 10.6 ms at low frequency), since the IMU estimate
     // with a single 15 Hz pole is too noisy to fly. rpm_lpf_hz gives the
     // Unmixer's RPM torque its own single pole: 30 Hz ≈ 5.3 ms delay (was the shared
     // 15 Hz ≈ 10.6 ms). Raw-RPM torque is ~91% signal (flight 7), so it needs little filtering.
-    // AngAccelSource::STRAIN flies the strain gauge fit instead (SACC logs both
-    // either way). The fit was made with a single 15 Hz pole only — replayed on
-    // cal flights 3/4, the extra 20 Hz 2nd-order stage here adds 10-20 ms and
-    // drops R^2 from ~0.65 to ~0.55; fly strain as { 0.0f, 15.0f, STRAIN }.
+    // source_roll/source_pitch pick each axis's p_dot/q_dot independently: IMU, STRAIN (strain + RPM
+    // fit B) or FUSED (fit B's inputs + 3 IMU taps, gust_fit_F_fused_py.mat) — SACC logs all three
+    // either way. STRAIN/FUSED crossfade to IMU while the strain array (or RPM) is BAD.
+    // FUSED reads ~0.9 of the true angular accel vs ~0.7 for STRAIN — effectively a higher G1.
+    // The strain fits were made with a single 15 Hz pole only — replayed on cal flights 3/4,
+    // the extra 20 Hz 2nd-order stage here adds 10-20 ms and drops R^2 from ~0.65 to ~0.55;
+    // fly strain as { 0.0f, 15.0f, ... }. FUSED was trained on the 20 + 15 Hz IMU chain below —
+    // refit it (strain_study export_F.py) if imu_lpf_hz/imu_lpf_extra_hz change.
     { 0.0f, 15.0f, // lpf_hz, lpf_extra_hz, 0 to disable ( the first filter is 2nd-order, the second is 1st-order)
-      AngAccelSource::STRAIN, // source — IMU or STRAIN 
+      AngAccelSource::STRAIN, // source_roll  — IMU, STRAIN or FUSED
+      AngAccelSource::STRAIN, // source_pitch — IMU, STRAIN or FUSED
       30.0f,   // rpm_lpf_hz — Unmixer's single-pole RPM torque filter
       20.0f, 15.0f }, // imu_lpf_hz, imu_lpf_extra_hz — IMU p_dot/q_dot only (2nd-order, then 1st-order)
 
 
     
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, has_strain_gauges, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // MOTOR_PROTOCOL is MOTOR_PROTO_IOMCU on this board (config.mk override) — no DShot telemetry, so CAN
     // shaft-encoder RPM (src/sensors/EncoderRPM.hpp) substitutes in, all 4 motors now instrumented:
     //   NODE_ID 0 (CAN 0x70) — front-right (FR, logical 0)
@@ -176,7 +181,7 @@ const DroneConfig kDroneConfig = {
         { 0, 3, 1, 2 }, // encoder_motor_map — [node0..node3] -> logical motor (FR=0/RL=1/FL=2/RR=3)
         true,           // can2_enable — IMX6 (IMX5 driver) is on the CAN2 port
         2,              // imx5_can_bus — encoders stay on CAN1
-        true,           // indi_requires_strain — INDI falls back to PID unless the strain gauge array is healthy too
+        true,           // has_strain_gauges — strain array fitted: run its poll + the strain/fused fits (INDI itself only needs RPM)
         { -1, -1, +1, +1 }, // encoder_rpm_sign [FR, RL, FL, RR] — FR/RL spin CCW, FL/RR CW; assumes the encoders read + for CW (TODO: confirm on the bench with ENC,read)
         { 180.0f, 0.0f, -45.0f }, // imx5_mount_rpy_deg — IMX6 upside down, 45° off in yaw (IMX's own insRotation now zeroed). LOG0023's unrotated rates fit exactly this rotation.
         1e-1f,          // imx5_r_quat — IMX6 sends quaternions at 400 Hz, 2x the IMX5's 200 Hz, so 2x Drone1's 5e-2 keeps the same fusion strength
@@ -191,7 +196,7 @@ const DroneConfig kDroneConfig = {
     // .logging — LoggingConfig { log_rate_hz, prealloc_mb, enable } — one LogEnableConfig flag per message type
     {
         100.0f, // log_rate_hz
-        15,     // prealloc_mb — contiguous SD space reserved per log file
+        20,     // prealloc_mb — contiguous SD space reserved per log file
         { true, // att
           true, // lin
           true, // rcin

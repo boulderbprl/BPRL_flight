@@ -602,9 +602,10 @@ static THD_FUNCTION(ControlThread, arg)
             rpm_raw[i] = (int32_t)raw_lane[kDroneConfig.mixer.motor_map[i]];
         }
 
-        // INDI feedback health — the worst of the four motors' RPM and, where
-        // configured, the strain gauge array — gates INDI
-        // (FlightStateMachine::set_indi_sensor_health(), below).
+        // INDI feedback health — the worst of the four motors' RPM — gates
+        // INDI (FlightStateMachine::set_indi_sensor_health(), below). The
+        // strain gauge array only decides whether the STRAIN/FUSED p_dot/q_dot
+        // sources are usable (StateManager::select_ang_accel()).
         IndiHealthSnap indi_health = {};
         SensorHealth rpm_health = SensorHealth::BAD;
 #if MOTOR_PROTOCOL == MOTOR_PROTO_DSHOT
@@ -665,31 +666,32 @@ static THD_FUNCTION(ControlThread, arg)
         }
 #endif
 
-        // Strain gauge array: the angular-acceleration fit runs every tick
-        // (logged as SACC either way); its health gates INDI when INDI
-        // needs strain — always when p_dot/q_dot come from it. On boards
-        // without the array g_strain_gauge never goes valid, so the fit
-        // stays idle and the health BAD.
-        StrainGaugeRaw sg_snap;
-        chMtxLock(&strainGauge_mtx);
-        sg_snap = g_strain_gauge;
-        chMtxUnlock(&strainGauge_mtx);
-        s_strain_acc.update(sg_snap, rpm);
-        // A fit with RPM inputs (StrainGaugeFit.hpp STRAIN_FIT_RPM_TAPS > 0) is
-        // only as good as the RPM: a BAD motor reads 0 here, so the estimate is
-        // not used then (StateManager falls back to the IMU p_dot/q_dot).
-        const SensorHealth sg_health = strain_gauge_health(sg_snap, now_us);
+        // Strain gauge array (SensorsConfig::has_strain_gauges only — the
+        // fits are skipped entirely on drones without it): the strain + RPM
+        // fit runs every tick here, the fused strain + IMU fit after the IMU
+        // estimate below; both are logged (SACC) whichever ones fly.
+        const bool has_strain = kDroneConfig.sensors.has_strain_gauges;
+        SensorHealth sg_health = SensorHealth::BAD;
+        if (has_strain) {
+            StrainGaugeRaw sg_snap;
+            chMtxLock(&strainGauge_mtx);
+            sg_snap = g_strain_gauge;
+            chMtxUnlock(&strainGauge_mtx);
+            s_strain_acc.update(sg_snap, rpm);
+            sg_health = strain_gauge_health(sg_snap, now_us);
+        }
+        // Both fits read RPM (StrainAngAccel::uses_rpm()): a BAD motor reads 0
+        // here, so neither is used then — nor while the array is BAD or the
+        // tap history is still filling. Those axes fly the IMU estimate.
         const bool strain_fit_rpm_ok = !StrainAngAccel::uses_rpm() || rpm_health != SensorHealth::BAD;
-        state_mgr.set_strain_ang_accel(s_strain_acc.p_dot(), s_strain_acc.q_dot(),
-                                       s_strain_acc.ready() && sg_health != SensorHealth::BAD
-                                       && strain_fit_rpm_ok);
+        const bool strain_ok = has_strain && s_strain_acc.ready()
+                            && sg_health != SensorHealth::BAD && strain_fit_rpm_ok;
 
-        const bool indi_needs_strain = kDroneConfig.sensors.indi_requires_strain
-                                    || kDroneConfig.ang_accel_filt.source == AngAccelSource::STRAIN;
-        const SensorHealth strain_health = indi_needs_strain ? sg_health : SensorHealth::GOOD;
-        flight_sm.set_indi_sensor_health(worst(rpm_health, strain_health));
+        // INDI needs RPM only: a bad strain array moves the STRAIN/FUSED axes
+        // onto the IMU estimate instead of taking INDI away.
+        flight_sm.set_indi_sensor_health(rpm_health);
         indi_health.log.rpm_health    = (uint8_t)rpm_health;
-        indi_health.log.strain_health = (uint8_t)strain_health;
+        indi_health.log.strain_health = (uint8_t)(has_strain ? sg_health : SensorHealth::GOOD);
 
         chMtxLock(&esc_mtx);
         memcpy(g_rpm_gated, rpm, sizeof(g_rpm_gated));
@@ -699,13 +701,31 @@ static THD_FUNCTION(ControlThread, arg)
         // Run all EKF lanes and derive outputs.
         state_mgr.update(dt, imu_snap, can_snap, mocap_snap, baro_snap, rpm, now_us, g_armed);
 
+        // Fused strain + IMU fit on this tick's IMU estimate, then each
+        // axis's P_DOT/Q_DOT from its configured source (IMU when unusable).
+        if (has_strain)
+            s_strain_acc.fuse(state_mgr.imu_p_dot(), state_mgr.imu_q_dot());
+        const bool fused_ok = strain_ok && s_strain_acc.fused_ready();
+        StateManager::AngAccelCandidates acc_cand = {
+            { s_strain_acc.p_dot(),       s_strain_acc.q_dot() },
+            { s_strain_acc.fused_p_dot(), s_strain_acc.fused_q_dot() },
+            strain_ok, fused_ok,
+        };
+        state_mgr.select_ang_accel(acc_cand);
+
         LogMsgSACC sacc = {};
         sacc.p_dot_strain = s_strain_acc.p_dot();
         sacc.q_dot_strain = s_strain_acc.q_dot();
         sacc.p_dot_imu    = state_mgr.imu_p_dot();
         sacc.q_dot_imu    = state_mgr.imu_q_dot();
-        sacc.ready        = (uint8_t)s_strain_acc.ready();
-        sacc.from_strain  = (uint8_t)state_mgr.ang_accel_from_strain();
+        sacc.p_dot_fused  = s_strain_acc.fused_p_dot();
+        sacc.q_dot_fused  = s_strain_acc.fused_q_dot();
+        sacc.ready        = (uint8_t)((s_strain_acc.ready() ? 0x01 : 0) | (s_strain_acc.fused_ready() ? 0x02 : 0));
+        sacc.w_roll       = state_mgr.ang_accel_weight(0);
+        sacc.w_pitch      = state_mgr.ang_accel_weight(1);
+        sacc.from_strain  = (uint8_t)((sacc.w_roll >= 0.5f ? 0x01 : 0) | (sacc.w_pitch >= 0.5f ? 0x02 : 0));
+        sacc.src_roll     = (uint8_t)kDroneConfig.ang_accel_filt.source_roll;
+        sacc.src_pitch    = (uint8_t)kDroneConfig.ang_accel_filt.source_pitch;
 
         // If the estimator just snapped yaw onto the mocap frame, move the
         // attitude controllers' held heading by the same amount so the

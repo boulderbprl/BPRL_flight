@@ -214,6 +214,10 @@ static_assert((STRAIN_FIT_N_TAPS - 1) * kTapStride + 1 <= 24,
               "StrainAngAccel::kHistory too short for the fit's tap history");
 static_assert((STRAIN_FIT_RPM_TAPS > 0 ? STRAIN_FIT_RPM_TAPS - 1 : 0) * kTapStride + 1 <= 24,
               "StrainAngAccel::kHistory too short for the fit's RPM tap history");
+static_assert((STRAIN_FIT_FUSE_IMU_TAPS > 0 ? STRAIN_FIT_FUSE_IMU_TAPS - 1 : 0) * kTapStride + 1 <= 24 &&
+              (STRAIN_FIT_FUSE_RPM_TAPS > 0 ? STRAIN_FIT_FUSE_RPM_TAPS - 1 : 0) * kTapStride + 1 <= 24,
+              "StrainAngAccel::kHistory too short for the fused fit's tap history");
+static_assert(!STRAIN_FIT_FUSE || STRAIN_FIT_FUSE_IMU_TAPS >= 1, "fused fit without IMU taps");
 static_assert(STRAIN_GAUGE_HPF_HZ == STRAIN_FIT_HPF_HZ,
               "strain high-pass doesn't match the one the fit was made with");
 static_assert(STRAIN_FIT_N_SIG == 2 * STRAIN_FIT_N_GROUPS * (1 + STRAIN_FIT_USE_SQ),
@@ -284,11 +288,33 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
     // older rows are still 0 — don't use the estimate until ready().
     float p = kStrainFitBiasP;
     float q = kStrainFitBiasQ;
+#if STRAIN_FIT_FUSE
+    // 5. The fused fit's strain + RPM part, on the roll block's rows; fuse() adds the IMU taps.
+    float pf = kStrainFuseBiasP;
+    float qf = kStrainFuseBiasQ;
+#endif
     for (int j = 0; j < STRAIN_FIT_N_TAPS; j++) {
         const float *row = _hist[(_head - j * kTapStride + kHistory) % kHistory];
         for (int i = 0; i < kFitSignals; i++) p += kStrainFitWP[j][i] * row[i];
         for (int i = 0; i < kFitSignalsQ; i++) q += kStrainFitWQ[j][i] * row[kQOffset + i];
+#if STRAIN_FIT_FUSE
+        for (int i = 0; i < kFitSignals; i++) {
+            pf += kStrainFuseWP[j][i] * row[i];
+            qf += kStrainFuseWQ[j][i] * row[i];
+        }
+#endif
     }
+#if STRAIN_FIT_FUSE
+    for (int j = 0; j < STRAIN_FIT_FUSE_RPM_TAPS; j++) {
+        const float *row = _rpm_hist[(_head - j * kTapStride + kHistory) % kHistory];
+        for (int m = 0; m < 4; m++) {
+            pf += kStrainFuseRpmWP[j][m] * row[m];
+            qf += kStrainFuseRpmWQ[j][m] * row[m];
+        }
+    }
+    _fz_part_p = pf;
+    _fz_part_q = qf;
+#endif
     for (int j = 0; j < STRAIN_FIT_RPM_TAPS; j++) {
         const float *row = _rpm_hist[(_head - j * kTapStride + kHistory) % kHistory];
         for (int m = 0; m < 4; m++) {
@@ -298,6 +324,29 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
     }
     _p_dot = ready() ? p : 0.0f;
     _q_dot = ready() ? q : 0.0f;
+}
+
+void StrainAngAccel::fuse(float imu_p_dot, float imu_q_dot)
+{
+#if STRAIN_FIT_FUSE
+    _imu_head = (_imu_head + 1) % kHistory;
+    _imu_hist[_imu_head][0] = imu_p_dot;
+    _imu_hist[_imu_head][1] = imu_q_dot;
+    if (_imu_ticks < kHistory) _imu_ticks++;
+
+    float pf = _fz_part_p;
+    float qf = _fz_part_q;
+    for (int j = 0; j < STRAIN_FIT_FUSE_IMU_TAPS; j++) {
+        const float *row = _imu_hist[(_imu_head - j * kTapStride + kHistory) % kHistory];
+        pf += kStrainFuseImuWP[j][0] * row[0] + kStrainFuseImuWP[j][1] * row[1];
+        qf += kStrainFuseImuWQ[j][0] * row[0] + kStrainFuseImuWQ[j][1] * row[1];
+    }
+    _pf_dot = fused_ready() ? pf : 0.0f;
+    _qf_dot = fused_ready() ? qf : 0.0f;
+#else
+    (void)imu_p_dot;
+    (void)imu_q_dot;
+#endif
 }
 
 bool strain_gauge_reset(void)

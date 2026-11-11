@@ -18,10 +18,17 @@ the firmware then runs a second high-pass/low-pass block on the 24 group
 signals that only q_dot reads (STRAIN_FIT_Q_SEPARATE 1). The pitch fit may not
 use RPM taps the roll fit doesn't have.
 
+Fused strain + IMU fit (--fuse): a second, independent estimate on the roll fit's
+own strain inputs (same groups, high-pass, signed-square scales — it reads the same
+ring rows), its own RPM weights, plus imu_taps taps of the firmware's IMU p_dot and
+q_dot chain (SACC.PdI/QdI) — both axes into each output. Exported as kStrainFuse*
+(STRAIN_FIT_FUSE 1); StrainAngAccel::fuse() computes it each tick.
+
 Usage:
     python3 tools/strain_fit_export.py path/to/gust_fit_weights.mat
     python3 tools/strain_fit_export.py W.mat --out src/sensors/StrainGaugeFit.hpp
     python3 tools/strain_fit_export.py roll_W.mat --pitch pitch_W.mat
+    python3 tools/strain_fit_export.py gust_fit_B_py.mat --fuse gust_fit_F_fused_py.mat
 
 Needs scipy (scipy.io.loadmat).
 """
@@ -72,13 +79,16 @@ def load_fit(path: Path) -> dict:
         assert sq_scale.size == n_base and np.all(sq_scale > 0), f"{path.name}: sq_scale must be {n_base} positive values"
     else:
         sq_scale = np.ones(n_base)
+    use_imu    = bool(getattr(W, "use_imu_pdot", False))
+    imu_taps   = int(W.imu_taps) if use_imu else 0
     use_rpm    = bool(getattr(W, "use_rpm", False))
     rpm_taps   = int(W.rpm_taps) if use_rpm else 0
     rpm_square = bool(getattr(W, "rpm_square", False)) if use_rpm else False
     rpm_scale  = float(getattr(W, "rpm_scale", 1e4))
     n_strain   = n_sig * n_taps
-    assert len(names) == n_strain + N_MOTORS * rpm_taps, \
-        f"{path.name}: input count {len(names)} doesn't match {n_taps} x {n_sig} strain + {rpm_taps} x 4 RPM"
+    n_rpm      = N_MOTORS * rpm_taps
+    assert len(names) == n_strain + n_rpm + 2 * imu_taps, \
+        f"{path.name}: input count {len(names)} doesn't match {n_taps} x {n_sig} strain + {rpm_taps} x 4 RPM + {imu_taps} x 2 IMU"
     for j in range(n_taps):
         for k, g in enumerate(groups):
             assert names[j * n_sig + k] == f"{g.name}_mean[k-{j}]", names[j * n_sig + k]
@@ -89,17 +99,22 @@ def load_fit(path: Path) -> dict:
     for j in range(rpm_taps):
         for m in range(N_MOTORS):
             assert names[n_strain + j * N_MOTORS + m] == f"RPM{m}[k-{j}]", names[n_strain + j * N_MOTORS + m]
+    for j in range(imu_taps):
+        for a, nm in enumerate(("PdI", "QdI")):
+            assert names[n_strain + n_rpm + 2 * j + a] == f"{nm}[k-{j}]", names[n_strain + n_rpm + 2 * j + a]
 
     def axis(ax):
         M = getattr(W, ax)
         w_all = np.asarray(M.w, dtype=float).ravel()
         w = w_all[:n_strain].reshape(n_taps, n_sig)
-        w_rpm = w_all[n_strain:].reshape(rpm_taps, N_MOTORS) if rpm_taps else np.zeros((0, N_MOTORS))
-        return dict(b=float(M.b), w=w, w_rpm=w_rpm, R2=float(M.R2))
+        w_rpm = w_all[n_strain:n_strain + n_rpm].reshape(rpm_taps, N_MOTORS) if rpm_taps else np.zeros((0, N_MOTORS))
+        w_imu = w_all[n_strain + n_rpm:].reshape(imu_taps, 2) if imu_taps else np.zeros((0, 2))
+        return dict(b=float(M.b), w=w, w_rpm=w_rpm, w_imu=w_imu, R2=float(M.R2))
 
     return dict(path=path, W=W, n_taps=n_taps, dt=float(W.dt), groups=groups, use_sq=use_sq, n_sig=n_sig,
                 sq_scale=sq_scale, hp=float(W.hp_hz), lp=float(W.fc_strain), use_rpm=use_rpm, rpm_taps=rpm_taps,
                 rpm_square=rpm_square, rpm_scale=rpm_scale, dead=[int(d) for d in np.atleast_1d(W.dead)],
+                imu_taps=imu_taps,
                 p_dot=axis("p_dot"), q_dot=axis("q_dot"))
 
 
@@ -127,6 +142,8 @@ def main() -> None:
     ap.add_argument("mat", type=Path, help="weights .mat (p_dot, and q_dot unless --pitch is given)")
     ap.add_argument("--pitch", type=Path, default=None,
                     help="separate pitch-fit weights .mat: its q_dot replaces the first .mat's q_dot")
+    ap.add_argument("--fuse", type=Path, default=None,
+                    help="fused strain + IMU fit .mat (same strain inputs as the roll fit, plus IMU p_dot/q_dot taps)")
     ap.add_argument("--out", type=Path,
                     default=Path(__file__).resolve().parent.parent / "src/sensors/StrainGaugeFit.hpp")
     args = ap.parse_args()
@@ -144,6 +161,20 @@ def main() -> None:
         if Q["rpm_taps"]:
             assert (Q["rpm_taps"] <= R["rpm_taps"] and Q["rpm_scale"] == R["rpm_scale"]
                     and Q["rpm_square"] == R["rpm_square"]), "pitch fit RPM inputs don't match the roll fit's"
+
+    assert R["imu_taps"] == 0 and Q["imu_taps"] == 0, "IMU-input fits go in --fuse, not as the strain fit"
+    Fz = load_fit(args.fuse) if args.fuse else None
+    if Fz:
+        # The fused fit reads the roll block's ring rows as they are: everything that
+        # shapes those rows has to be identical.
+        assert same_groups(R, Fz), "fused fit uses different gauge groups / gains than the roll fit"
+        for key in ("n_taps", "dt", "lp", "hp", "dead", "use_sq", "n_sig"):
+            assert R[key] == Fz[key], f"fused fit {key} {Fz[key]} differs from the roll fit's {R[key]}"
+        assert np.allclose(R["sq_scale"], Fz["sq_scale"], rtol=1e-9, atol=0), "fused fit signed-square scales differ from the roll fit's"
+        if Fz["rpm_taps"]:
+            assert (Fz["rpm_taps"] <= R["rpm_taps"] and Fz["rpm_scale"] == R["rpm_scale"]
+                    and Fz["rpm_square"] == R["rpm_square"]), "fused fit RPM inputs don't match the roll fit's"
+        assert Fz["imu_taps"] >= 1, "fused fit has no IMU inputs"
 
     n_taps, rpm_taps = R["n_taps"], R["rpm_taps"]
     n_base = 2 * N_GROUPS
@@ -163,6 +194,9 @@ def main() -> None:
     else:
         lines.append(f" * Source: {args.mat.name}, trained on {W.train_flight}")
     lines.append(f" * R^2 on the fit flights (stacked): p_dot {R['p_dot']['R2']:.3f}, q_dot {Q['q_dot']['R2']:.3f}")
+    if Fz:
+        lines.append(f" * Fused (strain + IMU) source: {args.fuse.name}, trained on {Fz['W'].train_flight}")
+        lines.append(f" *   R^2 (stacked): p_dot {Fz['p_dot']['R2']:.3f}, q_dot {Fz['q_dot']['R2']:.3f}")
     dead = ", ".join(f"D{d}" for d in R["dead"])
     lines.append(f" * Channels left out (dead when fitted): {dead or 'none'}")
     lines.append(" *")
@@ -204,6 +238,10 @@ def main() -> None:
     lines.append(f"#define STRAIN_FIT_Q_HPF_HZ   {Q['hp']!r}f    // pitch-block high-pass (= STRAIN_FIT_HPF_HZ when not separate)")
     lines.append(f"#define STRAIN_FIT_Q_USE_SQ   {int(Q['use_sq'])}")
     lines.append(f"#define STRAIN_FIT_Q_N_SIG    {Q['n_sig']}     // q_dot inputs per tap")
+    lines.append("// Fused strain + IMU estimate (kStrainFuse*): 1 = present, StrainAngAccel::fuse() computes it")
+    lines.append(f"#define STRAIN_FIT_FUSE       {int(Fz is not None)}")
+    lines.append(f"#define STRAIN_FIT_FUSE_IMU_TAPS {Fz['imu_taps'] if Fz else 0}   // IMU p_dot/q_dot taps, same spacing")
+    lines.append(f"#define STRAIN_FIT_FUSE_RPM_TAPS {Fz['rpm_taps'] if Fz else 0}   // <= STRAIN_FIT_RPM_TAPS")
     lines.append("")
     lines.append("struct StrainFitGroup {")
     lines.append("    uint8_t n;                  // live gauges in this group (0 = group unused)")
@@ -262,6 +300,32 @@ def main() -> None:
         for j in range(w_rpm.shape[0]):
             lines.append("    { " + ", ".join(f(x) for x in w_rpm[j]) + f" }},  // tap k-{j}")
         lines.append("};")
+
+    if Fz:
+        lines.append("")
+        lines.append(f"// ── Fused strain + IMU fit: {describe(Fz)}, + {Fz['imu_taps']} IMU taps ──")
+        lines.append("// Same strain inputs as kStrainFitWP (the roll block's ring rows), its own RPM weights,")
+        lines.append("// then per IMU tap [PdI, QdI] = the IMU p_dot/q_dot chain (StateManager::imu_p_dot/q_dot).")
+        for ax in ("p_dot", "q_dot"):
+            M = Fz[ax]; tag = "P" if ax == "p_dot" else "Q"; w = M["w"]
+            w_rpm = np.zeros((max(Fz["rpm_taps"], 1), N_MOTORS)); w_rpm[:M["w_rpm"].shape[0]] = M["w_rpm"]
+            lines.append("")
+            lines.append(f"static constexpr float kStrainFuseBias{tag} = {f(M['b'])};")
+            lines.append(f"static constexpr float kStrainFuseW{tag}[STRAIN_FIT_N_TAPS][STRAIN_FIT_N_SIG] = {{")
+            for j in range(n_taps):
+                lines.append(f"    {{  // tap k-{j}")
+                for r in range(0, w.shape[1], 4):
+                    lines.append("        " + ", ".join(f(x) for x in w[j, r:r + 4]) + ",")
+                lines.append("    },")
+            lines.append("};")
+            lines.append(f"static constexpr float kStrainFuseRpmW{tag}[STRAIN_FIT_FUSE_RPM_TAPS > 0 ? STRAIN_FIT_FUSE_RPM_TAPS : 1][{N_MOTORS}] = {{")
+            for j in range(w_rpm.shape[0]):
+                lines.append("    { " + ", ".join(f(x) for x in w_rpm[j]) + f" }},  // tap k-{j}")
+            lines.append("};")
+            lines.append(f"static constexpr float kStrainFuseImuW{tag}[STRAIN_FIT_FUSE_IMU_TAPS][2] = {{")
+            for j in range(Fz["imu_taps"]):
+                lines.append("    { " + ", ".join(f(x) for x in M["w_imu"][j]) + f" }},  // tap k-{j}: PdI, QdI")
+            lines.append("};")
 
     args.out.write_text("\n".join(lines) + "\n")
     print(f"Wrote {args.out}")

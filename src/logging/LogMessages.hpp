@@ -400,7 +400,7 @@ struct __attribute__((packed)) LogMsgSTNH {  // STN1, STN3
 struct __attribute__((packed)) LogMsgINDH {
     uint64_t time_us;
     uint8_t  rpm_health;     // worst of the four motors
-    uint8_t  strain_health;  // GOOD when the drone doesn't use strain (indi_requires_strain false)
+    uint8_t  strain_health;  // strain_gauge_health(); GOOD when the drone has no strain gauges. Doesn't gate INDI
     uint8_t  gate;           // bit 0: INDI fallback active (PID flying in its place), bit 1: locked out
     uint8_t  enc_state;      // 2 bits per motor, FR in bits 0-1 ... RR in bits 6-7 (encoder drones; 0 otherwise)
     uint32_t enc_fault;      // ENCODER_FAULT_* bits, 8 per motor, FR in bits 0-7 ... RR in bits 24-31
@@ -411,21 +411,30 @@ struct __attribute__((packed)) LogMsgINDH {
 };
 // Format: "QBBBBIHbfffff"   Body: 8+4+4+2+1+4+16 = 39 B   Record: 42 B
 
-/* ── SACC — strain vs IMU angular acceleration ───────────────────────────── */
-// Both p_dot/q_dot estimates every record, whichever one flies
-// (AngAccelFilterConfig::source) — ATT.Pdot/Qdot is the one that did.
-// Strain: StrainAngAccel (StrainGauge.hpp), 0 until it is ready. IMU:
-// StateManager's differentiated gyro. Gated by LogEnableConfig::strn.
+/* ── SACC — strain vs IMU vs fused angular acceleration ──────────────────── */
+// All three p_dot/q_dot estimates every record, whichever one flies per axis
+// (AngAccelFilterConfig::source_roll/source_pitch) — ATT.Pdot/Qdot is what
+// did. Strain (fit B, strain + RPM) and fused (strain + RPM + IMU taps):
+// StrainAngAccel (StrainGauge.hpp), 0 until ready and on drones without
+// strain gauges. IMU: StateManager's differentiated gyro. P_DOT = PdI +
+// WR x (PdS or PdF - PdI) while that source is usable (StateManager::
+// select_ang_accel()). Gated by LogEnableConfig::strn.
 struct __attribute__((packed)) LogMsgSACC {
     uint64_t time_us;
-    float    p_dot_strain;   // rad/s^2
-    float    q_dot_strain;   // rad/s^2
-    float    p_dot_imu;      // rad/s^2
-    float    q_dot_imu;      // rad/s^2
-    uint8_t  ready;          // 1 once the strain fit's tap history is full
-    uint8_t  from_strain;    // 1 if this tick's P_DOT/Q_DOT came from strain
+    float    p_dot_strain;   // rad/s^2, PdS
+    float    q_dot_strain;   // rad/s^2, QdS
+    float    p_dot_imu;      // rad/s^2, PdI
+    float    q_dot_imu;      // rad/s^2, QdI
+    float    p_dot_fused;    // rad/s^2, PdF
+    float    q_dot_fused;    // rad/s^2, QdF
+    uint8_t  ready;          // bit 0: strain fit's tap history full; bit 1: fused fit's too
+    uint8_t  from_strain;    // bit 0: P_DOT, bit 1: Q_DOT mostly (weight >= 0.5) from STRAIN/FUSED
+    uint8_t  src_roll;       // configured AngAccelSource for p_dot: 0 IMU, 1 STRAIN, 2 FUSED
+    uint8_t  src_pitch;      // ... for q_dot
+    float    w_roll;         // crossfade weight on src_roll (0 = IMU estimate flies)
+    float    w_pitch;        // ... on src_pitch
 };
-// Format: "QffffBB"   Body: 8+4x4+2 = 26 B   Record: 29 B
+// Format: "QffffffBBBBff"   Body: 8+6x4+4+2x4 = 44 B   Record: 47 B
 
 /* ── Log descriptor table ────────────────────────────────────────────────── */
 
@@ -619,8 +628,8 @@ constexpr LogDef kLogDefs[] = {
 
     { LOG_MSG_SACC,
       "SACC",
-      "QffffBB",
-      "TimeUS,PdS,QdS,PdI,QdI,Rdy,Src",
+      "QffffffBBBBff",
+      "TimeUS,PdS,QdS,PdI,QdI,PdF,QdF,Rdy,Src,SrcR,SrcP,WR,WP",
       sizeof(LogMsgSACC) },
 
     { LOG_MSG_PIDP,

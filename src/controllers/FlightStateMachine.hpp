@@ -193,8 +193,9 @@ public:
         }
     }
 
-    // Health of INDI's feedback sensors — the worst of RPM and (where
-    // SensorsConfig::indi_requires_strain) strain — every tick before
+    // Health of INDI's feedback sensors — RPM (a bad strain gauge array only
+    // moves p_dot/q_dot onto the IMU estimate, StateManager::select_ang_accel())
+    // — every tick before
     // set_active_controller(). BAD drives the fallback above; anything but
     // GOOD also pauses INDI's NLMS G1 adaptation, so held or garbage RPM
     // can't drag the estimate, flying or in shadow.

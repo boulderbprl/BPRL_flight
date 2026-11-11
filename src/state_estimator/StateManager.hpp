@@ -12,6 +12,11 @@
 #define STATEMGR_LP_RDOT_HZ       20.0f   // 1st-order cutoff for r_dot (no INDI consumer)
 #define STATEMGR_LP_PQ_HZ         20.0f   // cutoff for blended p/q (roll/pitch) fed to the rate PID
 #define STATEMGR_LP_R_HZ           5.0f   // cutoff for blended r (yaw) fed to the rate PID
+// p_dot/q_dot source switching (select_ang_accel()): an axis on STRAIN/FUSED
+// crossfades to the IMU estimate over FADE ticks when its source stops being
+// usable, and back only after the source has been usable for DWELL ticks.
+#define STATEMGR_ANG_ACCEL_FADE_TICKS   20    // 50 ms at 400 Hz
+#define STATEMGR_ANG_ACCEL_DWELL_TICKS  400   // 1 s at 400 Hz
 // Window length (s) for the accel fed into EKF::update_gravity()'s
 // tilt/accel-bias fusion. Deliberately a windowed TIME AVERAGE — not an IIR
 // lowpass — matching ArduPilot's no-GPS attitude reference (AP_AHRS_DCM::
@@ -220,20 +225,33 @@ public:
     // still applies.
     void update(float dt, const IMURaw imu[3], const CANIMURaw& can_imu, const MocapRaw& mocap, const BaroRaw& baro, const uint32_t rpm[4], uint32_t now_us, bool armed);
 
-    // Strain-gauge angular acceleration (StrainAngAccel) for this tick — call
-    // before update(). usable: the estimate is ready and strain_gauge_health()
-    // isn't BAD. With AngAccelFilterConfig::source == STRAIN, P_DOT/Q_DOT are
-    // these whenever usable, the IMU estimate otherwise; with IMU it's ignored.
-    void set_strain_ang_accel(float p_dot, float q_dot, bool usable)
-    {
-        _strain_pdot = p_dot;  _strain_qdot = q_dot;  _strain_usable = usable;
-    }
+    // This tick's non-IMU angular-acceleration estimates, [0] = p_dot,
+    // [1] = q_dot. *_ok: usable this tick (ready, strain array not BAD, and
+    // the RPM the fits read not BAD).
+    struct AngAccelCandidates {
+        float strain[2];   // StrainAngAccel::p_dot()/q_dot()         (AngAccelSource::STRAIN)
+        float fused[2];    // StrainAngAccel::fused_p_dot()/q_dot()   (AngAccelSource::FUSED)
+        bool  strain_ok;
+        bool  fused_ok;
+    };
 
-    // Both angular-acceleration estimates, whichever one P_DOT/Q_DOT carries
-    // (for the SACC log), and whether this tick's P_DOT/Q_DOT came from strain.
+    // Pick P_DOT/Q_DOT per axis from AngAccelFilterConfig::source_roll /
+    // source_pitch — call every tick after update() (which leaves them at the
+    // IMU estimate) and before get_state(). An axis whose source isn't usable
+    // flies the IMU estimate: it crossfades there over
+    // STATEMGR_ANG_ACCEL_FADE_TICKS, decaying the last good (source - IMU)
+    // difference rather than mixing in the bad source, and fades back only
+    // after STATEMGR_ANG_ACCEL_DWELL_TICKS of usable ticks in a row (also
+    // after boot).
+    void select_ang_accel(const AngAccelCandidates &c);
+
+    // The IMU estimate (whatever P_DOT/Q_DOT carry), for the SACC log and
+    // StrainAngAccel::fuse().
     float imu_p_dot() const { return _pdot_filt; }
     float imu_q_dot() const { return _qdot_filt; }
-    bool  ang_accel_from_strain() const { return _ang_accel_from_strain; }
+    // Crossfade weight on the axis's configured source (0 = all IMU, 1 = all
+    // STRAIN/FUSED; always 0 on an IMU axis), axis 0 = roll, 1 = pitch.
+    float ang_accel_weight(int axis) const { return _src_w[axis]; }
 
     // Full 19-element state output — maps 16-state EKF lanes onto StateIdx ordering
     // and fills in the 6 derived quantities (uvw_dot, pqr_dot).
@@ -352,11 +370,13 @@ private:
     AngAccelFilterConfig _ang_accel_filt;               // p_dot/q_dot filter, from DroneConfig (shared with Unmixer)
 
     // p_dot/q_dot actually output (P_DOT/Q_DOT): _pdot_filt/_qdot_filt
-    // above (IMU) or the strain estimate — see set_strain_ang_accel().
-    float _pdot_out = 0.0f, _qdot_out = 0.0f;
-    float _strain_pdot = 0.0f, _strain_qdot = 0.0f;
-    bool  _strain_usable = false;
-    bool  _ang_accel_from_strain = false;
+    // above (IMU), or blended toward the configured source — see
+    // select_ang_accel(). Per axis: crossfade weight, the last (source - IMU)
+    // difference while usable, and consecutive usable ticks (saturating).
+    float    _pdot_out = 0.0f, _qdot_out = 0.0f;
+    float    _src_w[2]        = {};
+    float    _src_diff[2]     = {};
+    uint32_t _src_ok_ticks[2] = {};
 
     // Motor vibration notch, applied to p/q/r before the lowpass below.
     // _notch_freq_hz is the slew-limited tracked center frequency (average

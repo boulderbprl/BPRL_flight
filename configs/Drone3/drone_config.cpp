@@ -156,13 +156,13 @@ const DroneConfig kDroneConfig = {
         7.04f,                                              // max_thrust_n
     },
 
-    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }
+    // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source_roll, source_pitch, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }
     // Applied to both p_dot/q_dot and motor RPM (INDI/JINDI torque feedback); rpm_lpf_hz 0 = RPM uses this same chain,
     // imu_lpf_hz/imu_lpf_extra_hz 0 = IMU p_dot/q_dot uses this same chain.
     // Extra stage off on this airframe (2nd-order only).
-    { 20.0f, 0.0f, AngAccelSource::IMU, 0.0f, 0.0f, 0.0f },
+    { 20.0f, 0.0f, AngAccelSource::IMU, AngAccelSource::IMU, 0.0f, 0.0f, 0.0f },
 
-    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, indi_requires_strain, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
+    // .sensors — SensorsConfig { has_baro, has_can_imx5_ins, has_mocap_link, has_encoder_rpm, encoder_motor_map, can2_enable, imx5_can_bus, has_strain_gauges, encoder_rpm_sign, imx5_mount_rpy_deg, imx5_r_quat }
     // DPS310 (I2C) is the only barometer on this board; no CAN IMU. Mocap over the MAVLink radio (UART7).
     // MOTOR_PROTOCOL is DShot on this board (no override in config.mk) — DShot RPM covers all 4 motors, so the CAN encoder rig stays off.
     { true, false, true, false, { -1, -1, -1, -1 }, false, 1, false, { 0, 0, 0, 0 }, { 0.0f, 0.0f, 0.0f }, 5e-2f },  // no CAN2 port on this board; INDI uses gyro p_dot, no strain
