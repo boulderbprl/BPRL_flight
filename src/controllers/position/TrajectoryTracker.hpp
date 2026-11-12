@@ -44,8 +44,11 @@
  *           p[6]    = speed [m/s] on the straight parts; not given or <= 0
  *                     → V_DEFAULT. Reduced automatically where the path
  *                     curves tightly (see A_LAT_MAX, YAW_RATE_MAX).
- *           Flies to the nearest point of the path, turns the nose along
- *           it, then follows it nose-first until told otherwise.
+ *           Flies to the start of the path, turning the nose along it on
+ *           the way, then follows it nose-first until told otherwise. The
+ *           start is, from inside the path, where a line straight ahead of
+ *           the nose (the heading when the command arrives) meets it; from
+ *           outside, the nearest point of the path.
  *
  * Pilot interaction while a trajectory is active:
  *   roll / pitch / yaw stick out of its deadband → the trajectory is
@@ -140,7 +143,7 @@ public:
     static constexpr float J_MOVE_MAX     = 4.5f;    // m/s³, straight move: how fast that acceleration may change (full accel in 0.33 s)
     static constexpr float A_VERT_MAX     = 1.0f;    // m/s², same, vertically
     static constexpr float A_LAT_MAX      = 2.0f;    // m/s², turning (PosControl's 40° lean limit allows ~8.2; ArduPilot's AC_Circle also keeps to under half)
-    static constexpr float YAW_RATE_MAX   = 0.8f;    // rad/s, how fast the path may ask the nose to turn — keep below HeadingGains::max_rate
+    static constexpr float YAW_RATE_MAX   = 1.2f;    // rad/s, how fast the path may ask the nose to turn — keep below HeadingGains::max_rate (was 0.8; 2026-11-11: Drone2 circles sat on this cap at 0.8·R m/s)
     static constexpr float RADIUS_MIN_M   = 0.3f;
     static constexpr float RADIUS_MAX_M   = 10.0f;   // also the cap on the semi-major axis, r + |f|
     static constexpr float OFFSET_MAX_M   = 20.0f;   // cap on any commanded N/E/D offset from the origin

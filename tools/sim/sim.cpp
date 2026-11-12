@@ -521,17 +521,25 @@ static void scenario_point()
 }
 
 // Step 5: one circle/ellipse run.
-static void run_orbit(const char *name, float r, float focus, float dir, float speed, float start_n, float start_e)
+static void run_orbit(const char *name, float r, float focus, float dir, float speed, float start_n, float start_e,
+                      float heading_deg = NANF)
 {
     printf("%s: r=%.2f focus=%.2f dir=%+.0f speed=%.2f\n", name, r, focus, dir, speed);
     Sim s(name);
     s.takeoff_to(1.0f);
     s.cmd(TrajCmdType::SET_ORIGIN);
     const float o[2] = { s.plant.pos[0], s.plant.pos[1] };
-    if (start_n != 0.0f || start_e != 0.0f) {      // fly somewhere else first
-        s.cmd(TrajCmdType::POINT, start_n, start_e);
+    if (start_n != 0.0f || start_e != 0.0f || !std::isnan(heading_deg)) {   // fly somewhere else / turn first
+        s.cmd(TrajCmdType::POINT, start_n, start_e, NANF, std::isnan(heading_deg) ? NANF : heading_deg / RAD2DEG);
         s.run(hypotf(start_n, start_e) / 0.5f + 6.0f);
     }
+    const float start_pos[2] = { s.plant.pos[0], s.plant.pos[1] };
+    const float yaw_cmd = s.plant.yaw;
+    // Inside the path: it must join straight ahead of the nose.
+    const float c_ = fabsf(focus), a_ = r + c_, b_ = sqrtf(r * (r + 2 * c_));
+    const float rN_ = focus >= 0 ? a_ : b_, rE_ = focus >= 0 ? b_ : a_;
+    const float qn = start_pos[0] - o[0], qe = start_pos[1] - o[1];
+    const bool  inside = qn * qn / (rN_ * rN_) + qe * qe / (rE_ * rE_) < 1.0f;
     const float c = fabsf(focus);
     const float a = r + c, b = sqrtf(r * (r + 2 * c));
     const float rN = focus >= 0 ? a : b, rE = focus >= 0 ? b : a;
@@ -550,6 +558,11 @@ static void run_orbit(const char *name, float r, float focus, float dir, float s
     check(s.traj_state() == TrajState::ORBIT, "  reaches the path and starts the orbit after [s]", t_orbit, 40);
     const float entry_err = path_error(s, o[0], o[1], rN, rE);
     check(entry_err < 0.15f, "  distance from the path when the orbit starts [m]", entry_err, 0.15);
+    if (inside) {
+        const float bearing = atan2f(s.plant.pos[1] - start_pos[1], s.plant.pos[0] - start_pos[0]);
+        const float off     = fabsf(wrap_pi(bearing - yaw_cmd));
+        check(off * RAD2DEG < 8.0f, "  joined straight ahead: entry bearing vs starting heading [deg]", off * RAD2DEG, 8.0);
+    }
 
     // Orbit: skip the first lap's spin-up, then measure.
     float max_path = 0, max_yaw = 0, max_lean = 0, vmin = 1e9f, vmax = 0, max_alt = 0, turned = 0, prev_yaw = s.plant.yaw;
@@ -787,7 +800,10 @@ int main(int argc, char **argv)
     run_orbit("circle_r1_v10_ccw",  1.0f,  0.0f, -1.0f, 1.0f, 0.0f, 0.0f);
     run_orbit("ellipse_north",      0.75f, 0.5f,  1.0f, 1.0f, 0.0f, 0.0f);
     run_orbit("ellipse_east",       0.75f, -0.5f, -1.0f, 1.0f, 0.0f, 0.0f);
-    run_orbit("circle_from_3m_off", 1.0f,  0.0f,  1.0f, 0.5f, 3.0f, 2.0f);
+    run_orbit("circle_from_3m_off", 1.0f,  0.0f,  1.0f, 0.5f, 3.0f, 2.0f);              // outside: nearest point
+    run_orbit("circle_hdg_120",     1.0f,  0.0f,  1.0f, 0.5f, 0.0f, 0.0f, 120.0f);      // from the centre, nose at 120°: joins at 120°
+    run_orbit("ellipse_hdg_m60",    0.75f, 0.5f, -1.0f, 1.0f, 0.0f, 0.0f, -60.0f);
+    run_orbit("circle_off_ctr_hdg", 1.0f,  0.0f,  1.0f, 0.5f, 0.4f, -0.3f, 45.0f);      // inside, off centre
     scenario_commands();
     scenario_degraded_link();
     printf("\n%s (%d failed checks)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures);

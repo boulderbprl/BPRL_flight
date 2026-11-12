@@ -41,8 +41,8 @@ const DroneConfig kDroneConfig = {
     {
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
-        { 14.0f,  0.2f, 0.7f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 14.0f,  0.2f, 0.7f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 14.0f,  2.0f, 0.7f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
+        { 14.0f,  2.0f, 0.7f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
         { 0.4f, 0.1f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.80f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         0.050f,  // g1_seed_roll  (was 0.043 = Ixx from cal flights 3+4)
@@ -75,7 +75,7 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
-    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm }
+    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm_roll, accel_norm_pitch }
     {
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att 
         { 6.0f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att 
@@ -86,7 +86,8 @@ const DroneConfig kDroneConfig = {
         { 0.7f, 6.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0 — ArduPilot _pid_accel_roll)
         { 0.7f, 6.0f, 0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0 — ArduPilot _pid_accel_pitch)
         4.0f,  // yaw_stick_gain
-        140.0f, // accel_norm — converts measured p_dot/q_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
+        140.0f, // accel_norm_roll  — converts measured p_dot (rad/s²) to torque cmd fraction (0-1) for the inner PI
+        140.0f, // accel_norm_pitch — same for q_dot. FUSED reads ~1.1x STRAIN; att_sim (Circle4/5 sensor models, 2026-11-12) keeps 140 fine on FUSED (GM 6.9/8.0)
     },
     
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -109,7 +110,7 @@ const DroneConfig kDroneConfig = {
     // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
     { 1.75f,   // kp
       3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
-      1.0f,    // max_rate
+      1.5f,    // max_rate (was 1.0; raised 2026-11-11 to stay above TrajectoryTracker::YAW_RATE_MAX 1.2)
       4.0f,    // max_accel
       0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
 

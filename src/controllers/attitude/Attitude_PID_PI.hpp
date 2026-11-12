@@ -17,7 +17,7 @@
  * As in ArduPilot, the rate loop's output is the same normalised command
  * AttitudePID would send the mixer, and is used directly as the inner loop's
  * "acceleration" target. The measured p_dot/q_dot are brought into those
- * units by dividing by accel_norm (ArduPilot hardcodes 80 rad/s² = 1.0).
+ * units by dividing by accel_norm_roll / accel_norm_pitch (ArduPilot hardcodes 80 rad/s² = 1.0).
  *
  * Yaw has no inner accel loop (mirrors the ArduPilot source) — same rate PID +
  * heading-lock trim as AttitudePID/AttitudeINDI;
@@ -43,7 +43,7 @@ public:
     // Last update()'s roll/pitch cascade, for PIDP logging. axis 0 = roll, 1 = pitch.
     float rate_tgt(int axis)   const { return _rate_tgt[axis]; }    // rad/s       angle loop output
     float accel_tgt(int axis)  const { return _accel_tgt[axis]; }   // norm. cmd   rate loop output = inner PI target
-    float accel_meas(int axis) const { return _accel_meas[axis]; }  // norm. cmd   p_dot/q_dot / accel_norm
+    float accel_meas(int axis) const { return _accel_meas[axis]; }  // norm. cmd   p_dot/q_dot / accel_norm_roll/pitch
     float accel_i(int axis)    const { return axis == 0 ? _roll_accel.integrator() : _pitch_accel.integrator(); }
 
 private:
@@ -57,7 +57,7 @@ private:
     PID _yaw_hold;     // heading-lock trim: heading error [rad] -> corrective rate [rad/s]
 
     float _yaw_stick_gain;     // from DroneConfig; mirrors AttitudePidGains::yaw_stick_gain
-    float _accel_norm;         // rad/s² per unit normalised command, from DroneConfig
+    float _accel_norm[2];      // rad/s² per unit normalised command, roll / pitch, from DroneConfig
     float _yaw_target;        // held heading target [rad]
     bool  _yaw_target_valid;  // false until first update() captures a target
 

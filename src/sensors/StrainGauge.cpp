@@ -277,10 +277,14 @@ void StrainAngAccel::update(const StrainGaugeRaw &snap, const uint32_t rpm[4])
 #endif
     }
 #endif
-    // RPM inputs, unfiltered — as the fit used the logged RPMS.
+    // RPM inputs as the fit used the logged RPMS: scaled (and squared), then —
+    // STRAIN_FIT_RPM_HPF_HZ > 0 — the fit's 1st-order high-pass, so a steady
+    // RPM split (trim torque, no acceleration) reads 0. highpass1p passes
+    // through when the corner is 0. Shared by the strain and fused fits.
     for (int m = 0; m < 4; m++) {
-        const float r = (float)rpm[m] * STRAIN_FIT_RPM_SCALE;
-        _rpm_hist[_head][m] = STRAIN_FIT_RPM_SQUARE ? r * r : r;
+        const float r  = (float)rpm[m] * STRAIN_FIT_RPM_SCALE;
+        const float in = STRAIN_FIT_RPM_SQUARE ? r * r : r;
+        _rpm_hist[_head][m] = highpass1p(in, _rpm_hp[m], STRAIN_FIT_RPM_HPF_HZ, CONTROL_DT_S);
     }
     if (_ticks < kHistory) _ticks++;
 

@@ -11,6 +11,11 @@ calibration folder's weights/ folder and writes src/sensors/StrainGaugeFit.hpp, 
 StrainAngAccel (src/sensors/StrainGauge.cpp) applies every control tick.
 Re-run it, rebuild and reflash after every refit.
 
+RPM high-pass: a fit whose .mat has rpm_hp_hz > 0 (fit H, 2026-11-11) high-passed its RPM inputs
+(1st order, after scale/square) so a steady RPM split (trim torque) doesn't read as acceleration.
+Exported as STRAIN_FIT_RPM_HPF_HZ; every fit in one export must use the same corner (they share
+the firmware's RPM tap history).
+
 Separate pitch fit (--pitch): p_dot comes from the first .mat, q_dot from the
 second. The pitch fit may use its own strain high-pass, signed-square scales and
 RPM use (it must share the gauge groups/gains, taps, tap spacing and low-pass);
@@ -85,6 +90,7 @@ def load_fit(path: Path) -> dict:
     rpm_taps   = int(W.rpm_taps) if use_rpm else 0
     rpm_square = bool(getattr(W, "rpm_square", False)) if use_rpm else False
     rpm_scale  = float(getattr(W, "rpm_scale", 1e4))
+    rpm_hp     = float(getattr(W, "rpm_hp_hz", 0.0)) if use_rpm else 0.0   # 1st-order high-pass on the RPM inputs, 0 = none
     n_strain   = n_sig * n_taps
     n_rpm      = N_MOTORS * rpm_taps
     assert len(names) == n_strain + n_rpm + 2 * imu_taps, \
@@ -113,7 +119,7 @@ def load_fit(path: Path) -> dict:
 
     return dict(path=path, W=W, n_taps=n_taps, dt=float(W.dt), groups=groups, use_sq=use_sq, n_sig=n_sig,
                 sq_scale=sq_scale, hp=float(W.hp_hz), lp=float(W.fc_strain), use_rpm=use_rpm, rpm_taps=rpm_taps,
-                rpm_square=rpm_square, rpm_scale=rpm_scale, dead=[int(d) for d in np.atleast_1d(W.dead)],
+                rpm_square=rpm_square, rpm_scale=rpm_scale, rpm_hp=rpm_hp, dead=[int(d) for d in np.atleast_1d(W.dead)],
                 imu_taps=imu_taps,
                 p_dot=axis("p_dot"), q_dot=axis("q_dot"))
 
@@ -131,8 +137,9 @@ def same_groups(a: dict, b: dict) -> bool:
 def describe(F: dict) -> str:
     W = F["W"]
     s = getattr(W, "fit_name", "") or F["path"].name
+    rpm_hp = f" (hp {F['rpm_hp']:g} Hz)" if F["rpm_hp"] > 0 else ""
     return (f"{s}; hp {F['hp']:g} Hz, {'signed squares, ' if F['use_sq'] else ''}"
-            f"{F['rpm_taps']} RPM taps, gust rows x{float(getattr(W, 'gust_weight', 1)):g}, onset "
+            f"{F['rpm_taps']} RPM taps{rpm_hp}, gust rows x{float(getattr(W, 'gust_weight', 1)):g}, onset "
             f"'{getattr(W, 'onset_def', 'gt')}' x{float(getattr(W, 'onset_weight', 1)):g}, "
             f"mu_hf {float(getattr(W, 'mu_hf', 0)):g}")
 
@@ -160,7 +167,7 @@ def main() -> None:
         assert R["dead"] == Q["dead"], "pitch fit dead-channel list differs from the roll fit"
         if Q["rpm_taps"]:
             assert (Q["rpm_taps"] <= R["rpm_taps"] and Q["rpm_scale"] == R["rpm_scale"]
-                    and Q["rpm_square"] == R["rpm_square"]), "pitch fit RPM inputs don't match the roll fit's"
+                    and Q["rpm_square"] == R["rpm_square"] and Q["rpm_hp"] == R["rpm_hp"]), "pitch fit RPM inputs don't match the roll fit's"
 
     assert R["imu_taps"] == 0 and Q["imu_taps"] == 0, "IMU-input fits go in --fuse, not as the strain fit"
     Fz = load_fit(args.fuse) if args.fuse else None
@@ -173,7 +180,7 @@ def main() -> None:
         assert np.allclose(R["sq_scale"], Fz["sq_scale"], rtol=1e-9, atol=0), "fused fit signed-square scales differ from the roll fit's"
         if Fz["rpm_taps"]:
             assert (Fz["rpm_taps"] <= R["rpm_taps"] and Fz["rpm_scale"] == R["rpm_scale"]
-                    and Fz["rpm_square"] == R["rpm_square"]), "fused fit RPM inputs don't match the roll fit's"
+                    and Fz["rpm_square"] == R["rpm_square"] and Fz["rpm_hp"] == R["rpm_hp"]), "fused fit RPM inputs don't match the roll fit's"
         assert Fz["imu_taps"] >= 1, "fused fit has no IMU inputs"
 
     n_taps, rpm_taps = R["n_taps"], R["rpm_taps"]
@@ -218,7 +225,8 @@ def main() -> None:
     if rpm_taps:
         lines.append(" *")
         lines.append(f" * Plus motor RPM: per RPM tap, |rpm[0..3]| x STRAIN_FIT_RPM_SCALE"
-                     f"{' squared' if R['rpm_square'] else ''}, unfiltered,")
+                     f"{' squared' if R['rpm_square'] else ''}, "
+                     + (f"through a 1st-order {R['rpm_hp']:g} Hz high-pass," if R['rpm_hp'] > 0 else "unfiltered,"))
         lines.append(" * logical motor order (= RPMS.RPM0..3)."
                      + (" Pitch uses none (kStrainFitRpmWQ all 0)." if sep and not Q["rpm_taps"] else ""))
     lines.append(" */")
@@ -233,6 +241,7 @@ def main() -> None:
     lines.append(f"#define STRAIN_FIT_RPM_TAPS   {rpm_taps}      // motor-RPM taps (0 = strain-only fit)")
     lines.append(f"#define STRAIN_FIT_RPM_SCALE  {f(1.0 / R['rpm_scale'])}   // RPM input = |rpm| x this")
     lines.append(f"#define STRAIN_FIT_RPM_SQUARE {int(R['rpm_square'])}      // 1 = input is (|rpm| x scale)^2")
+    lines.append(f"#define STRAIN_FIT_RPM_HPF_HZ {R['rpm_hp']!r}f    // 1st-order high-pass on the RPM inputs (after scale/square), 0 = none")
     lines.append("// Pitch block: 1 = q_dot reads its own filtered signals (below), 0 = the shared ones above")
     lines.append(f"#define STRAIN_FIT_Q_SEPARATE {int(sep)}")
     lines.append(f"#define STRAIN_FIT_Q_HPF_HZ   {Q['hp']!r}f    // pitch-block high-pass (= STRAIN_FIT_HPF_HZ when not separate)")

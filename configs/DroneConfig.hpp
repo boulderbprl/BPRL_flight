@@ -89,12 +89,16 @@ struct AttitudeJindiGains {
 // a normal rate PID in normalised-command units (same units as AttitudePidGains'
 // rate loop); roll_accel/pitch_accel are the inner PI loop closed on measured
 // angular acceleration (kd expected to be 0 — a plain PI, not a PID), with
-// p_dot/q_dot divided by accel_norm to put them in those same units.
+// p_dot/q_dot divided by accel_norm_roll / accel_norm_pitch to put them in those same
+// units. Per axis because each axis can read a different p_dot/q_dot source
+// (AngAccelFilterConfig::source_roll/source_pitch), and the sources read different
+// fractions of the true acceleration (STRAIN ~0.7, FUSED ~0.9, IMU ~1).
 struct AttitudePidPiGains {
     PidGains roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold;
     PidGains roll_accel, pitch_accel;
     float    yaw_stick_gain;
-    float    accel_norm;   // rad/s² of measured p_dot/q_dot that equal 1.0 normalised command (ArduPilot: 80, i.e. accel_scale = 1/80)
+    float    accel_norm_roll;    // rad/s² of measured p_dot that equal 1.0 normalised command (ArduPilot: 80, i.e. accel_scale = 1/80)
+    float    accel_norm_pitch;   // same for q_dot
 };
 
 // Gains for AltControl (src/controllers/position/AltControl.hpp).

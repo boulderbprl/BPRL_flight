@@ -255,10 +255,10 @@ Unlike `AttitudeINDI`, the inner loop's output **replaces** the rate loop's outp
 ```
 1. Outer P:        angle_error [rad]   → rate_tgt [rad/s]
 2. Rate PID:       rate_error [rad/s]  → accel_tgt [normalised cmd]   (ArduPilot's stock rate PID)
-3. Inner PI:       accel_error [cmd]   → out_cmds[0], accel_error = accel_tgt − p_dot / accel_norm
+3. Inner PI:       accel_error [cmd]   → out_cmds[0], accel_error = accel_tgt − p_dot / accel_norm_roll
 ```
 
-This follows ArduPilot exactly: the rate PID's output is the same normalised command `AttitudePID` would send the mixer, and ArduPilot uses it directly as the "acceleration" target. Measured `p_dot` is brought into those units by `accel_norm` (`ArduCopter/Attitude.cpp` hardcodes `accel_scale = 1/80`, so `accel_norm = 80` rad/s² per unit command). The inner PI runs with no saturation anti-windup (ArduPilot passes `limit = false`); the rate and yaw PIDs get the mixer limits, as ArduPilot's `_motors.limit`.
+This follows ArduPilot exactly: the rate PID's output is the same normalised command `AttitudePID` would send the mixer, and ArduPilot uses it directly as the "acceleration" target. Measured `p_dot`/`q_dot` are brought into those units by `accel_norm_roll`/`accel_norm_pitch` (`ArduCopter/Attitude.cpp` hardcodes `accel_scale = 1/80`, so 80 rad/s² per unit command); they are separate so each axis can be matched to its own acceleration source (`source_roll`/`source_pitch`). The inner PI runs with no saturation anti-windup (ArduPilot passes `limit = false`); the rate and yaw PIDs get the mixer limits, as ArduPilot's `_motors.limit`.
 
 `p_dot`/`q_dot` come from `g_state[P_DOT/Q_DOT]` — the same measured angular acceleration `AttitudeINDI` uses (IMU or strain, `AngAccelFilterConfig::source`). ArduPilot fed it from `AP_AngularAccel` (IMU, 50 Hz LPF) and ran the rate loop at 100 Hz; here it runs every control tick (the PIDs are dt-aware).
 
@@ -276,7 +276,7 @@ Drone2's values:
 | Yaw rate | 0.18 | 0.018 | 0 | 20 Hz | 2.5 Hz | 5 Hz | 0.5 |
 | Yaw hold (heading-lock trim) | 0.60 | 0.05 | 0 | off | off | 30 Hz | 0.3 |
 
-`yaw_stick_gain = 3.0`, same role as `AttitudePidGains::yaw_stick_gain`; `accel_norm = 80`.
+`yaw_stick_gain = 3.0`, same role as `AttitudePidGains::yaw_stick_gain`; `accel_norm_roll = accel_norm_pitch = 80`.
 
 ### Logging
 
@@ -522,7 +522,7 @@ Commands arrive over MAVLink (`COMMAND_LONG`, see `src/coms/README.md`), cross t
 |---|---|---|
 | Set origin | — | Origin := current position. Refused while a trajectory is active. Survives disarm. |
 | Point | N, E, D, heading | Turn to the heading if one is given, then straight line at `V_MOVE`, then hold. Defaults: N/E 0, D = current altitude, heading held where it was. |
-| Circle | radius, N, E, D, focus distance, direction, speed | Fly to the nearest point of the path, turn the nose along it, then follow it nose-first. Only the radius is required. |
+| Circle | radius, N, E, D, focus distance, direction, speed | Fly to the start of the path while turning the nose along it, then follow it nose-first. The start is straight ahead of the nose (current heading) when inside the path, the nearest point when outside. Only the radius is required. |
 | Stop | — | Back to plain position hold. |
 
 **Ellipse** — focus distance `f` (0 = circle): foci `|f|` from the centre, along North if `f > 0`, East if `f < 0`; `radius` is focus-to-near-end, so semi-major = `r + |f|`, semi-minor = `sqrt(r·(r + 2|f|))`.

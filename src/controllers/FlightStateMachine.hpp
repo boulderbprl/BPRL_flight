@@ -270,7 +270,7 @@ public:
     // diag[11]: [roll_rate_tgt, roll_accel_tgt, roll_accel_meas, roll_accel_i, cmd_roll,
     //            pitch_rate_tgt, pitch_accel_tgt, pitch_accel_meas, pitch_accel_i, cmd_pitch, cmd_yaw]
     // AttitudePIDPI's cascade — see LogMsgPIDP. Accel fields are in
-    // normalised command units (p_dot / accel_norm), as the inner PI sees them.
+    // normalised command units (p_dot / accel_norm_roll, q_dot / accel_norm_pitch), as the inner PI sees them.
     // Populated when a ControllersConfig::switch_pos entry names AttCtrl::PID_PI
     // or log_en.pidp is set, zeroed otherwise. May or may not be the
     // controller actually driving out_cmds; see active_index().

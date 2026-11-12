@@ -18,7 +18,7 @@ AttitudePIDPI::AttitudePIDPI(const AttitudePidPiGains &g)
     , _yaw_rate   (make_pid(g.yaw_rate))
     , _yaw_hold   (make_pid(g.yaw_hold))
     , _yaw_stick_gain(g.yaw_stick_gain)
-    , _accel_norm(g.accel_norm)
+    , _accel_norm{ g.accel_norm_roll, g.accel_norm_pitch }
     , _yaw_target(0.0f)
     , _yaw_target_valid(false)
 {}
@@ -47,8 +47,8 @@ void AttitudePIDPI::update(const float euler[3], const float state_full[], const
 
     // ── Inner loop: accel error -> normalised torque (PI on measured accel) ─
     // ArduPilot runs this PI with limit = false (no saturation anti-windup).
-    _accel_meas[0] = state_full[StateIdx::P_DOT] / _accel_norm;
-    _accel_meas[1] = state_full[StateIdx::Q_DOT] / _accel_norm;
+    _accel_meas[0] = state_full[StateIdx::P_DOT] / _accel_norm[0];
+    _accel_meas[1] = state_full[StateIdx::Q_DOT] / _accel_norm[1];
 
     out_cmds[0] = constrain_float(_roll_accel.update(_accel_tgt[0],  _accel_meas[0]), -1.0f, 1.0f);
     out_cmds[1] = constrain_float(_pitch_accel.update(_accel_tgt[1], _accel_meas[1]), -1.0f, 1.0f);

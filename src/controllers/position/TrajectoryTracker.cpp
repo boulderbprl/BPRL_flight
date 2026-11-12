@@ -84,7 +84,7 @@ TrajResult TrajectoryTracker::start_point(const float p[7], const float hold[3],
     return TrajResult::ACCEPTED;
 }
 
-TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3], float /*yaw*/)
+TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3], float yaw)
 {
     if (!_origin_set)  return TrajResult::NO_ORIGIN;
     if (!_floor_valid) return TrajResult::NOT_READY;
@@ -112,17 +112,35 @@ TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3]
     _dir   = (param_or(p[5], 1.0f) < 0.0f) ? -1.0f : 1.0f;
     _v_cmd = (speed > 0.0f) ? fminf(speed, V_MAX) : V_DEFAULT;
 
-    // Join the path at its nearest point to where the reference is now.
-    float best = -1.0f;
-    for (int i = 0; i < NEAREST_STEPS; ++i) {
-        const float     th = (TWO_PI * (float)i) / (float)NEAREST_STEPS;
-        const PathPoint pt = path_at(th);
-        const float     dn = pt.pos[0] - _ref_ne[0];
-        const float     de = pt.pos[1] - _ref_ne[1];
-        const float     d2 = dn * dn + de * de;
-        if (best < 0.0f || d2 < best) {
-            best   = d2;
-            _theta = th;
+    // Where to join the path.
+    // Inside it: straight ahead of the nose — where a ray from the reference
+    // along the current heading meets the path — so the entry is
+    // predictable. (The nearest point is arbitrary from the centre, the
+    // default case: the origin is where the vehicle was.)
+    //   Ellipse x²/rN² + y²/rE² = 1 relative to the centre, ray q + t·u:
+    //   a t² + b t + c = 0 with c < 0 inside, so exactly one root t > 0.
+    // Outside it (or on it): the nearest point of the path.
+    const float q[2] = { _ref_ne[0] - _centre[0], _ref_ne[1] - _centre[1] };
+    const float iN2  = 1.0f / (_rN * _rN), iE2 = 1.0f / (_rE * _rE);
+    const float qc   = q[0] * q[0] * iN2 + q[1] * q[1] * iE2 - 1.0f;
+    if (qc < 0.0f) {
+        const float u[2] = { cosf(yaw), sinf(yaw) };
+        const float qa   = u[0] * u[0] * iN2 + u[1] * u[1] * iE2;
+        const float qb   = 2.0f * (q[0] * u[0] * iN2 + q[1] * u[1] * iE2);
+        const float t    = (-qb + sqrtf(qb * qb - 4.0f * qa * qc)) / (2.0f * qa);
+        _theta = atan2f((q[1] + t * u[1]) / _rE, (q[0] + t * u[0]) / _rN);
+    } else {
+        float best = -1.0f;
+        for (int i = 0; i < NEAREST_STEPS; ++i) {
+            const float     th = (TWO_PI * (float)i) / (float)NEAREST_STEPS;
+            const PathPoint pt = path_at(th);
+            const float     dn = pt.pos[0] - _ref_ne[0];
+            const float     de = pt.pos[1] - _ref_ne[1];
+            const float     d2 = dn * dn + de * de;
+            if (best < 0.0f || d2 < best) {
+                best   = d2;
+                _theta = th;
+            }
         }
     }
     const PathPoint entry = path_at(_theta);

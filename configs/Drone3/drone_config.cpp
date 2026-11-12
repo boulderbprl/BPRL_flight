@@ -82,7 +82,7 @@ const DroneConfig kDroneConfig = {
         1.5f,    // yaw_gain
     },
 
-    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm }
+    // .pid_pi — AttitudePidPiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, roll_accel, pitch_accel, yaw_stick_gain, accel_norm_roll, accel_norm_pitch }
     // Unused while no .controllers.switch_pos entry names AttCtrl::PID_PI; copied from Drone1 except the rate loop (this drone's .pid).
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
@@ -94,7 +94,8 @@ const DroneConfig kDroneConfig = {
         { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0)
         { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // pitch_accel (inner PI, kd=0)
         3.0f,  // yaw_stick_gain
-        80.0f, // accel_norm — ArduPilot's 1/80 accel_scale, not measured for this airframe
+        80.0f, // accel_norm_roll — ArduPilot's 1/80 accel_scale, not measured for this airframe
+        80.0f, // accel_norm_pitch
     },
 
     // .alt — AltControlGains { pos_D, climb_rate, hover_thr }
@@ -128,7 +129,7 @@ const DroneConfig kDroneConfig = {
     // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
     { 1.75f,   // kp
       3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
-      1.0f,    // max_rate
+      2.0f,    // max_rate (was 1.0; raised 2026-11-11 to stay above TrajectoryTracker::YAW_RATE_MAX 1.2)
       4.0f,    // max_accel
       0.16f },  // lag_s (measured, trojTrack_test1 2026-10-08)
 

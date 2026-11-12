@@ -218,6 +218,7 @@ private:
     float                _lp1q[kSignals] = {};
 #endif
     float                _hist[kHistory][kRowLen] = {};
+    Highpass1pState      _rpm_hp[4];                    // STRAIN_FIT_RPM_HPF_HZ high-pass on the RPM inputs
     float                _rpm_hist[kHistory][4] = {};   // RPM inputs (step 4), same ring index as _hist
     int                  _head  = 0;   // _hist row written on the last update
     uint32_t             _ticks = 0;   // updates since the first valid frame (saturates at kHistory)

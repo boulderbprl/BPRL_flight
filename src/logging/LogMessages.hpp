@@ -236,12 +236,12 @@ struct __attribute__((packed)) LogMsgPIDP {
     uint64_t time_us;
     float    roll_rate_tgt;    // rad/s      angle loop output = rate loop target
     float    roll_accel_tgt;   // norm. cmd  rate loop output = inner PI target
-    float    roll_accel_meas;  // norm. cmd  p_dot / accel_norm
+    float    roll_accel_meas;  // norm. cmd  p_dot / accel_norm_roll
     float    roll_accel_i;     // norm. cmd  inner PI integrator (±imax)
     float    cmd_roll;         // [-1, 1]    inner PI output = normalised roll torque commanded by AttitudePIDPI
     float    pitch_rate_tgt;   // rad/s
     float    pitch_accel_tgt;  // norm. cmd
-    float    pitch_accel_meas; // norm. cmd  q_dot / accel_norm
+    float    pitch_accel_meas; // norm. cmd  q_dot / accel_norm_pitch
     float    pitch_accel_i;    // norm. cmd
     float    cmd_pitch;        // [-1, 1]
     float    cmd_yaw;          // [-1, 1]    yaw rate PID (no inner accel loop)
