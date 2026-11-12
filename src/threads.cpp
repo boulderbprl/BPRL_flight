@@ -1621,6 +1621,16 @@ static void usb_cmd_dispatch(const char *line)
             }
         }
         i2cReleaseBus(&I2CD2);
+#if STM32_I2C_USE_I2C1
+        // I2C1 (PB6/PB7): external connector on Orqa. Results merge into the same list
+        i2cAcquireBus(&I2CD1);
+        for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+            if (i2cMasterReceiveTimeout(&I2CD1, addr, dummy, 1, TIME_MS2I(2)) == MSG_OK) {
+                acked[addr >> 3] |= (uint8_t)(1U << (addr & 7U));
+            }
+        }
+        i2cReleaseBus(&I2CD1);
+#endif
         chMtxLock(&s_usb_write_mtx);
         for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
             if (acked[addr >> 3] & (1U << (addr & 7U))) {
