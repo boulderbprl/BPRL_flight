@@ -10,3 +10,5 @@ tools/__pycache__/bprl_common.cpython-310.pyc
 build/obj/ICM20602.o
 
 build/obj/ICM20948.o
+__pycache__/
+#.pyc
