@@ -103,7 +103,7 @@ static void i2c1_start(void)
 }
 #endif
 
-void i2cv_drv_init(void)
+void i2c_drv_init(void)
 {
     i2c2_start();
 #if STM32_I2C_USE_I2C1
