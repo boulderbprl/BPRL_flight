@@ -1131,6 +1131,19 @@ static void usb_log_erase(void)
 static CalibData s_cal_stage = {};
 #endif
 
+#if STM32_I2C_USE_I2C1
+static msg_t as5600_read(uint8_t reg, uint8_t *rx, size_t n)
+{
+    static uint8_t tx __attribute__((section(".nocache"), aligned(32)));
+    tx = reg;
+    i2cAcquireBus(&I2CD1);
+    msg_t s = i2cMasterTransmitTimeout(&I2CD1, 0x36, &tx, 1, rx, n, TIME_MS2I(5));
+    i2cReleaseBus(&I2CD1);
+    return s;
+}
+
+#endif
+ 
 static void usb_cmd_dispatch(const char *line)
 {
     if (strcmp(line, "BOOT") == 0) {
@@ -1640,6 +1653,23 @@ static void usb_cmd_dispatch(const char *line)
         }
         chprintf((BaseSequentialStream *)&SDU1, "I2C,SCAN,END\r\n");
         chMtxUnlock(&s_usb_write_mtx);
+#if STM32_I2C_USE_I2C1
+    } else if (strcmp(line, "WING,read") == 0) {
+        static uint8_t rx[8] __attribute__((section(".nocache"), aligned(32))); 
+        msg_t s1 = as5600_read(0x0B, rx, 5);
+        uint8_t status = rx[0];
+        uint16_t raw = (uint16_t)(((rx[1] << 8) | rx[2]) & 0x0FFF);
+        uint16_t angle = (uint16_t)(((rx[3] << 8) | rx[4]) & 0x0FFF);
+        msg_t s2 = as5600_read(0x1A, rx, 3);
+        uint8_t agc = rx[0];
+        uint16_t mag = (uint16_t)(((rx[1] << 8) | rx[2])  & 0x0FFF);
+        chMtxLock(&s_usb_write_mtx);
+        chprint((BaseSequentialStream *)&SDU1,
+                 "WING, %d, %d, 0x%02x, %u, %u, %u, %u\r\n",
+                (int)s1, (int)s2, (unsigned)status, (unsigned)raw,
+                (unsigned)angle, (unsigned)agc, (unsigned)mag);
+        chMtxUnlock(&s_usb_write_mtx);
+#endif
 #ifdef BPRL_TIMING
     } else if (strcmp(line, "TIM,status") == 0) {
         static char rep_buf[1536];

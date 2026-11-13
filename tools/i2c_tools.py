@@ -32,6 +32,7 @@ _KNOWN_DEVICES = {
     0x1C: "HMC5883 Magnetometer (alt)",
     0x3C: "SSD1306 OLED / 0x3C",
     0x3D: "SSD1306 OLED / 0x3D",
+    0x36: "AS5600 mag encoder",
     0x40: "INA219 Power Monitor",
     0x48: "ADS1115 ADC",
     0x68: "MPU-6050 / DS1307 RTC",
