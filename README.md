@@ -794,40 +794,42 @@ The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs nat
 
 ### Setup (WSL2)
 
-1. **Install WSL2** — run in PowerShell as Administrator, then reboot:
+1. **Install WSL2** — run in PowerShell as Administrator then install pyserial, then reboot:
    ```powershell
    wsl --install
+   py -m pip install pyserial
    ```
    This installs Ubuntu by default.
 
 2. **Inside Ubuntu (WSL2), install the toolchain:**
    ```bash
    sudo apt update
-   sudo apt install gcc-arm-none-eabi binutils-arm-none-eabi make python3
    ```
 
 3. **Clone the repo and build** — the Makefile works unchanged:
    ```bash
    make DRONE=Drone2
    ```
+4. Copy the build file and flash upload code from WSL to windows (only need to copy tools/flash_upload.py to windows once): 
+   ```bash
+   cp build/Drone2/BPRL.bin tools/flash_upload.py /mnt/c/Users/<you>/Downloads
+   ```
+5. Open Device manager paying attention to the COM ports and plug the board in.
+       note the COM port that appears for a few seconds before it changes to another
+       for example, you may see COM4 appear then disappear and COM10 maintain after that
+       COM4 is what you need to flash to and COM10 is where the board will be for testing
+   ```powershell
+   py -m serial.tools.list_ports -v
+   ```
+6. Flash to board:
+   ```powershell
+   py flash_upload.py --port COMxx BPRL.bin
+   ```
+### If it doesn't flash:
+-The script reboots the bootloader which shows up as a NEW USB device and often different from the COM port seen after the board is plugged in for over 5 seconds.
+-Leave the board plugged in, rerun the port listing in a second powershell window, and flash again with new COM port.
+-Close any serial terminal or other program holding the port. 
 
-### Flashing from WSL2
-
-WSL2 does not expose USB devices by default. Two options:
-
-**Option A — `usbipd-win` (USB bootloader or ST-Link over WSL2):**
-```powershell
-# In PowerShell (install usbipd-win first from https://github.com/dorssel/usbipd-win)
-usbipd list                       # find the Cube or ST-Link bus ID
-usbipd attach --wsl --busid <ID>
-```
-Then in WSL2:
-```bash
-make flash DRONE=Drone2 PORT=/dev/ttyACM0
-# or
-make flash-stlink DRONE=Drone2
-```
-
-**Option B — STM32CubeProgrammer (no usbipd needed):**
+**Option B — STM32CubeProgrammer:**
 Build in WSL2, then flash `build/<DRONE>/BPRL.bin` (e.g. `build/Drone2/BPRL.bin`) using [STM32CubeProgrammer](https://www.st.com/en/development-tools/stm32cubeprog.html) on the Windows side. Connect the Cube in DFU mode (hold BOOT, apply power), select USB DFU, and write the `.bin` at address `0x08020000` for **either** Cube board (CubeBlueH7 or CubeOrangePlus) — both ship the same 128 KB BL5 bootloader reservation at the bottom of flash, so the app starts 128 KB in on both. `0x08000000` is the bootloader's own address; writing the app there overwrites/corrupts the bootloader instead of installing the app (this line used to say `0x08000000` for CubeBlueH7, which was wrong — see [`boards/CubeBlueH7/STM32H743xI.ld`](boards/CubeBlueH7/STM32H743xI.ld) for how this was found and fixed). Orqa (OrqaH7QuadCore) uses `0x08060000` instead — see [`boards/OrqaH7QuadCore/STM32H743xI_app.ld`](boards/OrqaH7QuadCore/STM32H743xI_app.ld) (384 KB bootloader reservation, larger than the Cube boards' since it also handles OSD font/DFU recovery).
 
