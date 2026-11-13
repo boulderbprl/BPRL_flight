@@ -815,9 +815,9 @@ The build system uses **GNU Make** and **`arm-none-eabi-gcc`**. Neither runs nat
    cp build/Drone2/BPRL.bin tools/flash_upload.py /mnt/c/Users/<you>/Downloads
    ```
 5. Open Device manager paying attention to the COM ports and plug the board in.
-       note the COM port that appears for a few seconds before it changes to another
-       for example, you may see COM4 appear then disappear and COM10 maintain after that
-       COM4 is what you need to flash to and COM10 is where the board will be for testing
+       Note the COM port that appears for a few seconds before it changes to another.
+       For example, you may see COM4 appear then disappear and COM10 maintain after that.
+       COM4 is what you need to flash to and COM10 is where the board will be for testing.
    ```powershell
    py -m serial.tools.list_ports -v
    ```
