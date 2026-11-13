@@ -1664,7 +1664,7 @@ static void usb_cmd_dispatch(const char *line)
         uint8_t agc = rx[0];
         uint16_t mag = (uint16_t)(((rx[1] << 8) | rx[2])  & 0x0FFF);
         chMtxLock(&s_usb_write_mtx);
-        chprint((BaseSequentialStream *)&SDU1,
+        chprintf((BaseSequentialStream *)&SDU1,
                  "WING, %d, %d, 0x%02x, %u, %u, %u, %u\r\n",
                 (int)s1, (int)s2, (unsigned)status, (unsigned)raw,
                 (unsigned)angle, (unsigned)agc, (unsigned)mag);
