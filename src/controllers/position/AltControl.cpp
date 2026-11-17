@@ -4,6 +4,8 @@
 #include <cmath>
 #include <algorithm>
 
+static constexpr float GRAVITY_MSS = 9.80665f;
+
 AltControl::AltControl(const AltControlGains &g)
     // TODO: retune now that this loop commands throttle directly instead of
     // an intermediate accel target — gains below are a conservative starting
@@ -54,7 +56,7 @@ float AltControl::alt_hold(float pilot_thr, float cur_D, float vD)
     return track(_alt_tgt_D, climb_stick, cur_D, vD);
 }
 
-float AltControl::track(float alt_tgt_D, float climb_rate_ff, float cur_D, float vD)
+float AltControl::track(float alt_tgt_D, float climb_rate_ff, float cur_D, float vD, float accel_ff_D)
 {
     _alt_tgt_D     = alt_tgt_D;
     _alt_tgt_valid = true;
@@ -63,7 +65,8 @@ float AltControl::track(float alt_tgt_D, float climb_rate_ff, float cur_D, float
                                 -MAX_CLIMB_RATE, MAX_CLIMB_RATE);
 
     // Positive delta_thr = want to accelerate downward → reduce throttle
-    const float delta_thr = _climb_rate_pid.update(_rate_tgt, vD);
+    // Plus the acceleration feed-forward, if any (0 adds exactly nothing).
+    const float delta_thr = _climb_rate_pid.update(_rate_tgt, vD) + _hover_thr * accel_ff_D / GRAVITY_MSS;
     return constrain_float(_hover_thr - delta_thr, 0.0f, 1.0f);
 }
 

@@ -13,6 +13,7 @@ PosControl::PosControl(const PosControlGains &g)
     , _pos_E(make_pid(g.pos_E))
     , _vel_N(make_pid(g.vel_N))
     , _vel_E(make_pid(g.vel_E))
+    , _max_lean_rad(degreesToRadians(g.max_lean_deg))
 {}
 
 // Normalised stick → commanded acceleration [m/s²]. Zero inside the deadband,
@@ -189,10 +190,8 @@ void PosControl::feedback(const float state[], const float accel_ff[2], float at
     float pitch_tgt = 0.0f;
     compute_lean_angles(yaw_rad, accel_N_tgt, accel_E_tgt, roll_tgt, pitch_tgt);
 
-    att_cmds[0] = constrain_float(roll_tgt,  -degreesToRadians(MAX_LEAN_deg),
-                                               degreesToRadians(MAX_LEAN_deg));
-    att_cmds[1] = constrain_float(pitch_tgt, -degreesToRadians(MAX_LEAN_deg),
-                                               degreesToRadians(MAX_LEAN_deg));
+    att_cmds[0] = constrain_float(roll_tgt,  -_max_lean_rad, _max_lean_rad);
+    att_cmds[1] = constrain_float(pitch_tgt, -_max_lean_rad, _max_lean_rad);
 }
 
 void PosControl::compute_lean_angles(float yaw_rad, float accel_N_tgt,

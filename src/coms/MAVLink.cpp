@@ -120,13 +120,14 @@ static void handle_vision_speed(const mavlink_message_t *msg)
  */
 #define TRAJ_CMD_TIMEOUT_MS 200U
 
-// MAVLink's user-defined command ids (MAV_CMD_USER_1..4 in the spec). Spelled
+// MAVLink's user-defined command ids (MAV_CMD_USER_1..5 in the spec). Spelled
 // out here because the generated headers in third_party/mavlink predate
 // their addition to the MAV_CMD enum.
 static constexpr uint16_t MAV_CMD_TRAJ_SET_ORIGIN = 31010;   // MAV_CMD_USER_1
 static constexpr uint16_t MAV_CMD_TRAJ_POINT      = 31011;   // MAV_CMD_USER_2
 static constexpr uint16_t MAV_CMD_TRAJ_CIRCLE     = 31012;   // MAV_CMD_USER_3
 static constexpr uint16_t MAV_CMD_TRAJ_STOP       = 31013;   // MAV_CMD_USER_4
+static constexpr uint16_t MAV_CMD_TRAJ_SADDLE     = 31014;   // MAV_CMD_USER_5
 static systime_t s_traj_cmd_time = 0;     // when the command in the mailbox was posted
 static uint8_t   s_traj_ack_sysid  = 0;   // who to address its COMMAND_ACK to
 static uint8_t   s_traj_ack_compid = 0;
@@ -167,6 +168,7 @@ static bool handle_command_long(const mavlink_message_t *msg)
     case MAV_CMD_TRAJ_POINT:      type = TrajCmdType::POINT;      break;
     case MAV_CMD_TRAJ_CIRCLE:     type = TrajCmdType::CIRCLE;     break;
     case MAV_CMD_TRAJ_STOP:       type = TrajCmdType::STOP;       break;
+    case MAV_CMD_TRAJ_SADDLE:     type = TrajCmdType::SADDLE;     break;
     default: return false;
     }
     if (m.target_system != 0 && m.target_system != mavlink_system.sysid) return false;

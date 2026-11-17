@@ -33,8 +33,32 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
                           const Unmixer &unmixer, float out_cmds[3])
 {
     // ── Outer loop: angle error → rate target ─────────────────────────────
-    const float roll_rate_tgt  = _roll_att.update(input[1], euler[0]);
-    const float pitch_rate_tgt = _pitch_att.update(input[2], euler[1]);
+    float roll_rate_tgt  = _roll_att.update(input[1], euler[0]);
+    float pitch_rate_tgt = _pitch_att.update(input[2], euler[1]);
+
+    // ── Yaw: rate PID + heading-lock trim ──────────────────────────────────
+    // Roll/pitch self-correct drift via their angle loop; yaw has none, so
+    // add a small corrective rate from heading error whenever the stick is
+    // centered. While actively yawing, keep _yaw_target tracking the current
+    // heading so there's no stored error to fight when the stick recentres.
+    const float yaw_now = euler[2];
+    float yaw_rate_tgt;
+    if (_ext_yaw_rate_enabled) {
+        // POS_HOLD: HeadingControl owns the heading — see set_external_yaw_rate().
+        _yaw_target       = yaw_now;
+        _yaw_target_valid = true;
+        yaw_rate_tgt      = _ext_yaw_rate;
+    } else {
+        if (fabsf(input[3]) > YAW_STICK_DEADBAND || !_yaw_target_valid) {
+            _yaw_target       = yaw_now;
+            _yaw_target_valid = true;
+        }
+        const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
+        const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
+                                                    -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
+        yaw_rate_tgt = _yaw_gain * input[3] + yaw_hold_rate;
+    }
+    euler_rate_to_body(euler, roll_rate_tgt, pitch_rate_tgt, yaw_rate_tgt);   // see AttitudeController::euler_rate_to_body()
 
     const float p = state_full[StateIdx::P];
     const float q = state_full[StateIdx::Q];
@@ -81,29 +105,6 @@ void AttitudeINDI::update(const float euler[3], const float state_full[],
         _nlms_update_axis(current_torque[1], q_dot_meas, _g1_pitch, _g1_seed_pitch,
                            _prev_tau[1], _prev_omegadot[1]);
         _nlms_initialized = true;
-    }
-
-    // ── Yaw: rate PID + heading-lock trim ──────────────────────────────────
-    // Roll/pitch self-correct drift via their angle loop; yaw has none, so
-    // add a small corrective rate from heading error whenever the stick is
-    // centered. While actively yawing, keep _yaw_target tracking the current
-    // heading so there's no stored error to fight when the stick recentres.
-    const float yaw_now = euler[2];
-    float yaw_rate_tgt;
-    if (_ext_yaw_rate_enabled) {
-        // POS_HOLD: HeadingControl owns the heading — see set_external_yaw_rate().
-        _yaw_target       = yaw_now;
-        _yaw_target_valid = true;
-        yaw_rate_tgt      = _ext_yaw_rate;
-    } else {
-        if (fabsf(input[3]) > YAW_STICK_DEADBAND || !_yaw_target_valid) {
-            _yaw_target       = yaw_now;
-            _yaw_target_valid = true;
-        }
-        const float yaw_err       = wrap_pi(yaw_now - _yaw_target);
-        const float yaw_hold_rate = constrain_float(_yaw_hold.update(0.0f, yaw_err),
-                                                    -YAW_HOLD_MAX_RATE, YAW_HOLD_MAX_RATE);
-        yaw_rate_tgt = _yaw_gain * input[3] + yaw_hold_rate;
     }
 
     out_cmds[2] = _yaw_rate.update(yaw_rate_tgt, r);

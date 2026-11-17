@@ -27,6 +27,9 @@
  *   MAV_CMD_USER_2 (31011)  point:  N   E   D   heading [rad]
  *   MAV_CMD_USER_3 (31012)  circle: radius  N   E   D   focus dist  direction  speed
  *   MAV_CMD_USER_4 (31013)  stop — back to plain position hold (no parameters)
+ *   MAV_CMD_USER_5 (31014)  saddle: radius  N   E   D (mid)  height    direction  speed
+ *                           (a circle whose East/West sides are height/2 above
+ *                           D and North/South sides height/2 below; < 0 swaps)
  *
  * COMMAND_ACK result:
  *   MAV_RESULT_ACCEPTED              done / started
@@ -50,6 +53,7 @@
  *   long 31011 1.0 0 nan nan 0 0 0           point 1 m North at the current height and heading
  *   long 31012 1.0 nan nan nan nan nan nan   1 m circle about the origin, defaults
  *   long 31013 0 0 0 0 0 0 0                 stop
+ *   long 31014 1.0 nan nan nan 0.4 1 0.8     1 m saddle about the origin, East 0.4 m above North
  *
  * Attitude controller: STATUSTEXT (severity INFO) reading CTRL:<name>, sent at
  * 1 Hz and straight away on a change. <name> is PID, INDI, PID_PI, PID_JERK or
@@ -83,7 +87,7 @@ struct MavlinkDiag {
     uint32_t vision_speed_rx;
     uint32_t unknown_rx;      // frames_ok but msgid not handled here
     uint32_t mocap_timeouts;  // times g_mocap.valid was dropped for >300 ms without a VISION_POSITION_ESTIMATE
-    uint32_t traj_cmd_rx;       // trajectory COMMAND_LONGs received (MAV_CMD_USER_1..4)
+    uint32_t traj_cmd_rx;       // trajectory COMMAND_LONGs received (MAV_CMD_USER_1..5)
     uint32_t traj_cmd_rejected; // ... of which were answered with anything other than ACCEPTED
     uint16_t last_traj_cmd;     // MAVLink command id of the most recent trajectory command (0 = none yet)
     uint8_t  last_traj_result;  // its MAV_RESULT; 255 while ControlThread has not answered yet

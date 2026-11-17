@@ -43,12 +43,30 @@
  *                     from above); < 0 → the other way.
  *           p[6]    = speed [m/s] on the straight parts; not given or <= 0
  *                     → V_DEFAULT. Reduced automatically where the path
- *                     curves tightly (see A_LAT_MAX, YAW_RATE_MAX).
+ *                     curves tightly (see DroneConfig::traj, yaw_rate_max()).
  *           Flies to the start of the path, turning the nose along it on
  *           the way, then follows it nose-first until told otherwise. The
  *           start is, from inside the path, where a line straight ahead of
  *           the nose (the heading when the command arrives) meets it; from
  *           outside, the nearest point of the path.
+ *
+ *   SADDLE  A circle whose height rises and falls like a saddle (or a
+ *           Pringle) — a separate command, so CIRCLE is unchanged.
+ *           p[0]    = radius r [m]                               (required)
+ *           p[1..3] = centre N, E, D offset from the origin      (as POINT);
+ *                     D is the MID height, halfway between high and low
+ *           p[4]    = height h [m]                               (required)
+ *                     East and West sides h/2 ABOVE the mid height, North
+ *                     and South sides h/2 BELOW it — so h is the height
+ *                     difference between the East and North sides. h < 0
+ *                     swaps them (North/South raised). 0 = a flat circle.
+ *           p[5]    = direction, as CIRCLE
+ *           p[6]    = speed, as CIRCLE; also capped so the climb/descent
+ *                     stays within SADDLE_VERT_V_MAX / SADDLE_VERT_A_MAX.
+ *           Always round (no ellipse). D along the path, at angle θ from
+ *           North toward East: D(θ) = D_mid + (h/2)·cos 2θ. The approach
+ *           flies to the start of the path at the path's height there; the
+ *           lowest point (D_mid + |h|/2) must clear the floor (see below).
  *
  * Pilot interaction while a trajectory is active:
  *   roll / pitch / yaw stick out of its deadband → the trajectory is
@@ -68,7 +86,7 @@
  * the path waits for the vehicle rather than being cut short by a leash.
  */
 
-enum class TrajCmdType : uint8_t { SET_ORIGIN, POINT, CIRCLE, STOP };
+enum class TrajCmdType : uint8_t { SET_ORIGIN, POINT, CIRCLE, STOP, SADDLE };
 
 struct TrajCommand {
     TrajCmdType type;
@@ -86,7 +104,7 @@ enum class TrajState : uint8_t {
     IDLE  = 0,   // not active — POS_HOLD is on the sticks
     MOVE  = 1,   // straight line to a point (a POINT command, or the approach to a circle)
     HOLD  = 2,   // POINT reached
-    ORBIT = 3,   // following the circle/ellipse
+    ORBIT = 3,   // following the circle/ellipse/saddle
 };
 
 // What the controllers are asked to track this tick.
@@ -94,12 +112,19 @@ struct TrajRef {
     float pos[3];     // N, E, D [m]
     float vel[3];     // N, E, D [m/s]
     float acc[2];     // N, E feed-forward [m/s²]
+    float acc_D;      // D feed-forward [m/s², positive = down] — SADDLE only, else 0
     float yaw;        // heading [rad]
     float yaw_rate;   // heading feed-forward [rad/s]
 };
 
 class TrajectoryTracker {
 public:
+    // yaw_rate_max: HeadingGains::traj_yaw_rate_max [rad/s] — the fastest
+    // the path may ask the nose to turn.
+    // v_max, a_lat_max: DroneConfig::traj (circle speed cap, turning accel cap).
+    TrajectoryTracker(float yaw_rate_max, float v_max, float a_lat_max)
+        : _yaw_rate_max(yaw_rate_max), _v_max(v_max), _a_lat_max(a_lat_max) {}
+
     // Origin := pos. Refused while a trajectory is active (the path would jump).
     TrajResult set_origin(const float pos[3]);
 
@@ -114,6 +139,7 @@ public:
     // not-given D means. yaw is the current heading.
     TrajResult start_point(const float p[7], const float hold[3], float yaw);
     TrajResult start_circle(const float p[7], const float hold[3], float yaw);
+    TrajResult start_saddle(const float p[7], const float hold[3], float yaw);
 
     void cancel() { _state = TrajState::IDLE; }
 
@@ -132,18 +158,18 @@ public:
     // For logging.
     float height_offset() const { return _height_offset; }   // m, D (negative = raised)
     float path_speed()    const { return _state == TrajState::ORBIT ? _speed : _speed_pred; }   // m/s the reference is moving along the path
+    float yaw_rate_max()  const { return _yaw_rate_max; }   // rad/s, from DroneConfig::heading.traj_yaw_rate_max
 
     // ── Limits — starting values, flight-tune here ──────────────────────────
     static constexpr float V_DEFAULT      = 0.5f;    // m/s, circle speed when none is given
-    static constexpr float V_MAX          = 2.0f;    // m/s, cap on a commanded circle speed
+    // Circle speed cap (was V_MAX 2.0) and turning-accel cap (was A_LAT_MAX 2.0) are per drone: DroneConfig::traj.
     static constexpr float V_MOVE         = 1.0f;    // m/s, straight-line speed to a point / to the start of a circle (was 0.5; 2026-11-05 go-to moves felt slow)
     static constexpr float V_VERT_MAX     = 0.5f;    // m/s, climb/descent speed toward a commanded D
     static constexpr float A_TAN_MAX      = 1.0f;    // m/s², speeding up / slowing down along a circle
     static constexpr float A_MOVE_MAX     = 1.5f;    // m/s², same on a straight move (jerk-limited, so the lean ramps in: ~8.7° at full accel)
     static constexpr float J_MOVE_MAX     = 4.5f;    // m/s³, straight move: how fast that acceleration may change (full accel in 0.33 s)
     static constexpr float A_VERT_MAX     = 1.0f;    // m/s², same, vertically
-    static constexpr float A_LAT_MAX      = 2.0f;    // m/s², turning (PosControl's 40° lean limit allows ~8.2; ArduPilot's AC_Circle also keeps to under half)
-    static constexpr float YAW_RATE_MAX   = 1.2f;    // rad/s, how fast the path may ask the nose to turn — keep below HeadingGains::max_rate (was 0.8; 2026-11-11: Drone2 circles sat on this cap at 0.8·R m/s)
+    // Yaw-rate cap is per drone: DroneConfig::heading.traj_yaw_rate_max (was the constant YAW_RATE_MAX = 1.2).
     static constexpr float RADIUS_MIN_M   = 0.3f;
     static constexpr float RADIUS_MAX_M   = 10.0f;   // also the cap on the semi-major axis, r + |f|
     static constexpr float OFFSET_MAX_M   = 20.0f;   // cap on any commanded N/E/D offset from the origin
@@ -153,6 +179,9 @@ public:
     static constexpr float ARRIVE_POS_M   = 0.15f;   // m, |  vehicle must be this close to the start of the circle,
     static constexpr float ARRIVE_VEL_MS  = 0.2f;    // m/s, | this slow,
     static constexpr float ARRIVE_YAW_RAD = 0.26f;   // rad, | and pointing this close to along it, before the orbit starts (15°); also how close to a commanded heading before a point's line starts
+    static constexpr float SADDLE_H_MAX_M    = 2.0f;   // m, largest |height| a saddle may have
+    static constexpr float SADDLE_VERT_V_MAX = 0.6f;   // m/s,  | a saddle's speed is capped so its climb/descent rate (|h|/r · v at
+    static constexpr float SADDLE_VERT_A_MAX = 1.5f;   // m/s², | most) and vertical accel (2|h|/r² · v²) stay within these
 
 private:
     struct PathPoint {
@@ -164,12 +193,17 @@ private:
     };
 
     void       begin(const float hold[3]);
+    TrajResult start_orbit(const float p[7], float focus, float saddle_h, const float hold[3], float yaw);
     bool       base_altitude(float d_offset, const float hold[3], float &goal_D) const;
     PathPoint  path_at(float theta) const;
     float      speed_limit(const PathPoint &pt) const;
     void       update_move(float scale, TrajRef &ref);
     void       update_orbit(float scale, TrajRef &ref);
     void       update_vertical(float stick_thr, TrajRef &ref);
+
+    const float _yaw_rate_max;     // rad/s, see the constructor
+    const float _v_max;            // m/s
+    const float _a_lat_max;        // m/s²
 
     TrajState _state      = TrajState::IDLE;
     bool      _is_circle  = false;
@@ -202,6 +236,13 @@ private:
     float _v_cmd           = 0.0f;
     float _theta           = 0.0f;
     float _theta_rate_prev = 0.0f;
+
+    // SADDLE: the height wave on top of _ref_D while orbiting. 0 for a
+    // circle/ellipse, so their references are exactly what they were.
+    float _saddle_h    = 0.0f;   // m, the command's height (0 = not a saddle)
+    float _saddle_off  = 0.0f;   // m, D offset (h/2)·cos 2θ applied this tick (ORBIT only, else 0)
+    float _saddle_rate = 0.0f;   // m/s, its rate of change
+    float _saddle_acc  = 0.0f;   // m/s², and its second derivative (fed forward to AltControl)
 
     static constexpr float MOVE_KP        = 3.0f;   // 1/s, final approach to a point (linear end of the braking profile; was 2)
     static constexpr float VERT_KP        = 2.0f;   // 1/s, same for the climb/descent toward a commanded D

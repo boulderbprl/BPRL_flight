@@ -35,27 +35,41 @@ const DroneConfig kDroneConfig = {
     {
         { 7.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // roll_att
         { 7.00f, 0.00f, 0.000f, 0.5f, 0.0f,  0.0f, 30.0f },  // pitch_att
-        { 0.07f, 0.04f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
-        { 0.08f, 0.05f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
+        // Rate loops retuned 2026-11-16 from the plant identified on LOG0011/12/14/15
+        // (cmd -> gyro: roll 588, pitch 434 rad/s² per unit, ~10 ms motor lag + ~10 ms
+        // dead time). Was roll {0.07, 0.04, 0.0015} / pitch {0.08, 0.05, 0.0015}: roll
+        // sat at PM 8° / GM 0.6 dB (the ~10.5 Hz roll ring in those logs). Roll gains are
+        // ~0.74x pitch to match the authority ratio. att_sim: PM 53°, GM 6.2-6.4 dB,
+        // tolerates +35 ms delay, same ~200 ms rise. Not yet flown.
+        { 0.035f, 0.035f, 0.0008f, 0.5f, 20.0f, 0.0f, 30.0f },  // roll_rate
+        { 0.048f, 0.045f, 0.0011f, 0.5f, 20.0f, 0.0f, 30.0f },  // pitch_rate
         { 0.18f, 0.05f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.70f, 0.05f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         3.0f,  // yaw_stick_gain
     },
 
     // .indi — AttitudeIndiGains { roll_att, pitch_att, roll_rate, pitch_rate, yaw_rate, yaw_hold, g1_seed_roll, g1_seed_pitch, indi_output_gain_roll, indi_output_gain_pitch, nlms_mu_pid, nlms_mu_indi, yaw_gain }
-    // Copied verbatim from Drone1's .indi (same motors/props) — keep in sync until
-    // this airframe has its own INDI tuning.
+    // Own tuning since 2026-11-16 (was a copy of Drone1's). From the plant identified
+    // on LOG0011/12/14/15 (PID flights — no INDI data yet), not yet flown:
+    //   - G1 = (unmixer torque per unit cmd) / (cmd -> p_dot gain) = 0.90/588, 0.92/434.
+    //     The Drone1 seeds (0.005/0.0065) were ~3x high; NLMS sat on its 0.5x-seed
+    //     clamp in every flight. Goes together with .unmixer.max_thrust_n below —
+    //     G1 alone (without it) drops PM to ~22° in att_sim.
+    //   - Rate kp 6.5 vs att kp 4 left the two loops barely separated (~1 Hz): slow,
+    //     overshooting, and unstable in the sim.cpp POS_HOLD run — the "INDI oscillates
+    //     in pos hold" report. Rate kp 30 / att kp 8 / kappa 0.75: att_sim PM 68°,
+    //     GM 5.7 dB, 6% overshoot, settles 0.5 s, robust to G1 ±50%.
     {
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
-        { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate
-        { 6.5f,  0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate
+        { 8.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att  (was 4)
+        { 8.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att (was 4)
+        { 30.0f, 0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // roll_rate  (was kp 6.5)
+        { 30.0f, 0.20f, 0.0f,   10.0f, 30.0f, 0.0f, 30.0f }, // pitch_rate (was kp 6.5)
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f,  0.0f,  0.0f, 30.0f }, // yaw_hold
-        0.005f, // g1_seed_roll (was indi_gain_roll)
-        0.0065f, // g1_seed_pitch (was indi_gain_pitch)
-        1.0f,    // indi_output_gain_roll (kappa) — 1.0 reproduces pre-adaptation behavior
-        1.0f,    // indi_output_gain_pitch (kappa)
+        0.0015f, // g1_seed_roll  (was 0.005)
+        0.0021f, // g1_seed_pitch (was 0.0065)
+        0.75f,   // indi_output_gain_roll (kappa) — was 1.0; +~1.5 dB on the INDI accel loop's GM
+        0.75f,   // indi_output_gain_pitch (kappa)
         0.05f,   // nlms_mu_pid — aggressive adaptation rate while PID/PID+PI active; needs bench/flight tuning
         0.005f,  // nlms_mu_indi — slow/trickle adaptation rate while INDI active; needs bench/flight tuning
         3.0f,    // yaw_gain
@@ -87,8 +101,8 @@ const DroneConfig kDroneConfig = {
     {
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // roll_att
         { 4.00f, 0.00f, 0.000f, 0.5f,  0.0f,  0.0f, 30.0f }, // pitch_att
-        { 0.07f, 0.04f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f }, // roll_rate  — this drone's .pid rate loop (normalised cmd out)
-        { 0.08f, 0.05f, 0.0015f, 0.5f, 20.0f, 0.0f, 30.0f }, // pitch_rate — this drone's .pid rate loop
+        { 0.035f, 0.035f, 0.0008f, 0.5f, 20.0f, 0.0f, 30.0f }, // roll_rate  — this drone's .pid rate loop (normalised cmd out)
+        { 0.048f, 0.045f, 0.0011f, 0.5f, 20.0f, 0.0f, 30.0f }, // pitch_rate — this drone's .pid rate loop
         { 0.18f, 0.018f, 0.000f, 0.5f, 20.0f, 2.5f, 5.0f },  // yaw_rate
         { 0.60f, 0.050f, 0.000f, 0.3f, 0.0f,  0.0f, 30.0f }, // yaw_hold
         { 0.7f,  0.8f,  0.0f, 0.5f, 50.0f, 0.0f, 0.0f },     // roll_accel  (inner PI, kd=0)
@@ -105,7 +119,7 @@ const DroneConfig kDroneConfig = {
         0.27f,  // hover_thr (measured 0.26, trojTrack_test1 2026-10-08)
     },
 
-    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E, max_lean_deg }
     // Retuned from flight log trojTrack_test1 (2026-10-08): was vel P 2.0 /
     // I 0.7, which held to 3.6 cm RMS with a slow 5-13 s wander.
     //
@@ -117,21 +131,34 @@ const DroneConfig kDroneConfig = {
     // several cycles and pos P 2.0 / vel P 4.0 is unstable. Don't raise
     // these further without first cutting that latency (or compensating for
     // it in the estimator) — re-run degraded_link before trying.
+    //
+    // 2026-11-16: the EKF now compensates 40/65 ms of that latency, and the
+    // retuned attitude loops above leave more room. vel P 2.5 -> 3.5, I 0.85 ->
+    // 1.2 (pos P stays 1.0 — raising it only added overshoot). sim.cpp TUNE
+    // with the identified Drone3 plant: gust rms 4.1 -> 2.9 cm, wind-step peak
+    // 15.5 -> 10.5 cm, no worse than before at 100 ms delay; vel P 4.5 rang at
+    // 100 ms. Logged mocap velocity runs ~95 ms behind (vs 65 compensated).
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
-        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
-        { 2.5f, 0.85f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        { 3.5f, 1.20f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
+        { 3.5f, 1.20f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        50.0f,  // max_lean_deg — was 40; 2026-11-16: room for the 41° a 2.9 m/s 1 m circle takes, plus ~9° of feedback
     },
 
-    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s, traj_yaw_rate_max }
     // Starting point, not flight-tuned: kp matches the heading-lock trim
     // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
     { 1.75f,   // kp
       3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
-      2.0f,    // max_rate (was 1.0; raised 2026-11-11 to stay above TrajectoryTracker::YAW_RATE_MAX 1.2)
+      3.5f,    // max_rate (was 1.0, 2.0, 2.5; 2026-11-16 3.5 to stay above traj_yaw_rate_max 3.0)
       4.0f,    // max_accel
-      0.16f },  // lag_s (measured, trojTrack_test1 2026-10-08)
+      0.16f,   // lag_s (measured, trojTrack_test1 2026-10-08)
+      3.0f },  // traj_yaw_rate_max — circle speed cap = this × R (was 1.8; 2026-11-16 3.0 so a 1 m circle can reach 2.9 m/s nose-first — LOG0020's 1.41 m/s circle used 4% of yaw torque)
+
+    // .traj — TrajectoryLimits { v_max, a_lat_max }
+    // v_max 3.0, a_lat_max 8.6 (2026-11-16, for 2.9 m/s on a 1 m circle: 2.9²/1 = 8.4 m/s², 41° of lean — needs .pos.max_lean_deg 50 and .heading traj_yaw_rate_max 3.0)
+    { 3.0f, 8.6f },
 
     // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
     RcTransmitter::TX2,  // RC controller 2
@@ -149,12 +176,18 @@ const DroneConfig kDroneConfig = {
     },
 
     // .unmixer — UnmixerConfig { arm_length_m, motor_c0..c3, max_thrust_n }
-    // Same motors, props and arm length as Drone1 — keep this identical to
-    // Drone1's .unmixer (bench thrust fit, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0).
+    // Same motors, props and arm length as Drone1 — keep the thrust fit identical
+    // to Drone1's .unmixer (bench thrust fit, F_N(rpm) = c3*rpm^3+c2*rpm^2+c1*rpm+c0).
+    // max_thrust_n differs since 2026-11-16 (was 7.04, Drone1's value): it sets
+    // T_MAX = 2·sin45°·arm·max_thrust_n, the N·m that normalize_torque() treats as one
+    // unit of command, and in flight (LOG0011/12/14/15) the RPMs show ~0.90 N·m per
+    // unit command, not 1.27. With 7.04 INDI's u0 rebuilt only ~71% of the command
+    // actually applied. 5.0 gives T_MAX 0.90. Only INDI/JINDI/PID_Jerk read it.
+    // Drone1 probably needs the same check.
     {
         0.1275f,                                          // arm_length_m
         0.005144f, -4.5422e-6f, 7.5398e-9f, 5.8387e-14f,   // motor_c0, motor_c1, motor_c2, motor_c3
-        7.04f,                                              // max_thrust_n
+        5.0f,                                               // max_thrust_n (was 7.04)
     },
 
     // .ang_accel_filt — AngAccelFilterConfig { lpf_hz, lpf_extra_hz, source_roll, source_pitch, rpm_lpf_hz, imu_lpf_hz, imu_lpf_extra_hz }

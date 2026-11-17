@@ -106,7 +106,10 @@ private:
     float _fb_scale = 1.0f;   // see set_feedback_scale()
 
     static constexpr float GRAVITY_MSS   = 9.80665f;
-    static constexpr float MAX_LEAN_deg  = 40.0f;   // limit on the total lean target (feed-forward + feedback); was 30 — LOG0100: a strong gust pinned roll at 30° and carried the drone ~2.9 m into an obstacle
+    // Lean-target cap is per drone: PosControlGains::max_lean_deg (was the
+    // constant MAX_LEAN_deg 40; was 30 before LOG0100: a strong gust pinned
+    // roll at 30° and carried the drone ~2.9 m into an obstacle).
+    float _max_lean_rad;
     static constexpr float ACCEL_FILT_HZ = 10.0f;   // feedback accel-target LPF cutoff
 
     // ── Stick / target-generator tuning ──────────────────────────────────────

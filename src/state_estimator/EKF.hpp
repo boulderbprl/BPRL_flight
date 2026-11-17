@@ -57,9 +57,20 @@ public:
     // reset_yaw() is its alignYawAngle() — snap heading onto the external
     // frame once — and update_yaw() is its fuseEulerYaw(EXTNAV), a scalar
     // 321-Euler-yaw measurement fused on every sample after that.
-    // yaw_rad: heading in the mocap NED frame (rad). Roll/pitch untouched.
-    void reset_yaw (float yaw_rad);
-    void update_yaw(float yaw_rad, float R_var);
+    // yaw_rad: heading in the mocap NED frame (rad). Roll/pitch untouched —
+    // by both: update_yaw() applies its quaternion correction as a pure
+    // world-frame yaw rotation (see _update()'s yaw_only), so a heading fix
+    // can never tilt the lane.
+    //
+    // update_yaw() returns what it did, and the innovation (measured minus
+    // estimated yaw, wrapped, rad) through innov_out when it computed one.
+    // REJECTED means the innovation failed the gate; the gate is capped at
+    // YAW_GATE_MAX_RAD, so a large disagreement stays rejected however far P
+    // has grown — clearing it is the caller's job, with reset_yaw() (see
+    // StateManager's persistent-rejection reset), never a snap here.
+    enum class YawFusion : uint8_t { FUSED, REJECTED, SKIPPED };
+    void      reset_yaw (float yaw_rad);
+    YawFusion update_yaw(float yaw_rad, float R_var, float *innov_out = nullptr);
 
     // Barometric altitude fusion — active when g_baro.valid.
     // alt_up_m: altitude above the driver's boot-time reference, POSITIVE UP
@@ -196,8 +207,15 @@ private:
     static constexpr float MOCAP_CHI2_GATE = 5.0f;
 
     // ── Mocap yaw measurement update parameters ───────────────────────────
-    // Same gate pattern again, on a single scalar innovation.
+    // Same gate pattern again, on a single scalar innovation...
     static constexpr float YAW_CHI2_GATE = 5.0f;
+    // ...but never wider than this. Each rejected sample leaves the quaternion
+    // covariance growing (Q_QUAT), so a pure chi-squared gate eventually opens
+    // onto a persistent offset and the next sample lands it in one update —
+    // ~20° at once in the 2026-11-16 Drone3 logs (LOG0010 t=158, LOG0014
+    // t=282-284). 0.30 rad (17°) is the steady-state 5σ gate at R_MOCAP_YAW, so
+    // normal fusion is unchanged; anything bigger waits for an explicit reset.
+    static constexpr float YAW_GATE_MAX_RAD = 0.30f;
     // update_yaw() is skipped below this value of cos²(pitch) (~80° pitch),
     // where 321 Euler yaw goes singular. EKF3 switches to a 312 sequence
     // there instead; this airframe never holds that attitude, so just skip.
@@ -247,6 +265,12 @@ private:
     // Generic EKF measurement update for m ≤ 6 scalar measurements.
     // H[m][N]: observation matrix, R_diag[m]: per-channel noise variances,
     // innov[m]: pre-computed innovations (z - h(x)).
-    void _update(int m, const float H[][N], const float R_diag[], const float innov[]);
+    // yaw_only: restrict the quaternion's share of the correction to a pure
+    // world-frame yaw rotation — its rows of K are projected onto that
+    // direction (the Joseph form keeps P consistent with any gain) and the
+    // correction is applied as an exact rotation rather than added to q.
+    // Every other state takes its normal gain.
+    void _update(int m, const float H[][N], const float R_diag[], const float innov[],
+                 bool yaw_only = false);
 
 };

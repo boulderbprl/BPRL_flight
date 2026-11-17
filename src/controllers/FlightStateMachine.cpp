@@ -15,6 +15,7 @@ FlightStateMachine::FlightStateMachine(const DroneConfig &cfg)
     , _alt(cfg.alt)
     , _pos(cfg.pos)
     , _heading(cfg.heading)
+    , _traj(cfg.heading.traj_yaw_rate_max, cfg.traj.v_max, cfg.traj.a_lat_max)
     , _yaw_stick_rate(cfg.heading.stick_rate)
     // In double so 57.2958 deg lands on exactly 1.0f (the old fixed mapping).
     , _stick_angle_scale((float)(cfg.controllers.stick_max_angle_deg * (M_PI / 180.0)))
@@ -400,7 +401,7 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
     float yaw_rate_cmd;
     if (traj_active) {
         _pos.track(pos_state9, ref.pos, ref.vel, ref.acc, att_cmds);
-        alt_thrust   = _alt.track(ref.pos[2], ref.vel[2], cur_D, vD);
+        alt_thrust   = _alt.track(ref.pos[2], ref.vel[2], cur_D, vD, ref.acc_D);
         yaw_rate_cmd = _heading.update_heading(yaw, ref.yaw, ref.yaw_rate);
     } else {
         // Sticks: forward/right → N/E, throttle → climb rate (same
@@ -461,7 +462,15 @@ void FlightStateMachine::mode_pos_hold(const float euler[],
         _controllers[i]->set_external_yaw_rate(true, yaw_rate_cmd);
     run_attitude(euler, state_full, pos_input, rpm, roll_jerk, out_cmds);
 
-    thrust_out = alt_thrust;
+    // Tilt compensation (ArduPilot's angle boost): AltControl works out the
+    // throttle for level flight; leaning by φ, θ leaves only cos φ·cos θ of the
+    // thrust holding the vehicle up, so divide it back out. Negligible in hover
+    // (1.001 at 2.5°), but a 1 m circle at 2.9 m/s leans 41° and needs 1.33×
+    // — without it the climb-rate integrator (ki 0.05) had to find that
+    // slowly and the vehicle sank through the spin-up. Floor at cos 60°, as
+    // ArduPilot.
+    const float cos_tilt = fmaxf(cosf(rol) * cosf(pit), 0.5f);
+    thrust_out = constrain_float(alt_thrust / cos_tilt, 0.0f, 1.0f);
 }
 
 // ── Main update ──────────────────────────────────────────────────────────────
@@ -606,7 +615,8 @@ TrajResult FlightStateMachine::traj_command(const TrajCommand &cmd, const float 
             return _traj.set_origin(pos);
 
         case TrajCmdType::POINT:
-        case TrajCmdType::CIRCLE: {
+        case TrajCmdType::CIRCLE:
+        case TrajCmdType::SADDLE: {
             const bool flying_pos_hold = (_mode == FlightMode::POS_HOLD) && !PTUN_POSHOLD_SHADOW &&
                                          (_phase == FlightPhase::ACTIVE) && _pos_valid;
             if (!_traj.origin_set()) return TrajResult::NO_ORIGIN;
@@ -614,8 +624,9 @@ TrajResult FlightStateMachine::traj_command(const TrajCommand &cmd, const float 
             // Start from what POS_HOLD is holding right now (its targets,
             // not the measured position), so taking over moves nothing.
             const float hold[3] = { _pos.pos_tgt(0), _pos.pos_tgt(1), _alt.alt_tgt() };
-            return (cmd.type == TrajCmdType::POINT) ? _traj.start_point(cmd.p, hold, euler[2])
-                                                    : _traj.start_circle(cmd.p, hold, euler[2]);
+            if (cmd.type == TrajCmdType::POINT)  return _traj.start_point (cmd.p, hold, euler[2]);
+            if (cmd.type == TrajCmdType::SADDLE) return _traj.start_saddle(cmd.p, hold, euler[2]);
+            return _traj.start_circle(cmd.p, hold, euler[2]);
         }
     }
     return TrajResult::BAD_PARAM;

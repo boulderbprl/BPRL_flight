@@ -28,7 +28,7 @@ TrajResult TrajectoryTracker::set_origin(const float pos[3])
 void TrajectoryTracker::begin(const float hold[3])
 {
     if (active()) {
-        _ref_D += _height_offset;
+        _ref_D += _height_offset + _saddle_off;   // _saddle_off is 0 unless a saddle is orbiting
     } else {
         _ref_ne[0] = hold[0];
         _ref_ne[1] = hold[1];
@@ -41,6 +41,10 @@ void TrajectoryTracker::begin(const float hold[3])
     _height_offset   = 0.0f;
     _theta_rate_prev = 0.0f;
     _yaw_first       = false;
+    _saddle_h        = 0.0f;
+    _saddle_off      = 0.0f;
+    _saddle_rate     = 0.0f;
+    _saddle_acc      = 0.0f;
 }
 
 // Commanded D offset → altitude goal. Not given → the current altitude.
@@ -86,23 +90,45 @@ TrajResult TrajectoryTracker::start_point(const float p[7], const float hold[3],
 
 TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3], float yaw)
 {
+    return start_orbit(p, param_or(p[4], 0.0f), 0.0f, hold, yaw);
+}
+
+// p[4] is the height here, not a focus distance: a saddle is always round.
+TrajResult TrajectoryTracker::start_saddle(const float p[7], const float hold[3], float yaw)
+{
+    if (!_origin_set)  return TrajResult::NO_ORIGIN;
+    if (!_floor_valid) return TrajResult::NOT_READY;
+    const float h = p[4];
+    if (!(fabsf(h) <= SADDLE_H_MAX_M)) return TrajResult::BAD_PARAM;   // also NaN (required) and ±inf
+    return start_orbit(p, 0.0f, h, hold, yaw);
+}
+
+// CIRCLE and SADDLE: p[] as CIRCLE's except p[4], which the callers turn into
+// focus (CIRCLE) or saddle_h (SADDLE; focus 0). saddle_h == 0 is exactly the
+// circle code path.
+TrajResult TrajectoryTracker::start_orbit(const float p[7], float focus, float saddle_h,
+                                          const float hold[3], float yaw)
+{
     if (!_origin_set)  return TrajResult::NO_ORIGIN;
     if (!_floor_valid) return TrajResult::NOT_READY;
 
     const float r     = p[0];
     const float n     = param_or(p[1], 0.0f);
     const float e     = param_or(p[2], 0.0f);
-    const float focus = param_or(p[4], 0.0f);
     const float c     = fabsf(focus);
     float goal_D;
     // Written so that a NaN or infinite value fails every test.
     if (!(r >= RADIUS_MIN_M) || !(r + c <= RADIUS_MAX_M) ||
         !(fabsf(n) <= OFFSET_MAX_M) || !(fabsf(e) <= OFFSET_MAX_M) || !base_altitude(p[3], hold, goal_D))
         return TrajResult::BAD_PARAM;
+    // A saddle's low sides must clear the floor too, not just its mid height.
+    if (saddle_h != 0.0f && !(goal_D + 0.5f * fabsf(saddle_h) <= _floor_D - FLOOR_MARGIN_M))
+        return TrajResult::BAD_PARAM;
 
     const float speed = param_or(p[6], 0.0f);
 
     begin(hold);
+    _saddle_h = saddle_h;
     _centre[0] = _origin[0] + n;
     _centre[1] = _origin[1] + e;
     const float semi_major = r + c;
@@ -110,7 +136,14 @@ TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3]
     _rN    = (focus >= 0.0f) ? semi_major : semi_minor;
     _rE    = (focus >= 0.0f) ? semi_minor : semi_major;
     _dir   = (param_or(p[5], 1.0f) < 0.0f) ? -1.0f : 1.0f;
-    _v_cmd = (speed > 0.0f) ? fminf(speed, V_MAX) : V_DEFAULT;
+    _v_cmd = (speed > 0.0f) ? fminf(speed, _v_max) : V_DEFAULT;
+    if (saddle_h != 0.0f) {
+        // On a circle D(s) = (h/2)·cos(2s/r): climb rate peaks at |h|/r · v and
+        // vertical accel at 2|h|/r² · v². One cap for the whole lap keeps it
+        // simple (and needs no look-ahead).
+        const float ah = fabsf(saddle_h);
+        _v_cmd = fminf(_v_cmd, fminf(SADDLE_VERT_V_MAX * r / ah, r * sqrtf(SADDLE_VERT_A_MAX / (2.0f * ah))));
+    }
 
     // Where to join the path.
     // Inside it: straight ahead of the nose — where a ray from the reference
@@ -147,6 +180,7 @@ TrajResult TrajectoryTracker::start_circle(const float p[7], const float hold[3]
     _goal_ne[0] = entry.pos[0];
     _goal_ne[1] = entry.pos[1];
     _goal_D     = goal_D;
+    if (saddle_h != 0.0f) _goal_D += 0.5f * saddle_h * cosf(2.0f * _theta);   // arrive at the path's height there
     _hold_yaw   = atan2f(_dir * entry.d1[1], _dir * entry.d1[0]);
     _is_circle  = true;
     _state      = TrajState::MOVE;
@@ -172,7 +206,7 @@ TrajectoryTracker::PathPoint TrajectoryTracker::path_at(float theta) const
 // back where the turn would need too much lean or too fast a yaw.
 float TrajectoryTracker::speed_limit(const PathPoint &pt) const
 {
-    return fminf(_v_cmd, fminf(sqrtf(A_LAT_MAX / pt.kappa), YAW_RATE_MAX / pt.kappa));
+    return fminf(_v_cmd, fminf(sqrtf(_a_lat_max / pt.kappa), _yaw_rate_max / pt.kappa));
 }
 
 bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw,
@@ -216,6 +250,16 @@ bool TrajectoryTracker::update(const float pos[3], const float vel[3], float yaw
                 _speed_pred      = 0.0f;
                 _accel           = 0.0f;
                 _theta_rate_prev = 0.0f;
+                if (_saddle_h != 0.0f) {
+                    // From here the height wave rides on top of _ref_D; move
+                    // the entry point's share of it out of _ref_D/_goal_D so
+                    // their sum, the reference, doesn't step.
+                    _saddle_off  = 0.5f * _saddle_h * cosf(2.0f * _theta);
+                    _saddle_rate = 0.0f;
+                    _saddle_acc  = 0.0f;
+                    _ref_D      -= _saddle_off;
+                    _goal_D     -= _saddle_off;
+                }
             }
         }
     }
@@ -332,6 +376,7 @@ void TrajectoryTracker::update_orbit(float scale, TrajRef &ref)
     _theta = wrap_pi(_theta + theta_rate * dt);
     pt     = path_at(_theta);
 
+
     const float tangent[2] = { _dir * pt.d1[0] / pt.len, _dir * pt.d1[1] / pt.len };
     _ref_ne[0] = pt.pos[0];
     _ref_ne[1] = pt.pos[1];
@@ -345,15 +390,31 @@ void TrajectoryTracker::update_orbit(float scale, TrajRef &ref)
     ref.yaw_rate = _dir * s_dot * pt.kappa;
 
     // Acceleration feed-forward: p''·θ'² (turning) + p'·θ'' (speeding up /
-    // slowing down). Evaluated where the vehicle will be one attitude-loop
-    // lag from now, since that is when a lean commanded now takes effect.
+    // slowing down), at the current point. It used to be evaluated one
+    // attitude-loop lag (PosControl::ATT_LAG_S) ahead, for a lean command that
+    // rotates in the N/E frame — but the orbit is flown nose-first, so in the
+    // body frame the turn's lean is constant and there is nothing to lag
+    // behind. At speed that lead was a misdirection: θ'·ATT_LAG_S = 25° at
+    // 2.9 m/s on a 1 m circle, putting ~3.6 m/s² of the turn along the path
+    // and spiralling the vehicle in to a 0.6 m circle at 1.8 m/s (sim). With
+    // it gone: 2.8 m/s on the 1 m circle, 4 cm path error, and every slower
+    // circle/ellipse in the sim tracks tighter too. (Straight MOVE legs keep
+    // their lag compensation: there the heading is fixed.)
     const float theta_acc_max = A_TAN_MAX / pt.len;
     const float theta_acc     = constrain_float((theta_rate - _theta_rate_prev) / dt, -theta_acc_max, theta_acc_max);
     _theta_rate_prev = theta_rate;
 
-    const PathPoint lead = path_at(_theta + theta_rate * PosControl::ATT_LAG_S);
-    ref.acc[0] = lead.d2[0] * theta_rate * theta_rate + lead.d1[0] * theta_acc;
-    ref.acc[1] = lead.d2[1] * theta_rate * theta_rate + lead.d1[1] * theta_acc;
+    ref.acc[0] = pt.d2[0] * theta_rate * theta_rate + pt.d1[0] * theta_acc;
+    ref.acc[1] = pt.d2[1] * theta_rate * theta_rate + pt.d1[1] * theta_acc;
+
+    // Saddle height: D offset (h/2)·cos 2θ, its rate and acceleration, added
+    // to the vertical reference in update_vertical().
+    if (_saddle_h != 0.0f) {
+        const float c2 = cosf(2.0f * _theta), s2 = sinf(2.0f * _theta);
+        _saddle_off  =  0.5f * _saddle_h * c2;
+        _saddle_rate = -_saddle_h * s2 * theta_rate;
+        _saddle_acc  = -_saddle_h * (2.0f * c2 * theta_rate * theta_rate + s2 * theta_acc);
+    }
 }
 
 // Altitude: _ref_D moves to the commanded D at up to V_VERT_MAX, and the
@@ -378,8 +439,10 @@ void TrajectoryTracker::update_vertical(float stick_thr, TrajRef &ref)
     const float climb = AltControl::stick_to_climb_rate(stick_thr);   // m/s, positive = descending
     _height_offset += climb * dt;
 
-    ref.pos[2] = _ref_D + _height_offset;
-    ref.vel[2] = _vspeed + climb;
+    // _saddle_off/_saddle_rate: a saddle's height wave while orbiting, else 0.
+    ref.pos[2] = _ref_D + _saddle_off + _height_offset;
+    ref.vel[2] = _vspeed + _saddle_rate + climb;
+    ref.acc_D  = _saddle_acc;
 
     const float lowest = _floor_D - FLOOR_MARGIN_M;
     if (ref.pos[2] > lowest) {

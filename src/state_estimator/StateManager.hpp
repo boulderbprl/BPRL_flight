@@ -85,6 +85,21 @@
 // behind position. Retune if the bridge's velocity filter or rate changes.
 #define STATEMGR_MOCAP_VEL_LAG_S   0.065f
 
+// Mocap heading that EKF::update_yaw() keeps rejecting (no-IMX5 airframes,
+// update() step 2.5). The yaw gate is capped (EKF::YAW_GATE_MAX_RAD), so a
+// large disagreement is never fused — it is either a mocap glitch to ride out
+// on the gyros, or a real heading error to fix with an explicit
+// EKF::reset_yaw() that the controllers hear about (consume_yaw_reset()).
+// A lane is reset once its rejected innovations have stayed within
+// STATEMGR_YAW_RESET_SPREAD_RAD of each other for STATEMGR_YAW_RESET_AFTER_S,
+// with no gap between rejected samples longer than STATEMGR_YAW_RESET_GAP_S
+// (a fused sample, a bigger jump or a gap starts the count again). The
+// 2026-11-16 Drone3 logs had a ~60° mocap-yaw excursion lasting 0.64 s
+// (LOG0010 t=158.3) — 1 s rides that out; the EKF used to land it in one step.
+#define STATEMGR_YAW_RESET_AFTER_S     1.0f
+#define STATEMGR_YAW_RESET_SPREAD_RAD  0.26f   // 15°
+#define STATEMGR_YAW_RESET_GAP_S       0.25f
+
 // Motor vibration notch — tracks the fundamental rotation frequency (Hz)
 // derived from average gated motor RPM, applied to p/q/r before the
 // STATEMGR_LP_PQ_HZ/STATEMGR_LP_R_HZ lowpass (matches ArduPilot's harmonic
@@ -273,6 +288,10 @@ public:
     // controllers so their held heading moves with the frame.
     float consume_yaw_reset() { const float d = _yaw_reset_rad; _yaw_reset_rad = 0.0f; return d; }
 
+    // Explicit heading resets after persistent mocap-yaw rejection, all lanes,
+    // since init() (see STATEMGR_YAW_RESET_AFTER_S). Not logged yet.
+    uint32_t yaw_resets() const { return _yaw_resets; }
+
 private:
     EKF  _lanes[NUM_LANES];
     bool _lane_active[NUM_LANES];   // lane initialised AND its IMU valid this tick — only active lanes are blended or selected as primary
@@ -313,6 +332,22 @@ private:
     float _mocap_yaw_rad;
     float _mocap_yaw_dpast[NUM_LANES];
     float _yaw_reset_rad;
+
+    // Persistent mocap-yaw rejection, per lane — see STATEMGR_YAW_RESET_AFTER_S.
+    //   _yaw_rej_active: a run of rejected samples is being timed
+    //   _yaw_rej_start_us / _yaw_rej_last_us: first and latest rejected sample
+    //   _yaw_rej_ref: the run's first innovation; later ones must stay within
+    //     STATEMGR_YAW_RESET_SPREAD_RAD of it
+    //   _yaw_resets: explicit resets since init(), all lanes (diagnostics)
+    bool     _yaw_rej_active[NUM_LANES];
+    uint32_t _yaw_rej_start_us[NUM_LANES];
+    uint32_t _yaw_rej_last_us[NUM_LANES];
+    float    _yaw_rej_ref[NUM_LANES];
+    uint32_t _yaw_resets;
+
+    // One EKF::update_yaw() result for `lane`: time the rejection run and
+    // reset the lane's heading to mocap once it has lasted long enough.
+    void _track_yaw_rejection(int lane, EKF::YawFusion result, float innov, uint32_t now_us);
 
     // ── Mocap lag compensation — see STATEMGR_MOCAP_LAG_S ─────────────────
     static_assert(STATEMGR_MOCAP_LAG_S >= 0.0f && STATEMGR_MOCAP_LAG_S <= 0.25f,

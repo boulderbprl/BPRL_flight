@@ -66,6 +66,13 @@ void StateManager::init()
     _mocap_yaw_aligned = false;
     _mocap_yaw_rad     = 0.0f;
     _yaw_reset_rad     = 0.0f;
+    _yaw_resets        = 0;
+    for (int i = 0; i < NUM_LANES; ++i) {
+        _yaw_rej_active[i]   = false;
+        _yaw_rej_start_us[i] = 0;
+        _yaw_rej_last_us[i]  = 0;
+        _yaw_rej_ref[i]      = 0.0f;
+    }
     for (int i = 0; i < NUM_LANES; ++i) {
         _mocap_yaw_dpast[i] = 0.0f;
         _lag_pos[i][0] = _lag_pos[i][1] = _lag_pos[i][2] = 0.0f;
@@ -141,6 +148,45 @@ void StateManager::_align_lanes_to_mocap()
         _lanes[i].reset_yaw(_mocap_yaw_now(i));
     _yaw_reset_rad    += wrap_pi(yaw() - yaw_before);
     _mocap_yaw_aligned = true;
+    for (int i = 0; i < NUM_LANES; ++i) _yaw_rej_active[i] = false;
+}
+
+// Persistent-rejection reset — see STATEMGR_YAW_RESET_AFTER_S. Replaces what
+// the old ungated-in-the-limit chi-squared gate did by accident (reject until
+// P had grown enough, then land the whole offset in one update, unannounced):
+// the step now happens on purpose, as a pure heading rotation, and if it is
+// the primary lane the controllers are told (consume_yaw_reset()) so they
+// shift their held heading instead of yawing the vehicle to chase it.
+void StateManager::_track_yaw_rejection(int lane, EKF::YawFusion result, float innov, uint32_t now_us)
+{
+    if (result == EKF::YawFusion::SKIPPED) return;   // no information either way
+    if (result == EKF::YawFusion::FUSED) {
+        _yaw_rej_active[lane] = false;
+        return;
+    }
+
+    static constexpr uint32_t AFTER_US = static_cast<uint32_t>(STATEMGR_YAW_RESET_AFTER_S * 1e6f);
+    static constexpr uint32_t GAP_US   = static_cast<uint32_t>(STATEMGR_YAW_RESET_GAP_S * 1e6f);
+
+    // Start (or restart) the run on the first rejection, after a gap, or when
+    // the offset moves — mocap that is jumping around is not a heading to adopt.
+    if (!_yaw_rej_active[lane] ||
+        now_us - _yaw_rej_last_us[lane] > GAP_US ||
+        fabsf(wrap_pi(innov - _yaw_rej_ref[lane])) > STATEMGR_YAW_RESET_SPREAD_RAD) {
+        _yaw_rej_active[lane]   = true;
+        _yaw_rej_start_us[lane] = now_us;
+        _yaw_rej_ref[lane]      = innov;
+    }
+    _yaw_rej_last_us[lane] = now_us;
+
+    if (now_us - _yaw_rej_start_us[lane] < AFTER_US) return;
+
+    const bool  primary    = (lane == _primary);
+    const float yaw_before = primary ? yaw() : 0.0f;
+    _lanes[lane].reset_yaw(_mocap_yaw_now(lane));
+    if (primary) _yaw_reset_rad += wrap_pi(yaw() - yaw_before);
+    _yaw_rej_active[lane] = false;
+    ++_yaw_resets;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -321,13 +367,19 @@ void StateManager::update(float dt, const IMURaw imu[3], const CANIMURaw& can_im
     // sample after that (fuseEulerYaw()). When mocap drops out the lanes
     // keep the heading they had and coast on the gyros — still in the mocap
     // frame, never back to the boot-relative zero — and fusion picks up
-    // again when the link returns.
+    // again when the link returns. A heading mocap keeps disagreeing with by
+    // more than the yaw gate is adopted by an explicit reset, not fused (see
+    // STATEMGR_YAW_RESET_AFTER_S, _track_yaw_rejection()).
     if (_mocap_yaw_pending && !can_imu.valid) {
         if (!_mocap_yaw_aligned) {
             _align_lanes_to_mocap();
         } else {
-            for (int i = 0; i < NUM_LANES; ++i)
-                _lanes[i].update_yaw(_mocap_yaw_now(i), R_MOCAP_YAW);
+            for (int i = 0; i < NUM_LANES; ++i) {
+                if (!_lane_active[i]) continue;
+                float innov = 0.0f;
+                const EKF::YawFusion r = _lanes[i].update_yaw(_mocap_yaw_now(i), R_MOCAP_YAW, &innov);
+                _track_yaw_rejection(i, r, innov, now_us);
+            }
         }
         _mocap_yaw_pending = false;
     }

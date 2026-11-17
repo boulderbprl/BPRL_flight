@@ -20,7 +20,7 @@ pip install pyserial rich
 | `calibrate.py` | `calibrate`, `clear` | Required |
 | `can_tools.py` | `can-status`, `can-diag`, `can-regdump`, `can-scan` | No |
 | `mav_tools.py` | `mav-diag` | No |
-| `traj_cmd.py` | `origin`, `point`, `circle`, `stop` *(over MAVLink, not USB)* | No |
+| `traj_cmd.py` | `origin`, `point`, `circle`, `saddle`, `stop` *(over MAVLink, not USB)* | No |
 | `sim/run.sh` | *(host flight simulation — see [sim/README.md](sim/README.md))* | — |
 | `strain_rate.py` | `strain-rate` | No |
 | `encoder_rpm.py` | `encoder-rpm` | No |
@@ -172,6 +172,7 @@ python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --e 0.5
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --yaw 90   # heading in degrees, turns first
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
+python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 saddle 1.0 0.4 --speed 0.8   # East side 0.4 m above North, --d is the mid height
 python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 stop
 ```
 

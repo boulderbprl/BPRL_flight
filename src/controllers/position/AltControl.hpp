@@ -59,7 +59,12 @@ public:
     // Altitude target [m, D] + climb-rate feed-forward [m/s, positive =
     // descending] → throttle. The target becomes alt_hold()'s own, so going
     // back to the stick carries on from the last altitude commanded here.
-    float track(float alt_tgt_D, float climb_rate_ff, float cur_D, float vD);
+    // accel_ff_D [m/s², positive = accelerating down]: optional vertical
+    // acceleration feed-forward, added to the throttle as hover_thr·a/g so the
+    // climb-rate loop needn't build up an error to produce it. Only
+    // TrajectoryTracker's SADDLE passes one; 0 (the default) leaves the
+    // result exactly as without it.
+    float track(float alt_tgt_D, float climb_rate_ff, float cur_D, float vD, float accel_ff_D = 0.0f);
 
     // Throttle stick [0,1] → climb rate [m/s], positive = descending; zero
     // inside the centre deadband.

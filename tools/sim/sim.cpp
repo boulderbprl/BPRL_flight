@@ -778,6 +778,123 @@ static void scenario_commands()
     check(s.cmd(TrajCmdType::POINT, 0.5f, 0.0f) == TrajResult::ACCEPTED, "origin survives disarm: point accepted after re-arming", 1, 1);
 }
 
+// Saddle: a circle with D(θ) = D_mid + (h/2)·cos 2θ — East/West raised by h/2,
+// North/South lowered by h/2 (h > 0), swapped for h < 0.
+static void run_saddle(const char *name, float r, float h, float dir, float speed)
+{
+    printf("%s: r=%.2f h=%+.2f dir=%+.0f speed=%.2f\n", name, r, h, dir, speed);
+    Sim s(name);
+    s.takeoff_to(1.0f);
+    s.cmd(TrajCmdType::SET_ORIGIN);
+    const float o[3] = { s.plant.pos[0], s.plant.pos[1], s.plant.pos[2] };
+    check(s.cmd(TrajCmdType::SADDLE, r, NANF, NANF, NANF, h, dir, speed) == TrajResult::ACCEPTED, "saddle accepted", 1, 1);
+
+    s.tick();   // s.traj[] is refreshed per tick: start the step check from the first reference
+    // D not given = the altitude POS_HOLD was holding; the reference starts there.
+    const float hold_D = s.traj[3];
+    float max_ref_step = 0, prev_rd = s.traj[3], rd_min = 1e9f, rd_max = -1e9f;
+    for (int i = 0; i < 400 * 40 && s.traj_state() != TrajState::ORBIT; ++i) {
+        s.tick(); max_ref_step = fmaxf(max_ref_step, fabsf(s.traj[3] - prev_rd)); prev_rd = s.traj[3];
+    }
+    check(s.traj_state() == TrajState::ORBIT, "  starts the orbit", (int)s.traj_state(), 3);
+
+    // Expected D at the vehicle's bearing from the centre, vs where it is.
+    float max_alt_err = 0, max_path = 0, dmin = 1e9f, dmax = -1e9f, vmax = 0, vzmax = 0;
+    float d_east = 0, d_north = 0; int n_east = 0, n_north = 0, k = 0;
+    s.run(40.0f, [&] {
+        max_ref_step = fmaxf(max_ref_step, fabsf(s.traj[3] - prev_rd)); prev_rd = s.traj[3];
+        if (++k < 400 * 8) return;
+        rd_min = fminf(rd_min, s.traj[3]); rd_max = fmaxf(rd_max, s.traj[3]);
+        const float dn = s.plant.pos[0] - o[0], de = s.plant.pos[1] - o[1], th = atan2f(de, dn);
+        const float d_exp = hold_D + 0.5f * h * cosf(2.0f * th);
+        max_alt_err = fmaxf(max_alt_err, fabsf(s.plant.pos[2] - d_exp));
+        if (k % 8 == 0) max_path = fmaxf(max_path, path_error(s, o[0], o[1], r, r));
+        dmin = fminf(dmin, s.plant.pos[2]); dmax = fmaxf(dmax, s.plant.pos[2]);
+        vmax = fmaxf(vmax, hypotf(s.plant.vel[0], s.plant.vel[1])); vzmax = fmaxf(vzmax, fabsf(s.plant.vel[2]));
+        if (fabsf(wrap_pi(th - 1.5708f)) < 0.1f) { d_east  += s.plant.pos[2]; ++n_east; }
+        if (fabsf(th) < 0.1f)                    { d_north += s.plant.pos[2]; ++n_north; }
+    });
+    d_east /= fmaxf(1, n_east); d_north /= fmaxf(1, n_north);
+    const float vcap = fminf(TrajectoryTracker::SADDLE_VERT_V_MAX * r / fabsf(h),
+                             r * sqrtf(TrajectoryTracker::SADDLE_VERT_A_MAX / (2.0f * fabsf(h))));
+    check(max_ref_step < 0.005f, "  largest per-tick step in the D reference [m]", max_ref_step, 0.005);
+    check(max_path < 0.10f, "  horizontal path error after spin-up [m]", max_path, 0.10);
+    check(max_alt_err < 0.08f, "  height vs the saddle at the vehicle's bearing [m]", max_alt_err, 0.08);
+    check(fabsf((dmax - dmin) - fabsf(h)) < 0.15f * fabsf(h), "  peak-to-peak height [m] (commanded |h|)", dmax - dmin, fabsf(h));
+    check((d_north - d_east) * h > 0.8f * h * h, "  East minus North height [m], signed by h (North lower when h > 0)",
+          d_north - d_east, h);
+    // Not given D = the altitude POS_HOLD was holding when the command arrived.
+    check(fabsf(0.5f * (rd_min + rd_max) - hold_D) < 0.01f, "  reference mid height vs the held altitude [m]", 0.5f * (rd_min + rd_max) - hold_D, 0.0);
+    check(fabsf((rd_max - rd_min) - fabsf(h)) < 0.01f, "  reference peak-to-peak [m] (commanded |h|)", rd_max - rd_min, fabsf(h));
+    check(fabsf(0.5f * (dmax + dmin) - hold_D) < 0.05f, "  vehicle mid height vs the held altitude [m]", 0.5f * (dmax + dmin) - hold_D, 0.0);
+    check(vmax < 1.1f * fminf(speed, vcap) + 0.05f, "  peak speed [m/s] (cap from the vertical limits)", vmax, fminf(speed, vcap));
+    printf("           climb rate peak %.2f m/s\n", vzmax);
+    check(s.cmd(TrajCmdType::STOP) == TrajResult::ACCEPTED, "  stop accepted", 1, 1);
+    s.run(6.0f);
+    check(hypotf(s.plant.vel[0], s.plant.vel[1]) < 0.05f && fabsf(s.plant.vel[2]) < 0.05f,
+          "  stopped in position hold [m/s]", hypotf(s.plant.vel[0], s.plant.vel[1]), 0.05);
+}
+
+// Fast circle: ask for more than the drone allows; it should settle at its
+// own limit, min(v_max, sqrt(a_lat_max·r), traj_yaw_rate_max·r), stay on
+// the path and hold altitude through a lean that big.
+static void run_fast_circle(const char *name, float r, float speed_cmd)
+{
+    const auto &c = kDroneConfig;
+    const float v_lim = fminf(fminf(speed_cmd, c.traj.v_max), fminf(sqrtf(c.traj.a_lat_max * r), c.heading.traj_yaw_rate_max * r));
+    printf("%s: r=%.2f commanded %.1f m/s -> limit %.2f m/s (lean %.1f deg)\n", name, r, speed_cmd, v_lim,
+           atanf(v_lim * v_lim / r / G) * RAD2DEG);
+    Sim s(name);
+    s.takeoff_to(1.0f);
+    s.cmd(TrajCmdType::SET_ORIGIN);
+    const float o[2] = { s.plant.pos[0], s.plant.pos[1] };
+    check(s.cmd(TrajCmdType::CIRCLE, r, NANF, NANF, NANF, NANF, 1.0f, speed_cmd) == TrajResult::ACCEPTED, "circle accepted", 1, 1);
+    for (int i = 0; i < 400 * 40 && s.traj_state() != TrajState::ORBIT; ++i) s.tick();
+    check(s.traj_state() == TrajState::ORBIT, "  starts the orbit", (int)s.traj_state(), 3);
+    const float d0 = s.plant.pos[2];
+    float vmax = 0, max_path = 0, max_alt = 0, max_lean = 0, max_hdg = 0, vsum = 0; int n = 0, k = 0;
+    s.run(30.0f, [&] {
+        if (++k < 400 * 10) { max_alt = fmaxf(max_alt, fabsf(s.plant.pos[2] - d0)); return; }   // spin-up: altitude only
+        const float v = hypotf(s.plant.vel[0], s.plant.vel[1]);
+        vmax = fmaxf(vmax, v); vsum += v; ++n;
+        if (k % 8 == 0) max_path = fmaxf(max_path, path_error(s, o[0], o[1], r, r));
+        max_alt  = fmaxf(max_alt, fabsf(s.plant.pos[2] - d0));
+        max_lean = fmaxf(max_lean, acosf(cosf(s.plant.roll) * cosf(s.plant.pitch)));
+        max_hdg  = fmaxf(max_hdg, fabsf(wrap_pi(s.plant.yaw - atan2f(s.plant.vel[1], s.plant.vel[0]))));
+    });
+    const float vmean = vsum / fmaxf(1, n);
+    check(fabsf(vmean - v_lim) < 0.05f * v_lim, "  mean speed on the path [m/s] (the drone's limit)", vmean, v_lim);
+    check(max_path < 0.15f, "  path error after spin-up [m]", max_path, 0.15);
+    check(max_alt < 0.10f, "  altitude deviation incl. spin-up [m]", max_alt, 0.10);
+    check(max_lean * RAD2DEG < c.pos.max_lean_deg, "  peak lean [deg] (max_lean_deg)", max_lean * RAD2DEG, c.pos.max_lean_deg);
+    check(max_hdg * RAD2DEG < 15.0f, "  nose vs direction of travel [deg]", max_hdg * RAD2DEG, 15.0);
+    check(s.cmd(TrajCmdType::STOP) == TrajResult::ACCEPTED, "  stop accepted", 1, 1);
+    float max_alt_stop = 0;
+    s.run(6.0f, [&] { max_alt_stop = fmaxf(max_alt_stop, fabsf(s.plant.pos[2] - d0)); });
+    check(max_alt_stop < 0.15f, "  altitude deviation stopping from full speed [m]", max_alt_stop, 0.15);
+    check(hypotf(s.plant.vel[0], s.plant.vel[1]) < 0.05f, "  stopped in position hold [m/s]", hypotf(s.plant.vel[0], s.plant.vel[1]), 0.05);
+}
+
+// Saddle parameter rules.
+static void scenario_saddle_params()
+{
+    printf("saddle_params: refusals\n");
+    Sim s("saddle_params");
+    s.takeoff_to(1.0f);
+    s.cmd(TrajCmdType::SET_ORIGIN);
+    check(s.cmd(TrajCmdType::SADDLE, 1.0f, NANF, NANF, NANF, NANF) == TrajResult::BAD_PARAM, "no height: BAD_PARAM", 1, 1);
+    check(s.cmd(TrajCmdType::SADDLE, 1.0f, NANF, NANF, NANF, 3.0f) == TrajResult::BAD_PARAM, "height 3 m: BAD_PARAM", 1, 1);
+    check(s.cmd(TrajCmdType::SADDLE, NANF, NANF, NANF, NANF, 0.5f) == TrajResult::BAD_PARAM, "no radius: BAD_PARAM", 1, 1);
+    // Mid height 0.35 m up: the low sides (0.35 - 0.3) are inside the 0.15 m floor margin.
+    const float d_mid = -s.plant.pos[2] - 0.35f;   // offset from the origin to 0.35 m above the ground
+    check(s.cmd(TrajCmdType::SADDLE, 1.0f, NANF, NANF, d_mid, 0.6f) == TrajResult::BAD_PARAM,
+          "low side below the floor margin: BAD_PARAM", 1, 1);
+    check(s.cmd(TrajCmdType::SADDLE, 1.0f, NANF, NANF, d_mid, 0.3f) == TrajResult::ACCEPTED,
+          "  same mid height, low side clear (h 0.3): accepted", 1, 1);
+    s.tick();
+    check(s.traj_state() != TrajState::IDLE, "  running", (int)s.traj_state(), 1);
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1) g_out_dir = argv[1];
@@ -804,6 +921,11 @@ int main(int argc, char **argv)
     run_orbit("circle_hdg_120",     1.0f,  0.0f,  1.0f, 0.5f, 0.0f, 0.0f, 120.0f);      // from the centre, nose at 120°: joins at 120°
     run_orbit("ellipse_hdg_m60",    0.75f, 0.5f, -1.0f, 1.0f, 0.0f, 0.0f, -60.0f);
     run_orbit("circle_off_ctr_hdg", 1.0f,  0.0f,  1.0f, 0.5f, 0.4f, -0.3f, 45.0f);      // inside, off centre
+    run_saddle("saddle_r1_h04_cw",  1.0f,  0.4f,  1.0f, 0.8f);
+    run_saddle("saddle_r1_hm04_ccw", 1.0f, -0.4f, -1.0f, 0.8f);                       // inverted
+    run_saddle("saddle_r1_h1_capped", 1.0f, 1.0f,  1.0f, 0.8f);                       // speed capped by the climb rate
+    scenario_saddle_params();
+    run_fast_circle("circle_r1_fast", 1.0f, 5.0f);
     scenario_commands();
     scenario_degraded_link();
     printf("\n%s (%d failed checks)\n", g_failures ? "FAILED" : "ALL PASSED", g_failures);

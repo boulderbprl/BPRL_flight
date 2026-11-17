@@ -1,5 +1,6 @@
 #pragma once
 #include "src/controllers/extras/MotorMixer.hpp"
+#include <cmath>
 
 class Unmixer;
 
@@ -60,6 +61,29 @@ protected:
     // delete/__cxa_atexit, both of which a virtual destructor here would
     // pull in.
     ~AttitudeController() = default;
+
+    // Euler-angle rate targets → body rate targets, in place (ArduPilot
+    // AC_AttitudeControl::euler_rate_to_ang_vel). The angle loops produce
+    // roll/pitch Euler rates and the yaw stick / HeadingControl a heading
+    // rate, but the rate loops close on body p/q/r. Feeding the heading rate
+    // straight in as body r rotates a tilted vehicle about its own (tilted)
+    // z axis, which drags roll and pitch with it (pitch at -r·sinφ, roll at
+    // r·tanθ) — on Drone3 that was the roll/pitch motion on every yaw
+    // (LOG0020, +1.5° hover pitch trim) and a ~15° pitch error in a fast
+    // banked circle (q = ψ̇·sinφ ≈ 1.8 rad/s at 2.9 rad/s, 38°). Identity in
+    // level flight.
+    //   p = φ̇ − ψ̇·sinθ
+    //   q = θ̇·cosφ + ψ̇·sinφ·cosθ
+    //   r = −θ̇·sinφ + ψ̇·cosφ·cosθ
+    static void euler_rate_to_body(const float euler[3], float &roll_rate, float &pitch_rate, float &yaw_rate)
+    {
+        const float sr = sinf(euler[0]), cr = cosf(euler[0]);
+        const float sp = sinf(euler[1]), cp = cosf(euler[1]);
+        const float er = roll_rate, ep = pitch_rate, ey = yaw_rate;
+        roll_rate  = er - ey * sp;
+        pitch_rate = cr * ep + sr * cp * ey;
+        yaw_rate   = -sr * ep + cr * cp * ey;
+    }
 
     bool  _ext_yaw_rate_enabled = false;   // see set_external_yaw_rate()
     float _ext_yaw_rate         = 0.0f;    // rad/s

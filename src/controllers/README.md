@@ -526,8 +526,10 @@ Commands arrive over MAVLink (`COMMAND_LONG`, see `src/coms/README.md`), cross t
 | Stop | — | Back to plain position hold. |
 
 **Ellipse** — focus distance `f` (0 = circle): foci `|f|` from the centre, along North if `f > 0`, East if `f < 0`; `radius` is focus-to-near-end, so semi-major = `r + |f|`, semi-minor = `sqrt(r·(r + 2|f|))`.
+
+**Saddle** (`MAV_CMD_USER_5`, 31014) — a round circle whose height follows `D(θ) = D_mid + (h/2)·cos 2θ`, θ the bearing from North toward East: with `h > 0` the East/West sides are `h/2` above the commanded (mid) D and North/South `h/2` below; `h < 0` swaps them. Parameters as the circle's, with `p5` = `h` (required, `|h|` ≤ 2 m) in place of the focus distance. The approach arrives at the path's height at the entry point; the speed is capped so the climb rate stays under `SADDLE_VERT_V_MAX` (0.6 m/s) and the vertical acceleration under `SADDLE_VERT_A_MAX` (1.5 m/s²); the height wave's acceleration is fed forward to `AltControl::track()`. Its low sides must clear the floor margin. CIRCLE itself is unchanged (sim CSVs byte-identical).
 **Direction** — positive (default) is right-handed about D: yaw increasing, clockwise seen from above.
-**Speed** — the commanded speed on the gentle parts, reduced where curvature would exceed `A_LAT_MAX` or `YAW_RATE_MAX`; the tracker looks ahead and brakes at `A_TAN_MAX` before a tight section.
+**Speed** — the commanded speed on the gentle parts, reduced where curvature would exceed `A_LAT_MAX` or the per-drone `DroneConfig::heading.traj_yaw_rate_max`; the tracker looks ahead and brakes at `A_TAN_MAX` before a tight section.
 
 Rules:
 

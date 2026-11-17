@@ -12,6 +12,7 @@ the FC's telemetry UART, so point --master at whatever reaches that link
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 point --n 1.0 --yaw 90
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 1.0 --speed 0.5
     python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 circle 0.75 --focus 0.5 --dir -1
+    python3 tools/traj_cmd.py --master udp:127.0.0.1:14551 saddle 1.0 0.4 --speed 0.8
     python3 tools/traj_cmd.py --master /dev/ttyUSB0,230400 stop
 
 All positions are NED offsets in metres from the origin (D positive down, so
@@ -34,7 +35,7 @@ import time
 
 from pymavlink import mavutil
 
-CMD_SET_ORIGIN, CMD_POINT, CMD_CIRCLE, CMD_STOP = 31010, 31011, 31012, 31013   # MAV_CMD_USER_1..4
+CMD_SET_ORIGIN, CMD_POINT, CMD_CIRCLE, CMD_STOP, CMD_SADDLE = 31010, 31011, 31012, 31013, 31014   # MAV_CMD_USER_1..5
 NAN = float("nan")
 
 RESULTS = {
@@ -76,6 +77,15 @@ def main():
     c.add_argument("--dir", type=float, help="+1 clockwise seen from above (default), -1 counter-clockwise")
     c.add_argument("--speed", type=float, help="speed [m/s] (default: firmware's V_DEFAULT)")
 
+    sd = sub.add_parser("saddle", help="fly a saddle: a circle with East/West raised and North/South lowered")
+    sd.add_argument("radius", type=float, help="radius [m]")
+    sd.add_argument("height", type=float, help="height difference East minus North [m]; negative swaps them (North/South raised)")
+    sd.add_argument("--n", type=float, help="centre North offset from the origin [m] (default 0)")
+    sd.add_argument("--e", type=float, help="centre East offset [m] (default 0)")
+    sd.add_argument("--d", type=float, help="MID height as a Down offset [m], halfway between high and low (default: current altitude)")
+    sd.add_argument("--dir", type=float, help="+1 clockwise seen from above (default), -1 counter-clockwise")
+    sd.add_argument("--speed", type=float, help="speed [m/s] (default: firmware's V_DEFAULT; capped by the climb rate)")
+
     args = ap.parse_args()
 
     if args.command == "origin":
@@ -85,6 +95,9 @@ def main():
     elif args.command == "point":
         yaw = NAN if args.yaw is None else math.radians(args.yaw)
         cmd, params = CMD_POINT, [opt(args.n), opt(args.e), opt(args.d), yaw, NAN, NAN, NAN]
+    elif args.command == "saddle":
+        cmd, params = CMD_SADDLE, [args.radius, opt(args.n), opt(args.e), opt(args.d),
+                                   args.height, opt(args.dir), opt(args.speed)]
     else:
         cmd, params = CMD_CIRCLE, [args.radius, opt(args.n), opt(args.e), opt(args.d),
                                    opt(args.focus), opt(args.dir), opt(args.speed)]

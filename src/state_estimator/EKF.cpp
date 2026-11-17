@@ -554,18 +554,19 @@ void EKF::reset_yaw(float yaw_rad)
     }
 }
 
-void EKF::update_yaw(float yaw_rad, float R_var)
+EKF::YawFusion EKF::update_yaw(float yaw_rad, float R_var, float *innov_out)
 {
-    if (!_initialized) return;
+    if (!_initialized) return YawFusion::SKIPPED;
 
     // h(q) = atan2(a, b) — the same 321 yaw quat_to_euler() returns.
     const float w = _x[iQ0], x = _x[iQ1], y = _x[iQ2], z = _x[iQ3];
     const float a   = 2.0f * (w*z + x*y);
     const float b   = 1.0f - 2.0f * (y*y + z*z);
     const float den = a*a + b*b;                 // = cos²(pitch)
-    if (den < YAW_MIN_COS2_PITCH) return;
+    if (den < YAW_MIN_COS2_PITCH) return YawFusion::SKIPPED;
 
     const float innov = wrap_pi(yaw_rad - atan2f(a, b));
+    if (innov_out) *innov_out = innov;
 
     // dh/dq = (b*da/dq - a*db/dq) / (a² + b²)
     const float inv = 1.0f / den;
@@ -575,18 +576,25 @@ void EKF::update_yaw(float yaw_rad, float R_var)
     H[0][iQ2] = inv * (b * 2.0f*x + a * 4.0f*y);
     H[0][iQ3] = inv * (b * 2.0f*w + a * 4.0f*z);
 
-    // ── Chi-squared innovation gate ────────────────────────────────────────
+    // ── Chi-squared innovation gate, capped at YAW_GATE_MAX_RAD ────────────
     // H is not diagonal here, so S = H*P*H^T + R over the quaternion block.
     float S = R_var;
     for (int i = iQ0; i <= iQ3; ++i)
         for (int j = iQ0; j <= iQ3; ++j)
             S += H[0][i] * _P[i][j] * H[0][j];
-    if (S < 1e-10f || innov * innov > S * YAW_CHI2_GATE * YAW_CHI2_GATE) return;
+    if (S < 1e-10f) return YawFusion::SKIPPED;
+    const float gate = fminf(YAW_CHI2_GATE * sqrtf(S), YAW_GATE_MAX_RAD);
+    if (fabsf(innov) > gate) return YawFusion::REJECTED;
 
+    // Heading-only correction: a yaw measurement says nothing about tilt, but
+    // the plain additive quaternion update spreads its correction over every
+    // direction P couples to yaw — at 15° of tilt a 20° yaw step moved roll by
+    // 3-5° (host test 2026-11-16), and the controller chased it.
     const float R_diag[1]    = { R_var };
     const float innov_arr[1] = { innov };
-    _update(1, H, R_diag, innov_arr);
+    _update(1, H, R_diag, innov_arr, true);
     _normalize_quat();
+    return YawFusion::FUSED;
 }
 
 /* ══════════════════════════════════════════════════════════════════════════
@@ -609,7 +617,8 @@ void EKF::update_yaw(float yaw_rad, float R_var)
  *   _wB ← IKH * P   (= (I-KH)*P, before the right multiply)
  * ══════════════════════════════════════════════════════════════════════════ */
 
-void EKF::_update(int m, const float H[][N], const float R_diag[], const float innov[])
+void EKF::_update(int m, const float H[][N], const float R_diag[], const float innov[],
+                  bool yaw_only)
 {
     const int M_MAX = 6;
 
@@ -675,10 +684,40 @@ void EKF::_update(int m, const float H[][N], const float R_diag[], const float i
                 for (int j = 0; j < m; ++j) K[iBax + a][j] = 0.0f;
     }
 
+    // ── Heading-only quaternion correction (yaw_only) ─────────────────────
+    // A world-frame yaw rotation by dpsi is q' = {cos(dpsi/2), 0, 0, sin(dpsi/2)} ⊗ q
+    // (reset_yaw()'s construction), so to first order dq = G·dpsi with
+    // G = 0.5·({0,0,0,1} ⊗ q) = 0.5·(-qz, -qy, qx, qw), |G|² = 1/4. Project the
+    // quaternion rows of K onto G (projector 4·G·Gᵀ) — like the bias freeze
+    // above, a modified gain the Joseph form below stays consistent with — and
+    // keep dpsi_gain = 4·Gᵀ·K_q, the heading change per unit innovation.
+    float dpsi_gain[M_MAX] = {};
+    if (yaw_only) {
+        const Quat  q0   = _get_quat();
+        const float G[4] = { -0.5f * q0.z, -0.5f * q0.y, 0.5f * q0.x, 0.5f * q0.w };
+        for (int j = 0; j < m; ++j) {
+            float g = 0.0f;
+            for (int i = 0; i < 4; ++i) g += G[i] * K[iQ0 + i][j];
+            dpsi_gain[j] = 4.0f * g;
+            for (int i = 0; i < 4; ++i) K[iQ0 + i][j] = G[i] * dpsi_gain[j];
+        }
+    }
+
     // ── x += K * innov ────────────────────────────────────────────────────
-    for (int i = 0; i < N; ++i)
+    // yaw_only: the quaternion gets the exact rotation instead of the additive
+    // step K_q·innov (its first-order equivalent), so roll/pitch can't move at
+    // all, however large the step, and |q| stays 1.
+    for (int i = 0; i < N; ++i) {
+        if (yaw_only && i >= iQ0 && i <= iQ3) continue;
         for (int j = 0; j < m; ++j)
             _x[i] += K[i][j] * innov[j];
+    }
+    if (yaw_only) {
+        float dpsi = 0.0f;
+        for (int j = 0; j < m; ++j) dpsi += dpsi_gain[j] * innov[j];
+        const Quat q = quat_norm(quat_mul({ cosf(0.5f * dpsi), 0.0f, 0.0f, sinf(0.5f * dpsi) }, _get_quat()));
+        _x[iQ0] = q.w;  _x[iQ1] = q.x;  _x[iQ2] = q.y;  _x[iQ3] = q.z;
+    }
 
     // ── Joseph form: P = (I-KH) * P * (I-KH)^T  +  K * diag(R) * K^T ────
     // _wA = IKH = I - K*H

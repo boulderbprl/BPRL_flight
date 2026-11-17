@@ -110,6 +110,7 @@ struct AltControlGains {
 // Gains for PosControl (src/controllers/position/PosControl.hpp).
 struct PosControlGains {
     PidGains pos_N, pos_E, vel_N, vel_E;
+    float    max_lean_deg;   // deg, per-axis cap on the lean target (feed-forward + feedback); was PosControl::MAX_LEAN_deg 40
 };
 
 // Gains for HeadingControl (src/controllers/position/HeadingControl.hpp) — POS_HOLD's
@@ -120,6 +121,19 @@ struct HeadingGains {
     float max_rate;    // rad/s   cap on the heading-error trim, and on the turn rate toward a commanded heading
     float max_accel;   // rad/s²  how fast the heading target's own rate may change
     float lag_s;       // s       yaw-rate loop's response lag — measure from a log (delay between TRAJ YawR and ATT R)
+    float traj_yaw_rate_max; // rad/s TrajectoryTracker: fastest a path may ask the nose to turn (circle speed is cut to
+                             //       this × radius). Feed-forward, so not capped by max_rate — but keep it below
+                             //       max_rate so the heading-error trim still has room on top of it.
+};
+
+// Speed limits for TrajectoryTracker's circle/ellipse/saddle (see TrajectoryTracker.hpp).
+// The tracker slows the path to the smallest of v_max, sqrt(a_lat_max / curvature)
+// and heading.traj_yaw_rate_max / curvature. a_lat_max must fit inside
+// pos.max_lean_deg with room left for the feedback: g·tan(lean) at the lean
+// the turn alone would take.
+struct TrajectoryLimits {
+    float v_max;       // m/s,  cap on a commanded circle speed (was TrajectoryTracker::V_MAX 2.0)
+    float a_lat_max;   // m/s², cap on the turning (centripetal) acceleration (was TrajectoryTracker::A_LAT_MAX 2.0)
 };
 
 // RC channel index assignment (src/coms/Radio.cpp). Both SBUS and CRSF use
@@ -419,6 +433,7 @@ struct DroneConfig {
     AltControlGains   alt;
     PosControlGains   pos;
     HeadingGains      heading;
+    TrajectoryLimits  traj;         // TrajectoryTracker speed limits
     RcTransmitter     rc_tx;        // which transmitter layout in kRcMaps[] this drone flies with
     MotorMixerConfig  mixer;
     UnmixerConfig     unmixer;

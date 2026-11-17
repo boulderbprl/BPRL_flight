@@ -97,22 +97,28 @@ const DroneConfig kDroneConfig = {
         0.50f,  // hover_thr (the value every drone used before it was per-drone — measure and set)
     },
     
-    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E }
+    // .pos — PosControlGains { pos_N, pos_E, vel_N, vel_E, max_lean_deg }
     {
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_N
         { 1.0f, 0.00f, 0.000f, 0.0f, 0.0f, 0.0f,  20.0f }, // pos_E
         { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_N
         { 3.0f, 1.00f, 0.000f, 0.8f, 0.0f, 20.0f, 20.0f }, // vel_E
+        40.0f,  // max_lean_deg (PosControl's former fixed MAX_LEAN_deg)
     },
     
-    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s }
+    // .heading — HeadingGains { kp, stick_rate, max_rate, max_accel, lag_s, traj_yaw_rate_max }
     // Starting point, not flight-tuned: kp matches the heading-lock trim
     // POS_HOLD flew with before HeadingControl (yaw_hold kp 0.7 x 2.5).
     { 1.75f,   // kp
       3.0f,    // stick_rate (same full-stick rate as yaw_stick_gain above)
-      1.5f,    // max_rate (was 1.0; raised 2026-11-11 to stay above TrajectoryTracker::YAW_RATE_MAX 1.2)
+      1.5f,    // max_rate (was 1.0; raised 2026-11-11 to stay above traj_yaw_rate_max 1.2)
       4.0f,    // max_accel
-      0.16f },  // lag_s (Drone3's measured value — re-measure on this airframe)
+      0.16f,   // lag_s (Drone3's measured value — re-measure on this airframe)
+      1.2f },  // traj_yaw_rate_max — circle speed cap = this × R (was TrajectoryTracker::YAW_RATE_MAX; 2026-11-11 Drone2 circles sat on it at 0.8)
+
+    // .traj — TrajectoryLimits { v_max, a_lat_max }
+    // v_max, a_lat_max — TrajectoryTracker's former fixed V_MAX / A_LAT_MAX
+    { 2.0f, 2.0f },
 
     // .rc_tx — RcTransmitter: which transmitter's channel layout (kRcMaps[] in DroneConfig.hpp)
     RcTransmitter::TX2,  // RC controller 1 — same channels this config had before the shared maps; TODO confirm on the bench which transmitter Drone2 flies with
